@@ -1,0 +1,2 @@
+-- Stage 1 placeholder migration.
+-- Business tables will be introduced in later stages.
