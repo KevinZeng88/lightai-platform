@@ -1,0 +1,59 @@
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors / IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.local
+config.local.*
+secrets.*
+*.pem
+*.key
+
+# Logs
+*.log
+logs/
+
+# Rust
+target/
+*.rlib
+*.rmeta
+*.profraw
+
+# Node / Web
+node_modules/
+dist/
+build/
+.pnpm-store/
+.npm/
+.yarn/
+coverage/
+
+# SQLite / local databases
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+data/
+
+# Generated files
+tmp/
+temp/
+.cache/
+.out/
+bin/
+
+# Docker / local deployment
+docker-compose.override.yml
+
+# Codex / local scratch
+.codex/
