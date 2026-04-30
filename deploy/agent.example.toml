@@ -1,3 +1,14 @@
 [agent]
-listen_addr = "127.0.0.1:8081"
+listen_addr = "0.0.0.0:8081"
 server_url = "http://127.0.0.1:8080"
+node_name = "gpu-node-1"
+heartbeat_interval_secs = 15
+state_path = "data/agent-state.toml"
+
+[collectors.nvidia]
+enabled = true
+
+[collectors.custom]
+script_path = ""
+timeout_secs = 5
+max_output_bytes = 1048576

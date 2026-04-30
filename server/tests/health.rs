@@ -1,12 +1,15 @@
 use axum::body::{to_bytes, Body};
 use axum::http::{Request, StatusCode};
+use lightai_server::db;
 use lightai_server::routes;
 use serde_json::Value;
 use tower::ServiceExt;
 
 #[tokio::test]
 async fn health_returns_ok_for_server() {
-    let response = routes::app()
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    db::migrate(&pool).await.unwrap();
+    let response = routes::app(pool)
         .oneshot(
             Request::builder()
                 .uri("/health")
