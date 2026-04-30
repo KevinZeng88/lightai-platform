@@ -14,6 +14,7 @@ pub struct RegisterResponse {
     pub node_id: String,
     pub agent_token: String,
     pub heartbeat_interval_secs: u64,
+    pub agent_config: AgentConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -26,6 +27,19 @@ pub struct HeartbeatRequest {
     pub gpus: Vec<GpuMetrics>,
     #[serde(default)]
     pub collector_errors: Vec<String>,
+    pub agent_config: Option<AgentConfig>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct AgentConfig {
+    pub config_version: i64,
+    pub heartbeat_interval_secs: u64,
+    pub metrics_sample_interval_secs: u64,
+    pub task_poll_interval_secs: u64,
+    pub config_refresh_interval_secs: u64,
+    pub command_timeout_secs: u64,
+    pub environment_check_timeout_secs: u64,
+    pub last_config_updated_at: Option<i64>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -57,6 +71,7 @@ pub struct GpuMetrics {
 #[derive(Debug, Serialize)]
 pub struct HeartbeatResponse {
     pub status: &'static str,
+    pub agent_config: AgentConfig,
 }
 
 #[derive(Debug, Serialize)]
@@ -77,6 +92,7 @@ pub struct NodeView {
     pub updated_at: i64,
     pub last_heartbeat_at: Option<i64>,
     pub metrics: Option<NodeMetrics>,
+    pub agent_config: Option<AgentConfig>,
     pub gpus: Vec<GpuView>,
 }
 
@@ -145,4 +161,171 @@ pub struct GpuMetricSample {
     pub utilization_percent: Option<f64>,
     pub temperature_celsius: Option<f64>,
     pub power_watts: Option<f64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RuntimeEnvironmentRequest {
+    pub name: String,
+    pub backend: String,
+    pub deploy_type: String,
+    pub version: Option<String>,
+    pub base_url: Option<String>,
+    pub health_url: Option<String>,
+    pub binary_path: Option<String>,
+    pub docker_image: Option<String>,
+    pub working_dir: Option<String>,
+    pub log_dir: Option<String>,
+    pub allowed_model_dirs_json: Option<String>,
+    pub config_json: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuntimeEnvironmentView {
+    pub id: String,
+    pub node_id: Option<String>,
+    pub name: String,
+    pub backend: String,
+    pub deploy_type: String,
+    pub version: Option<String>,
+    pub base_url: Option<String>,
+    pub health_url: Option<String>,
+    pub binary_path: Option<String>,
+    pub docker_image: Option<String>,
+    pub working_dir: Option<String>,
+    pub log_dir: Option<String>,
+    pub allowed_model_dirs_json: Option<String>,
+    pub config_json: Option<String>,
+    pub enabled: bool,
+    pub last_checked_at: Option<i64>,
+    pub check_status: Option<String>,
+    pub check_message: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct RuntimeEnvironmentListResponse {
+    pub runtime_environments: Vec<RuntimeEnvironmentView>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModelRequest {
+    pub name: String,
+    pub display_name: Option<String>,
+    pub model_type: String,
+    pub model_path: Option<String>,
+    pub description: Option<String>,
+    pub default_backend: Option<String>,
+    pub config_json: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModelView {
+    pub id: String,
+    pub name: String,
+    pub display_name: Option<String>,
+    pub model_type: String,
+    pub model_path: Option<String>,
+    pub description: Option<String>,
+    pub default_backend: Option<String>,
+    pub config_json: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub deleted_at: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModelListResponse {
+    pub models: Vec<ModelView>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModelInstanceCreateRequest {
+    pub model_id: String,
+    pub node_id: Option<String>,
+    pub runtime_environment_id: Option<String>,
+    pub name: String,
+    pub backend: Option<String>,
+    pub base_url: Option<String>,
+    pub endpoint_url: Option<String>,
+    pub health_url: Option<String>,
+    pub runtime_version: Option<String>,
+    pub model_name: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub params_json: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModelInstanceUpdateRequest {
+    pub name: Option<String>,
+    pub backend: Option<String>,
+    pub base_url: Option<String>,
+    pub endpoint_url: Option<String>,
+    pub health_url: Option<String>,
+    pub runtime_version: Option<String>,
+    pub model_name: Option<String>,
+    pub description: Option<String>,
+    pub status: Option<String>,
+    pub params_json: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModelInstanceView {
+    pub id: String,
+    pub model_id: String,
+    pub model_definition_name: Option<String>,
+    pub node_id: Option<String>,
+    pub node_name: Option<String>,
+    pub runtime_environment_id: Option<String>,
+    pub runtime_environment_name: Option<String>,
+    pub name: String,
+    pub backend: String,
+    pub deploy_type: String,
+    pub status: String,
+    pub base_url: Option<String>,
+    pub endpoint_url: Option<String>,
+    pub health_url: Option<String>,
+    pub runtime_version: Option<String>,
+    pub model_name: Option<String>,
+    pub description: Option<String>,
+    pub params_json: Option<String>,
+    pub last_checked_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModelInstanceListResponse {
+    pub model_instances: Vec<ModelInstanceView>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModelFileTrashRequest {
+    pub node_id: Option<String>,
+    pub path: String,
+    pub reason: Option<String>,
+    pub note: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModelFileTrashView {
+    pub id: String,
+    pub model_id: Option<String>,
+    pub model_name: Option<String>,
+    pub node_id: Option<String>,
+    pub node_name: Option<String>,
+    pub path: String,
+    pub reason: Option<String>,
+    pub status: String,
+    pub note: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModelFileTrashListResponse {
+    pub items: Vec<ModelFileTrashView>,
 }

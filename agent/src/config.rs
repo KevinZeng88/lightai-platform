@@ -6,6 +6,11 @@ pub struct Config {
     pub server_url: String,
     pub node_name: String,
     pub heartbeat_interval_secs: u64,
+    pub metrics_sample_interval_secs: u64,
+    pub task_poll_interval_secs: u64,
+    pub config_refresh_interval_secs: u64,
+    pub command_timeout_secs: u64,
+    pub environment_check_timeout_secs: u64,
     pub state_path: String,
     pub nvidia_collector_enabled: bool,
     pub custom_collector_script: Option<String>,
@@ -20,6 +25,11 @@ impl Default for Config {
             server_url: "http://127.0.0.1:8080".to_string(),
             node_name: hostname(),
             heartbeat_interval_secs: 15,
+            metrics_sample_interval_secs: 15,
+            task_poll_interval_secs: 15,
+            config_refresh_interval_secs: 60,
+            command_timeout_secs: 5,
+            environment_check_timeout_secs: 5,
             state_path: "data/agent-state.toml".to_string(),
             nvidia_collector_enabled: true,
             custom_collector_script: None,
@@ -54,6 +64,21 @@ impl Config {
             }
             if let Some(value) = agent.heartbeat_interval_secs {
                 config.heartbeat_interval_secs = value;
+            }
+            if let Some(value) = agent.metrics_sample_interval_secs {
+                config.metrics_sample_interval_secs = value;
+            }
+            if let Some(value) = agent.task_poll_interval_secs {
+                config.task_poll_interval_secs = value;
+            }
+            if let Some(value) = agent.config_refresh_interval_secs {
+                config.config_refresh_interval_secs = value;
+            }
+            if let Some(value) = agent.command_timeout_secs {
+                config.command_timeout_secs = value;
+            }
+            if let Some(value) = agent.environment_check_timeout_secs {
+                config.environment_check_timeout_secs = value;
             }
             if let Some(value) = agent.state_path {
                 config.state_path = value;
@@ -95,6 +120,11 @@ struct AgentSection {
     server_url: Option<String>,
     node_name: Option<String>,
     heartbeat_interval_secs: Option<u64>,
+    metrics_sample_interval_secs: Option<u64>,
+    task_poll_interval_secs: Option<u64>,
+    config_refresh_interval_secs: Option<u64>,
+    command_timeout_secs: Option<u64>,
+    environment_check_timeout_secs: Option<u64>,
     state_path: Option<String>,
 }
 

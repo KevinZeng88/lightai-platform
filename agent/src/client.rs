@@ -1,4 +1,4 @@
-use crate::models::{HeartbeatRequest, RegisterRequest, RegisterResponse};
+use crate::models::{HeartbeatRequest, HeartbeatResponse, RegisterRequest, RegisterResponse};
 
 #[derive(Clone)]
 pub struct ServerClient {
@@ -26,8 +26,13 @@ impl ServerClient {
         Ok(response.json().await?)
     }
 
-    pub async fn heartbeat(&self, token: &str, request: &HeartbeatRequest) -> anyhow::Result<()> {
-        self.client
+    pub async fn heartbeat(
+        &self,
+        token: &str,
+        request: &HeartbeatRequest,
+    ) -> anyhow::Result<HeartbeatResponse> {
+        let response = self
+            .client
             .post(format!("{}/api/agent/heartbeat", self.base_url))
             .bearer_auth(token)
             .json(request)
@@ -35,6 +40,6 @@ impl ServerClient {
             .await?
             .error_for_status()?;
 
-        Ok(())
+        Ok(response.json().await?)
     }
 }

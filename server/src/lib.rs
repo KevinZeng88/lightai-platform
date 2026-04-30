@@ -1,6 +1,8 @@
 pub mod auth;
 pub mod config;
 pub mod db;
+pub mod http_check;
 pub mod models;
 pub mod repository;
 pub mod routes;
+pub mod stage3a;

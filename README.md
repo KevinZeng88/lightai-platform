@@ -1,6 +1,6 @@
 # LightAI Platform
 
-LightAI Platform 是一个轻量级私有 GPU 模型服务管理平台。当前实现包含基础 monorepo、Server/Agent 健康检查、节点注册、Agent 心跳、基础指标采集、GPU 状态采集、SQLite 状态保存和 Web 节点看板。
+LightAI Platform 是一个轻量级私有 GPU 模型服务管理平台。当前实现包含基础 monorepo、Server/Agent 健康检查、节点注册、Agent 心跳、基础指标采集、GPU 状态采集、SQLite 状态保存、Web 节点看板、模型定义管理和 External 模型服务接入。
 
 ## Stage 1 范围
 
@@ -197,9 +197,79 @@ curl "http://127.0.0.1:8080/api/nodes/<node_id>/gpus/<gpu_key>/metrics?from=$FRO
 scripts/dev_check_nvidia.sh
 ```
 
-## 当前 MVP/Stage 2 未实现，未来可扩展
+## Stage 3A 模型与 External 接入
 
-- 模型生命周期管理
+Stage 3A 支持模型定义管理、External 模型实例接入、运行环境登记和模型文件垃圾箱入口。
+
+External 表示接入已有模型服务，平台不负责启动进程，也不要求先登记运行环境或绑定节点。创建流程：
+
+1. 在 Web 的“模型”页面创建模型定义。
+2. 在“实例”页面创建 External 模型实例。
+3. 填写 `backend`、`base_url`、`health_url`、`endpoint_url`、`model_name` 等外部服务信息。
+4. 点击“检查状态”，Server 会按 `health_url`、`endpoint_url`、`base_url` 的顺序检查可访问性。
+
+HTTP 2xx/3xx 视为 `running`，请求失败或非成功状态视为 `failed`，没有可检查 URL 时视为 `unknown`。检查请求有超时，避免外部服务不可达时长时间阻塞。
+
+“运行环境”页面保留为高级配置，用于描述节点本地运行能力，主要服务后续 Docker / Script 部署。Docker / Script 运行环境必须绑定节点，并要求节点 Agent 在线。本阶段不会由 Server 主动连接 Agent，也不会启动 Docker 或 Script。
+
+模型文件垃圾箱只是待清理记录：
+
+- 删除模型配置不会删除磁盘模型文件。
+- 加入模型文件垃圾箱也不会立即删除文件。
+- 后续物理删除必须由 Agent 在受控目录范围内执行。
+
+## 本机 llama.cpp External 验证
+
+本阶段不会启动 llama.cpp，只接入你已手工启动的服务。
+
+1. 手工启动 llama-server：
+
+```bash
+llama-server -m /path/to/model.gguf --host 0.0.0.0 --port 8088
+```
+
+2. 优先使用 health URL：
+
+```text
+http://127.0.0.1:8088/health
+```
+
+如果 `/health` 不可用，可以使用：
+
+```text
+http://127.0.0.1:8088/v1/models
+```
+
+3. 在平台中创建模型定义，然后创建 External 模型实例：
+
+- `backend = llama_cpp`
+- `base_url = http://127.0.0.1:8088`
+- `health_url = http://127.0.0.1:8088/v1/models`
+- `model_name = 自定义测试名称`
+
+点击“检查状态”后，如果 llama-server 可访问，应显示 `running`。
+
+## Agent 配置下发
+
+Agent 仍然采用主动连接模式：注册 Server、发送 heartbeat、上报指标和状态。Server 不主动直连 Agent。
+
+Server 在 register 和 heartbeat 响应中下发轻量 Agent 配置：
+
+- `heartbeat_interval_secs`
+- `metrics_sample_interval_secs`
+- `task_poll_interval_secs`
+- `config_refresh_interval_secs`
+- `command_timeout_secs`
+- `environment_check_timeout_secs`
+- `config_version`
+
+Agent 本地配置作为启动默认值；Server 下发配置优先。Agent heartbeat 会上报当前实际生效配置，Web 节点列表中会展示心跳间隔、采样间隔和配置版本。
+
+未来运行环境检查将通过 Agent 主动拉取任务实现。检查动作必须是内置固定动作，例如 `ollama --version`、`llama-server --version` 或固定 HTTP endpoint；不接受前端传入任意命令，不通过 shell 拼接命令，检查超时必须可控。
+
+## 当前未实现，未来可扩展
+
+- Docker / Script 模型启动
 - OpenAI-compatible API gateway
 - API Key 管理
 - 使用量统计和计费规则

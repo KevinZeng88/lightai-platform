@@ -3,13 +3,14 @@ use uuid::Uuid;
 
 use crate::auth;
 use crate::models::{
-    GpuMetricSample, GpuMetricSamplesResponse, GpuMetrics, GpuView, HeartbeatRequest,
+    AgentConfig, GpuMetricSample, GpuMetricSamplesResponse, GpuMetrics, GpuView, HeartbeatRequest,
     NodeListResponse, NodeMetricSample, NodeMetricSamplesResponse, NodeMetrics, NodeView,
     RegisterRequest, RegisterResponse,
 };
 
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
-const ONLINE_THRESHOLD_SECS: i64 = 60;
+pub const ONLINE_THRESHOLD_SECS: i64 = 60;
+const AGENT_CONFIG_VERSION: i64 = 1;
 
 pub async fn register_node(
     pool: &SqlitePool,
@@ -47,6 +48,7 @@ pub async fn register_node(
         node_id,
         agent_token: token,
         heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
+        agent_config: default_agent_config(now),
     })
 }
 
@@ -68,6 +70,7 @@ pub async fn authenticate_node(
 pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> anyhow::Result<()> {
     let now = now_unix_secs();
     let errors_json = serde_json::to_string(&request.collector_errors)?;
+    let agent_config = request.agent_config.clone();
     let mut tx = pool.begin().await?;
 
     sqlx::query(
@@ -87,9 +90,12 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
         r#"
         INSERT INTO node_status (
             node_id, cpu_usage_percent, memory_total_bytes, memory_used_bytes,
-            disk_total_bytes, disk_used_bytes, collector_errors_json, updated_at
+            disk_total_bytes, disk_used_bytes, collector_errors_json, updated_at,
+            agent_config_version, heartbeat_interval_secs, metrics_sample_interval_secs,
+            task_poll_interval_secs, config_refresh_interval_secs, command_timeout_secs,
+            environment_check_timeout_secs, last_config_updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(node_id) DO UPDATE SET
             cpu_usage_percent = excluded.cpu_usage_percent,
             memory_total_bytes = excluded.memory_total_bytes,
@@ -97,7 +103,15 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
             disk_total_bytes = excluded.disk_total_bytes,
             disk_used_bytes = excluded.disk_used_bytes,
             collector_errors_json = excluded.collector_errors_json,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            agent_config_version = excluded.agent_config_version,
+            heartbeat_interval_secs = excluded.heartbeat_interval_secs,
+            metrics_sample_interval_secs = excluded.metrics_sample_interval_secs,
+            task_poll_interval_secs = excluded.task_poll_interval_secs,
+            config_refresh_interval_secs = excluded.config_refresh_interval_secs,
+            command_timeout_secs = excluded.command_timeout_secs,
+            environment_check_timeout_secs = excluded.environment_check_timeout_secs,
+            last_config_updated_at = excluded.last_config_updated_at
         "#,
     )
     .bind(&request.node_id)
@@ -108,6 +122,38 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
     .bind(request.metrics.disk_used_bytes)
     .bind(errors_json)
     .bind(request.sampled_at)
+    .bind(agent_config.as_ref().map(|config| config.config_version))
+    .bind(
+        agent_config
+            .as_ref()
+            .map(|config| config.heartbeat_interval_secs as i64),
+    )
+    .bind(
+        agent_config
+            .as_ref()
+            .map(|config| config.metrics_sample_interval_secs as i64),
+    )
+    .bind(
+        agent_config
+            .as_ref()
+            .map(|config| config.task_poll_interval_secs as i64),
+    )
+    .bind(
+        agent_config
+            .as_ref()
+            .map(|config| config.config_refresh_interval_secs as i64),
+    )
+    .bind(
+        agent_config
+            .as_ref()
+            .map(|config| config.command_timeout_secs as i64),
+    )
+    .bind(
+        agent_config
+            .as_ref()
+            .map(|config| config.environment_check_timeout_secs as i64),
+    )
+    .bind(agent_config.and_then(|config| config.last_config_updated_at))
     .execute(&mut *tx)
     .await?;
 
@@ -224,7 +270,11 @@ pub async fn list_nodes(pool: &SqlitePool) -> anyhow::Result<NodeListResponse> {
         SELECT n.id, n.name, n.hostname, n.agent_version, n.os, n.arch,
                n.registered_at, n.updated_at, n.last_heartbeat_at,
                s.cpu_usage_percent, s.memory_total_bytes, s.memory_used_bytes,
-               s.disk_total_bytes, s.disk_used_bytes
+               s.disk_total_bytes, s.disk_used_bytes,
+               s.agent_config_version, s.heartbeat_interval_secs,
+               s.metrics_sample_interval_secs, s.task_poll_interval_secs,
+               s.config_refresh_interval_secs, s.command_timeout_secs,
+               s.environment_check_timeout_secs, s.last_config_updated_at
         FROM nodes n
         LEFT JOIN node_status s ON s.node_id = n.id
         ORDER BY n.name
@@ -250,6 +300,35 @@ pub async fn list_nodes(pool: &SqlitePool) -> anyhow::Result<NodeListResponse> {
                 disk_total_bytes: row.get("disk_total_bytes"),
                 disk_used_bytes: row.get("disk_used_bytes"),
             });
+        let agent_config = row
+            .try_get::<Option<i64>, _>("agent_config_version")
+            .ok()
+            .flatten()
+            .map(|config_version| AgentConfig {
+                config_version,
+                heartbeat_interval_secs: row
+                    .get::<Option<i64>, _>("heartbeat_interval_secs")
+                    .unwrap_or(HEARTBEAT_INTERVAL_SECS as i64)
+                    as u64,
+                metrics_sample_interval_secs: row
+                    .get::<Option<i64>, _>("metrics_sample_interval_secs")
+                    .unwrap_or(HEARTBEAT_INTERVAL_SECS as i64)
+                    as u64,
+                task_poll_interval_secs: row
+                    .get::<Option<i64>, _>("task_poll_interval_secs")
+                    .unwrap_or(HEARTBEAT_INTERVAL_SECS as i64)
+                    as u64,
+                config_refresh_interval_secs: row
+                    .get::<Option<i64>, _>("config_refresh_interval_secs")
+                    .unwrap_or(60) as u64,
+                command_timeout_secs: row
+                    .get::<Option<i64>, _>("command_timeout_secs")
+                    .unwrap_or(5) as u64,
+                environment_check_timeout_secs: row
+                    .get::<Option<i64>, _>("environment_check_timeout_secs")
+                    .unwrap_or(5) as u64,
+                last_config_updated_at: row.get("last_config_updated_at"),
+            });
 
         let status = match last_heartbeat_at {
             Some(last_seen) if now - last_seen <= ONLINE_THRESHOLD_SECS => "online",
@@ -270,6 +349,7 @@ pub async fn list_nodes(pool: &SqlitePool) -> anyhow::Result<NodeListResponse> {
             updated_at: row.get("updated_at"),
             last_heartbeat_at,
             metrics,
+            agent_config,
             gpus,
         });
     }
@@ -426,4 +506,17 @@ fn now_unix_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+pub fn default_agent_config(updated_at: i64) -> AgentConfig {
+    AgentConfig {
+        config_version: AGENT_CONFIG_VERSION,
+        heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
+        metrics_sample_interval_secs: HEARTBEAT_INTERVAL_SECS,
+        task_poll_interval_secs: 15,
+        config_refresh_interval_secs: 60,
+        command_timeout_secs: 5,
+        environment_check_timeout_secs: 5,
+        last_config_updated_at: Some(updated_at),
+    }
 }

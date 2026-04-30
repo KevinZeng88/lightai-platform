@@ -784,6 +784,7 @@ dependencies = [
  "base64",
  "constant_time_eq",
  "rand",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2",

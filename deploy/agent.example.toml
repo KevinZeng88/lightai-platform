@@ -3,6 +3,11 @@ listen_addr = "0.0.0.0:8081"
 server_url = "http://127.0.0.1:8080"
 node_name = "gpu-node-1"
 heartbeat_interval_secs = 15
+metrics_sample_interval_secs = 15
+task_poll_interval_secs = 15
+config_refresh_interval_secs = 60
+command_timeout_secs = 5
+environment_check_timeout_secs = 5
 state_path = "data/agent-state.toml"
 
 [collectors.nvidia]

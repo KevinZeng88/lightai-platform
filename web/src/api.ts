@@ -1,4 +1,50 @@
-import type { GpuMetricSample, MetricSampleResponse, NodeMetricSample, NodeStatus } from './types'
+import type {
+  GpuMetricSample,
+  MetricSampleResponse,
+  ModelDefinition,
+  ModelFileTrashItem,
+  ModelInstance,
+  NodeMetricSample,
+  NodeStatus,
+  RuntimeEnvironment
+} from './types'
+
+async function readJson<T>(response: Response, fallback: string): Promise<T> {
+  if (!response.ok) {
+    let message = fallback
+    try {
+      const payload = await response.json()
+      message = payload.message ?? payload.error ?? message
+    } catch {
+      message = `${fallback}: ${response.status}`
+    }
+    throw new Error(message)
+  }
+  return response.json()
+}
+
+async function sendJson<T>(url: string, method: string, body?: unknown): Promise<T> {
+  const response = await fetch(url, {
+    method,
+    headers: body == null ? undefined : { 'Content-Type': 'application/json' },
+    body: body == null ? undefined : JSON.stringify(body)
+  })
+  return readJson<T>(response, `${method} ${url} failed`)
+}
+
+async function sendEmpty(url: string, method: string): Promise<void> {
+  const response = await fetch(url, { method })
+  if (!response.ok) {
+    let message = `${method} ${url} failed: ${response.status}`
+    try {
+      const payload = await response.json()
+      message = payload.message ?? payload.error ?? message
+    } catch {
+      // Keep status-only message.
+    }
+    throw new Error(message)
+  }
+}
 
 export async function fetchNodes(): Promise<NodeStatus[]> {
   const response = await fetch('/api/nodes')
@@ -22,18 +68,131 @@ export async function fetchNodeMetrics(
   return payload
 }
 
+export async function fetchRuntimeEnvironments(): Promise<RuntimeEnvironment[]> {
+  const payload = await sendJson<{ runtime_environments: RuntimeEnvironment[] }>(
+    '/api/runtime-environments',
+    'GET'
+  )
+  return payload.runtime_environments
+}
+
+export async function createRuntimeEnvironment(
+  nodeId: string,
+  payload: Partial<RuntimeEnvironment>
+): Promise<RuntimeEnvironment> {
+  return sendJson(`/api/nodes/${nodeId}/runtime-environments`, 'POST', payload)
+}
+
+export async function updateRuntimeEnvironment(
+  id: string,
+  payload: Partial<RuntimeEnvironment>
+): Promise<RuntimeEnvironment> {
+  return sendJson(`/api/runtime-environments/${id}`, 'PUT', payload)
+}
+
+export async function deleteRuntimeEnvironment(id: string): Promise<void> {
+  await sendEmpty(`/api/runtime-environments/${id}`, 'DELETE')
+}
+
+export async function checkRuntimeEnvironment(id: string): Promise<RuntimeEnvironment> {
+  return sendJson(`/api/runtime-environments/${id}/check`, 'POST')
+}
+
+export async function fetchModels(): Promise<ModelDefinition[]> {
+  const payload = await sendJson<{ models: ModelDefinition[] }>('/api/models', 'GET')
+  return payload.models
+}
+
+export async function createModel(payload: Partial<ModelDefinition>): Promise<ModelDefinition> {
+  return sendJson('/api/models', 'POST', payload)
+}
+
+export async function updateModel(
+  id: string,
+  payload: Partial<ModelDefinition>
+): Promise<ModelDefinition> {
+  return sendJson(`/api/models/${id}`, 'PUT', payload)
+}
+
+export async function deleteModel(id: string): Promise<void> {
+  await sendEmpty(`/api/models/${id}`, 'DELETE')
+}
+
+export async function fetchModelInstances(): Promise<ModelInstance[]> {
+  const payload = await sendJson<{ model_instances: ModelInstance[] }>(
+    '/api/model-instances',
+    'GET'
+  )
+  return payload.model_instances
+}
+
+export async function createModelInstance(payload: {
+  model_id: string
+  node_id?: string | null
+  runtime_environment_id?: string | null
+  name: string
+  backend?: string | null
+  base_url?: string | null
+  endpoint_url?: string | null
+  health_url?: string | null
+  runtime_version?: string | null
+  model_name?: string | null
+  description?: string | null
+  status?: string | null
+  params_json?: string | null
+}): Promise<ModelInstance> {
+  return sendJson('/api/model-instances', 'POST', payload)
+}
+
+export async function updateModelInstance(
+  id: string,
+  payload: Partial<ModelInstance>
+): Promise<ModelInstance> {
+  return sendJson(`/api/model-instances/${id}`, 'PUT', payload)
+}
+
+export async function deleteModelInstance(id: string): Promise<void> {
+  await sendEmpty(`/api/model-instances/${id}`, 'DELETE')
+}
+
+export async function checkModelInstance(id: string): Promise<ModelInstance> {
+  return sendJson(`/api/model-instances/${id}/check`, 'POST')
+}
+
+export async function fetchModelFileTrash(): Promise<ModelFileTrashItem[]> {
+  const payload = await sendJson<{ items: ModelFileTrashItem[] }>('/api/model-file-trash', 'GET')
+  return payload.items
+}
+
+export async function addModelFileTrash(
+  modelId: string,
+  payload: {
+    node_id?: string | null
+    path: string
+    reason?: string | null
+    note?: string | null
+  }
+): Promise<ModelFileTrashItem> {
+  return sendJson(`/api/models/${modelId}/file-trash`, 'POST', payload)
+}
+
 export async function fetchGpuMetrics(
   nodeId: string,
   gpuKey: string,
   from: number,
   to: number
 ): Promise<MetricSampleResponse<GpuMetricSample>> {
+  const url = gpuMetricsUrl(nodeId, gpuKey, from, to)
   const response = await fetch(
-    `/api/nodes/${nodeId}/gpus/${encodeURIComponent(gpuKey)}/metrics?from=${from}&to=${to}`
+    url
   )
   if (!response.ok) {
     throw new Error(`Failed to fetch GPU metrics: ${response.status}`)
   }
   const payload = await response.json()
   return payload
+}
+
+export function gpuMetricsUrl(nodeId: string, gpuKey: string, from: number, to: number) {
+  return `/api/nodes/${nodeId}/gpus/${encodeURIComponent(gpuKey)}/metrics?from=${from}&to=${to}`
 }
