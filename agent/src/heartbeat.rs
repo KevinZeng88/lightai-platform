@@ -1,3 +1,6 @@
+use std::sync::Arc;
+
+use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
 use crate::client::ServerClient;
@@ -7,19 +10,20 @@ use crate::metrics::MetricsCollector;
 use crate::models::{AgentConfig, HeartbeatRequest, RegisterRequest};
 use crate::state::{self, AgentState};
 
-pub async fn run(config: Config) {
+pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
     let mut metrics_collector = MetricsCollector::new();
-    let mut runtime_config = RuntimeConfig::from_config(&config);
 
     loop {
-        let sleep_secs = match run_once(&config, &runtime_config, &mut metrics_collector).await {
+        let snapshot = runtime_config.read().await.clone();
+        let sleep_secs = match run_once(&config, &snapshot, &mut metrics_collector).await {
             Ok(next_config) => {
-                runtime_config.apply_server_config(next_config);
-                runtime_config.heartbeat_interval_secs
+                let mut runtime = runtime_config.write().await;
+                runtime.apply_server_config(next_config);
+                runtime.heartbeat_interval_secs
             }
             Err(error) => {
                 tracing::warn!(%error, "heartbeat cycle failed");
-                runtime_config.heartbeat_interval_secs
+                snapshot.heartbeat_interval_secs
             }
         };
         sleep(Duration::from_secs(sleep_secs)).await;
@@ -42,7 +46,7 @@ async fn run_once(
         }
     };
 
-    let (gpus, collector_errors) = gpu::collect_gpus(config).await;
+    let (gpus, collector_errors) = gpu::collect_gpus(&runtime_config.to_collector_config()).await;
     let request = HeartbeatRequest {
         node_id: agent_state.node_id.clone(),
         sampled_at: now_unix_secs(),
@@ -95,12 +99,7 @@ async fn register(client: &ServerClient, config: &Config) -> anyhow::Result<Regi
         agent_config: response.agent_config.unwrap_or_else(|| AgentConfig {
             config_version: 0,
             heartbeat_interval_secs: response.heartbeat_interval_secs,
-            metrics_sample_interval_secs: config.metrics_sample_interval_secs,
-            task_poll_interval_secs: config.task_poll_interval_secs,
-            config_refresh_interval_secs: config.config_refresh_interval_secs,
-            command_timeout_secs: config.command_timeout_secs,
-            environment_check_timeout_secs: config.environment_check_timeout_secs,
-            last_config_updated_at: None,
+            ..AgentConfig::default()
         }),
     })
 }
@@ -117,25 +116,35 @@ pub struct RuntimeConfig {
     pub config_version: i64,
     pub heartbeat_interval_secs: u64,
     pub metrics_sample_interval_secs: u64,
-    pub task_poll_interval_secs: u64,
-    pub config_refresh_interval_secs: u64,
     pub command_timeout_secs: u64,
     pub environment_check_timeout_secs: u64,
+    pub allowed_model_dirs: Vec<String>,
+    pub nvidia_collector_enabled: bool,
+    pub custom_collector_script: Option<String>,
+    pub collector_timeout_secs: u64,
+    pub collector_max_output_bytes: usize,
     pub last_config_updated_at: Option<i64>,
 }
 
 impl RuntimeConfig {
-    pub fn from_config(config: &Config) -> Self {
+    pub fn default_effective() -> Self {
         Self {
             config_version: 0,
-            heartbeat_interval_secs: config.heartbeat_interval_secs,
-            metrics_sample_interval_secs: config.metrics_sample_interval_secs,
-            task_poll_interval_secs: config.task_poll_interval_secs,
-            config_refresh_interval_secs: config.config_refresh_interval_secs,
-            command_timeout_secs: config.command_timeout_secs,
-            environment_check_timeout_secs: config.environment_check_timeout_secs,
+            heartbeat_interval_secs: 15,
+            metrics_sample_interval_secs: 15,
+            command_timeout_secs: 5,
+            environment_check_timeout_secs: 5,
+            allowed_model_dirs: Vec::new(),
+            nvidia_collector_enabled: true,
+            custom_collector_script: None,
+            collector_timeout_secs: 5,
+            collector_max_output_bytes: 1024 * 1024,
             last_config_updated_at: None,
         }
+    }
+
+    pub fn from_config(_config: &Config) -> Self {
+        Self::default_effective()
     }
 
     pub fn apply_server_config(&mut self, config: Option<AgentConfig>) {
@@ -146,10 +155,13 @@ impl RuntimeConfig {
             self.config_version = config.config_version;
             self.heartbeat_interval_secs = config.heartbeat_interval_secs;
             self.metrics_sample_interval_secs = config.metrics_sample_interval_secs;
-            self.task_poll_interval_secs = config.task_poll_interval_secs;
-            self.config_refresh_interval_secs = config.config_refresh_interval_secs;
             self.command_timeout_secs = config.command_timeout_secs;
             self.environment_check_timeout_secs = config.environment_check_timeout_secs;
+            self.allowed_model_dirs = config.allowed_model_dirs;
+            self.nvidia_collector_enabled = config.nvidia_collector_enabled;
+            self.custom_collector_script = config.custom_collector_script;
+            self.collector_timeout_secs = config.collector_timeout_secs;
+            self.collector_max_output_bytes = config.collector_max_output_bytes;
             self.last_config_updated_at = config.last_config_updated_at;
         }
     }
@@ -159,11 +171,25 @@ impl RuntimeConfig {
             config_version: self.config_version,
             heartbeat_interval_secs: self.heartbeat_interval_secs,
             metrics_sample_interval_secs: self.metrics_sample_interval_secs,
-            task_poll_interval_secs: self.task_poll_interval_secs,
-            config_refresh_interval_secs: self.config_refresh_interval_secs,
+            task_poll_interval_secs: 15,
+            config_refresh_interval_secs: 60,
             command_timeout_secs: self.command_timeout_secs,
             environment_check_timeout_secs: self.environment_check_timeout_secs,
+            allowed_model_dirs: self.allowed_model_dirs.clone(),
+            nvidia_collector_enabled: self.nvidia_collector_enabled,
+            custom_collector_script: self.custom_collector_script.clone(),
+            collector_timeout_secs: self.collector_timeout_secs,
+            collector_max_output_bytes: self.collector_max_output_bytes,
             last_config_updated_at: self.last_config_updated_at,
+        }
+    }
+
+    pub fn to_collector_config(&self) -> gpu::CollectorConfig {
+        gpu::CollectorConfig {
+            nvidia_collector_enabled: self.nvidia_collector_enabled,
+            custom_collector_script: self.custom_collector_script.clone(),
+            collector_timeout_secs: self.collector_timeout_secs,
+            collector_max_output_bytes: self.collector_max_output_bytes,
         }
     }
 }

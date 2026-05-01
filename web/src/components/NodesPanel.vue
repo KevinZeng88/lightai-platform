@@ -75,7 +75,12 @@
         <template #default="{ row }">{{ row.agent_config?.metrics_sample_interval_secs ?? '-' }}s</template>
       </el-table-column>
       <el-table-column label="配置版本" width="110">
-        <template #default="{ row }">{{ row.agent_config?.config_version ?? '-' }}</template>
+        <template #default="{ row }">{{ row.effective_agent_config.config_version }}</template>
+      </el-table-column>
+      <el-table-column label="同步状态" width="110">
+        <template #default="{ row }">
+          <el-tag :type="syncType(row.config_sync_status)">{{ syncLabel(row.config_sync_status) }}</el-tag>
+        </template>
       </el-table-column>
       <el-table-column label="选择" width="90" fixed="right">
         <template #default="{ row }">
@@ -83,6 +88,46 @@
         </template>
       </el-table-column>
     </el-table>
+  </el-card>
+
+  <el-card v-if="selectedNode" shadow="never" class="section-card">
+    <template #header>Agent 生效配置 · {{ selectedNode.name }}</template>
+    <div class="detail-grid">
+      <div>
+        <span class="muted">Server 生效版本</span>
+        <p>{{ selectedNode.effective_agent_config.config_version }}</p>
+      </div>
+      <div>
+        <span class="muted">Agent 上报版本</span>
+        <p>{{ selectedNode.agent_config?.config_version ?? '-' }}</p>
+      </div>
+      <div>
+        <span class="muted">同步状态</span>
+        <p>{{ syncLabel(selectedNode.config_sync_status) }}</p>
+      </div>
+      <div>
+        <span class="muted">心跳 / 采样</span>
+        <p>{{ selectedNode.effective_agent_config.heartbeat_interval_secs }}s / {{ selectedNode.effective_agent_config.metrics_sample_interval_secs }}s</p>
+      </div>
+      <div>
+        <span class="muted">命令 / 环境检查超时</span>
+        <p>{{ selectedNode.effective_agent_config.command_timeout_secs }}s / {{ selectedNode.effective_agent_config.environment_check_timeout_secs }}s</p>
+      </div>
+      <div>
+        <span class="muted">采集器</span>
+        <p>{{ selectedNode.effective_agent_config.nvidia_collector_enabled ? 'NVIDIA 启用' : 'NVIDIA 禁用' }}</p>
+      </div>
+      <div class="wide-detail">
+        <span class="muted">Allowed dirs</span>
+        <p>{{ selectedNode.effective_agent_config.allowed_model_dirs.join(', ') || '未配置，物理删除会被拒绝' }}</p>
+      </div>
+    </div>
+    <el-alert
+      title="本页策略字段可在线生效；Agent bootstrap 字段（Server 地址、节点标识、state、health 监听）需要重启 Agent。"
+      type="info"
+      show-icon
+      class="history-alert"
+    />
   </el-card>
 
   <el-card v-if="selectedNode" shadow="never" class="section-card">
@@ -352,5 +397,18 @@ function formatTime(value?: number | null) {
   return new Date(value * 1000).toLocaleString()
 }
 
+function syncLabel(status: string) {
+  if (status === 'synced') return '已同步'
+  if (status === 'out_of_sync') return '待同步'
+  return '待上报'
+}
+
+function syncType(status: string) {
+  if (status === 'synced') return 'success'
+  if (status === 'out_of_sync') return 'warning'
+  return 'info'
+}
+
 onMounted(refreshAll)
+defineExpose({ refresh: refreshAll })
 </script>

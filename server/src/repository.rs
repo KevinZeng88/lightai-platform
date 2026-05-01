@@ -3,7 +3,8 @@ use uuid::Uuid;
 
 use crate::auth;
 use crate::models::{
-    AgentConfig, GpuMetricSample, GpuMetricSamplesResponse, GpuMetrics, GpuView, HeartbeatRequest,
+    AgentConfig, AgentConfigPoliciesResponse, AgentConfigPolicy, AgentConfigPolicyView,
+    GpuMetricSample, GpuMetricSamplesResponse, GpuMetrics, GpuView, HeartbeatRequest,
     NodeListResponse, NodeMetricSample, NodeMetricSamplesResponse, NodeMetrics, NodeView,
     RegisterRequest, RegisterResponse,
 };
@@ -45,10 +46,10 @@ pub async fn register_node(
     .await?;
 
     Ok(RegisterResponse {
-        node_id,
+        node_id: node_id.clone(),
         agent_token: token,
         heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
-        agent_config: default_agent_config(now),
+        agent_config: effective_agent_config(pool, &node_id).await?,
     })
 }
 
@@ -93,9 +94,11 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
             disk_total_bytes, disk_used_bytes, collector_errors_json, updated_at,
             agent_config_version, heartbeat_interval_secs, metrics_sample_interval_secs,
             task_poll_interval_secs, config_refresh_interval_secs, command_timeout_secs,
-            environment_check_timeout_secs, last_config_updated_at
+            environment_check_timeout_secs, allowed_model_dirs_json, nvidia_collector_enabled,
+            custom_collector_script, collector_timeout_secs, collector_max_output_bytes,
+            last_config_updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(node_id) DO UPDATE SET
             cpu_usage_percent = excluded.cpu_usage_percent,
             memory_total_bytes = excluded.memory_total_bytes,
@@ -111,6 +114,11 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
             config_refresh_interval_secs = excluded.config_refresh_interval_secs,
             command_timeout_secs = excluded.command_timeout_secs,
             environment_check_timeout_secs = excluded.environment_check_timeout_secs,
+            allowed_model_dirs_json = excluded.allowed_model_dirs_json,
+            nvidia_collector_enabled = excluded.nvidia_collector_enabled,
+            custom_collector_script = excluded.custom_collector_script,
+            collector_timeout_secs = excluded.collector_timeout_secs,
+            collector_max_output_bytes = excluded.collector_max_output_bytes,
             last_config_updated_at = excluded.last_config_updated_at
         "#,
     )
@@ -152,6 +160,32 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
         agent_config
             .as_ref()
             .map(|config| config.environment_check_timeout_secs as i64),
+    )
+    .bind(
+        agent_config
+            .as_ref()
+            .map(|config| serde_json::to_string(&config.allowed_model_dirs))
+            .transpose()?,
+    )
+    .bind(
+        agent_config
+            .as_ref()
+            .map(|config| config.nvidia_collector_enabled as i64),
+    )
+    .bind(
+        agent_config
+            .as_ref()
+            .and_then(|config| config.custom_collector_script.clone()),
+    )
+    .bind(
+        agent_config
+            .as_ref()
+            .map(|config| config.collector_timeout_secs as i64),
+    )
+    .bind(
+        agent_config
+            .as_ref()
+            .map(|config| config.collector_max_output_bytes as i64),
     )
     .bind(agent_config.and_then(|config| config.last_config_updated_at))
     .execute(&mut *tx)
@@ -274,7 +308,10 @@ pub async fn list_nodes(pool: &SqlitePool) -> anyhow::Result<NodeListResponse> {
                s.agent_config_version, s.heartbeat_interval_secs,
                s.metrics_sample_interval_secs, s.task_poll_interval_secs,
                s.config_refresh_interval_secs, s.command_timeout_secs,
-               s.environment_check_timeout_secs, s.last_config_updated_at
+               s.environment_check_timeout_secs, s.allowed_model_dirs_json,
+               s.nvidia_collector_enabled, s.custom_collector_script,
+               s.collector_timeout_secs, s.collector_max_output_bytes,
+               s.last_config_updated_at
         FROM nodes n
         LEFT JOIN node_status s ON s.node_id = n.id
         ORDER BY n.name
@@ -327,8 +364,32 @@ pub async fn list_nodes(pool: &SqlitePool) -> anyhow::Result<NodeListResponse> {
                 environment_check_timeout_secs: row
                     .get::<Option<i64>, _>("environment_check_timeout_secs")
                     .unwrap_or(5) as u64,
+                allowed_model_dirs: row
+                    .get::<Option<String>, _>("allowed_model_dirs_json")
+                    .and_then(|value| serde_json::from_str(&value).ok())
+                    .unwrap_or_default(),
+                nvidia_collector_enabled: row
+                    .get::<Option<i64>, _>("nvidia_collector_enabled")
+                    .map(|value| value != 0)
+                    .unwrap_or(true),
+                custom_collector_script: row.get("custom_collector_script"),
+                collector_timeout_secs: row
+                    .get::<Option<i64>, _>("collector_timeout_secs")
+                    .unwrap_or(5) as u64,
+                collector_max_output_bytes: row
+                    .get::<Option<i64>, _>("collector_max_output_bytes")
+                    .unwrap_or(1024 * 1024) as usize,
                 last_config_updated_at: row.get("last_config_updated_at"),
             });
+        let effective_agent_config = effective_agent_config(pool, &node_id).await?;
+        let config_sync_status = match &agent_config {
+            Some(current) if current.config_version == effective_agent_config.config_version => {
+                "synced"
+            }
+            Some(_) => "out_of_sync",
+            None => "pending",
+        }
+        .to_string();
 
         let status = match last_heartbeat_at {
             Some(last_seen) if now - last_seen <= ONLINE_THRESHOLD_SECS => "online",
@@ -350,6 +411,8 @@ pub async fn list_nodes(pool: &SqlitePool) -> anyhow::Result<NodeListResponse> {
             last_heartbeat_at,
             metrics,
             agent_config,
+            effective_agent_config,
+            config_sync_status,
             gpus,
         });
     }
@@ -508,15 +571,287 @@ fn now_unix_secs() -> i64 {
         .as_secs() as i64
 }
 
+pub async fn list_agent_config_policies(
+    pool: &SqlitePool,
+) -> anyhow::Result<AgentConfigPoliciesResponse> {
+    let global = agent_config_policy_view(pool, "global", None).await?;
+    let rows = sqlx::query("SELECT id FROM nodes ORDER BY name")
+        .fetch_all(pool)
+        .await?;
+    let mut nodes = Vec::new();
+    for row in rows {
+        let node_id: String = row.get("id");
+        nodes.push(agent_config_policy_view(pool, "node", Some(&node_id)).await?);
+    }
+    Ok(AgentConfigPoliciesResponse { global, nodes })
+}
+
+pub async fn global_agent_config_policy(
+    pool: &SqlitePool,
+) -> anyhow::Result<AgentConfigPolicyView> {
+    agent_config_policy_view(pool, "global", None).await
+}
+
+pub async fn node_agent_config_policy(
+    pool: &SqlitePool,
+    node_id: &str,
+) -> anyhow::Result<AgentConfigPolicyView> {
+    agent_config_policy_view(pool, "node", Some(node_id)).await
+}
+
+pub async fn update_global_agent_config_policy(
+    pool: &SqlitePool,
+    policy: AgentConfigPolicy,
+) -> anyhow::Result<AgentConfigPolicyView> {
+    save_agent_config_policy(pool, "global", "", policy).await?;
+    global_agent_config_policy(pool).await
+}
+
+pub async fn update_node_agent_config_policy(
+    pool: &SqlitePool,
+    node_id: &str,
+    policy: AgentConfigPolicy,
+) -> anyhow::Result<AgentConfigPolicyView> {
+    save_agent_config_policy(pool, "node", node_id, policy).await?;
+    node_agent_config_policy(pool, node_id).await
+}
+
+pub async fn effective_agent_config(
+    pool: &SqlitePool,
+    node_id: &str,
+) -> anyhow::Result<AgentConfig> {
+    let now = now_unix_secs();
+    let global = read_policy(pool, "global", "").await?.unwrap_or_default();
+    let node = read_policy(pool, "node", node_id)
+        .await?
+        .unwrap_or_default();
+    let global_version = policy_version(pool, "global", "")
+        .await?
+        .unwrap_or(AGENT_CONFIG_VERSION);
+    let node_version = policy_version(pool, "node", node_id).await?.unwrap_or(0);
+    Ok(apply_policy(
+        default_agent_config(now),
+        global,
+        node,
+        global_version.max(node_version).max(AGENT_CONFIG_VERSION),
+        now,
+    ))
+}
+
+async fn save_agent_config_policy(
+    pool: &SqlitePool,
+    scope: &str,
+    node_id: &str,
+    policy: AgentConfigPolicy,
+) -> anyhow::Result<()> {
+    validate_policy(&policy)?;
+    let now = now_unix_secs();
+    let version = next_policy_version(pool).await?;
+    sqlx::query(
+        r#"
+        INSERT INTO agent_config_policies (scope, node_id, policy_json, version, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(scope, node_id) DO UPDATE SET
+            policy_json = excluded.policy_json,
+            version = excluded.version,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(scope)
+    .bind(node_id)
+    .bind(serde_json::to_string(&policy)?)
+    .bind(version)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+async fn agent_config_policy_view(
+    pool: &SqlitePool,
+    scope: &str,
+    node_id: Option<&str>,
+) -> anyhow::Result<AgentConfigPolicyView> {
+    let node_key = node_id.unwrap_or("");
+    let policy = read_policy(pool, scope, node_key)
+        .await?
+        .unwrap_or_default();
+    let version = policy_version(pool, scope, node_key)
+        .await?
+        .unwrap_or(AGENT_CONFIG_VERSION);
+    let updated_at = policy_updated_at(pool, scope, node_key)
+        .await?
+        .unwrap_or_else(now_unix_secs);
+    let effective_config = match node_id {
+        Some(node_id) => effective_agent_config(pool, node_id).await?,
+        None => apply_policy(
+            default_agent_config(updated_at),
+            policy.clone(),
+            AgentConfigPolicy::default(),
+            version,
+            updated_at,
+        ),
+    };
+    Ok(AgentConfigPolicyView {
+        scope: scope.to_string(),
+        node_id: node_id.map(str::to_string),
+        version,
+        updated_at,
+        policy,
+        effective_config,
+        restart_required_fields: vec!["server_url", "node_name", "state_path", "listen_addr"],
+        online_reload_fields: vec![
+            "heartbeat_interval_secs",
+            "metrics_sample_interval_secs",
+            "command_timeout_secs",
+            "environment_check_timeout_secs",
+            "allowed_model_dirs",
+            "nvidia_collector_enabled",
+            "custom_collector_script",
+            "collector_timeout_secs",
+            "collector_max_output_bytes",
+        ],
+    })
+}
+
+async fn read_policy(
+    pool: &SqlitePool,
+    scope: &str,
+    node_id: &str,
+) -> anyhow::Result<Option<AgentConfigPolicy>> {
+    let json: Option<String> = sqlx::query_scalar(
+        "SELECT policy_json FROM agent_config_policies WHERE scope = ? AND node_id = ?",
+    )
+    .bind(scope)
+    .bind(node_id)
+    .fetch_optional(pool)
+    .await?;
+    json.map(|value| serde_json::from_str(&value))
+        .transpose()
+        .map_err(Into::into)
+}
+
+async fn policy_version(
+    pool: &SqlitePool,
+    scope: &str,
+    node_id: &str,
+) -> anyhow::Result<Option<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT version FROM agent_config_policies WHERE scope = ? AND node_id = ?",
+    )
+    .bind(scope)
+    .bind(node_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+async fn policy_updated_at(
+    pool: &SqlitePool,
+    scope: &str,
+    node_id: &str,
+) -> anyhow::Result<Option<i64>> {
+    Ok(sqlx::query_scalar(
+        "SELECT updated_at FROM agent_config_policies WHERE scope = ? AND node_id = ?",
+    )
+    .bind(scope)
+    .bind(node_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+async fn next_policy_version(pool: &SqlitePool) -> anyhow::Result<i64> {
+    let current: Option<i64> = sqlx::query_scalar("SELECT MAX(version) FROM agent_config_policies")
+        .fetch_one(pool)
+        .await?;
+    Ok(current.unwrap_or(AGENT_CONFIG_VERSION) + 1)
+}
+
+fn apply_policy(
+    mut config: AgentConfig,
+    global: AgentConfigPolicy,
+    node: AgentConfigPolicy,
+    version: i64,
+    updated_at: i64,
+) -> AgentConfig {
+    apply_policy_layer(&mut config, global);
+    apply_policy_layer(&mut config, node);
+    config.config_version = version;
+    config.last_config_updated_at = Some(updated_at);
+    config
+}
+
+fn apply_policy_layer(config: &mut AgentConfig, policy: AgentConfigPolicy) {
+    if let Some(value) = policy.heartbeat_interval_secs {
+        config.heartbeat_interval_secs = value;
+    }
+    if let Some(value) = policy.metrics_sample_interval_secs {
+        config.metrics_sample_interval_secs = value;
+    }
+    if let Some(value) = policy.command_timeout_secs {
+        config.command_timeout_secs = value;
+    }
+    if let Some(value) = policy.environment_check_timeout_secs {
+        config.environment_check_timeout_secs = value;
+    }
+    if let Some(value) = policy.allowed_model_dirs {
+        config.allowed_model_dirs = value;
+    }
+    if let Some(value) = policy.nvidia_collector_enabled {
+        config.nvidia_collector_enabled = value;
+    }
+    if let Some(value) = policy.custom_collector_script {
+        config.custom_collector_script = value.filter(|item| !item.trim().is_empty());
+    }
+    if let Some(value) = policy.collector_timeout_secs {
+        config.collector_timeout_secs = value;
+    }
+    if let Some(value) = policy.collector_max_output_bytes {
+        config.collector_max_output_bytes = value;
+    }
+}
+
+fn validate_policy(policy: &AgentConfigPolicy) -> anyhow::Result<()> {
+    for (name, value) in [
+        ("heartbeat_interval_secs", policy.heartbeat_interval_secs),
+        (
+            "metrics_sample_interval_secs",
+            policy.metrics_sample_interval_secs,
+        ),
+        ("command_timeout_secs", policy.command_timeout_secs),
+        (
+            "environment_check_timeout_secs",
+            policy.environment_check_timeout_secs,
+        ),
+        ("collector_timeout_secs", policy.collector_timeout_secs),
+    ] {
+        if value.is_some_and(|value| value == 0 || value > 86_400) {
+            anyhow::bail!("{name} must be between 1 and 86400");
+        }
+    }
+    if policy
+        .collector_max_output_bytes
+        .is_some_and(|value| value == 0 || value > 16 * 1024 * 1024)
+    {
+        anyhow::bail!("collector_max_output_bytes must be between 1 and 16777216");
+    }
+    if let Some(dirs) = &policy.allowed_model_dirs {
+        for dir in dirs {
+            if dir.trim().is_empty() || dir.contains("..") {
+                anyhow::bail!("allowed_model_dirs contains invalid path");
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn default_agent_config(updated_at: i64) -> AgentConfig {
     AgentConfig {
         config_version: AGENT_CONFIG_VERSION,
         heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
         metrics_sample_interval_secs: HEARTBEAT_INTERVAL_SECS,
-        task_poll_interval_secs: 15,
-        config_refresh_interval_secs: 60,
         command_timeout_secs: 5,
         environment_check_timeout_secs: 5,
         last_config_updated_at: Some(updated_at),
+        ..AgentConfig::default()
     }
 }

@@ -87,7 +87,7 @@ curl "http://127.0.0.1:8080/api/nodes/<node_id>/gpus/<gpu_key>/metrics?from=1700
 cargo run -p lightai-agent
 ```
 
-默认监听 `127.0.0.1:8081`。
+默认监听 `127.0.0.1:8081`。Agent 本地配置只保留 bootstrap 信息：Server 地址、节点名称、state 文件和调试用 health 监听地址。心跳间隔、指标采样、采集器、超时和 `allowed_model_dirs` 由 Server/Web 统一管理并下发。
 
 ```bash
 curl http://127.0.0.1:8081/health
@@ -128,6 +128,12 @@ cd web
 npm run build
 ```
 
+## Migration 说明
+
+当前 SQLite 启动迁移由 `server/src/db.rs` 控制。`0001`、`0002`、`0003` 会被直接执行；`migrations/0004_stage3a_corrections.sql` 是 Stage 3A 修正的历史参考文件，不会被自动执行。
+
+原因是项目当前还没有 migration ledger，而 SQLite 修改列约束需要重建表。为避免重复执行 `ALTER TABLE` / `RENAME TABLE` 造成已有数据库损坏，Stage 3A 的表修正逻辑放在 `db.rs` 的幂等 schema 检查中执行。本阶段不引入完整 migration 框架。
+
 ## 配置文件
 
 - Server 示例：`deploy/server.example.toml`
@@ -142,7 +148,17 @@ LIGHTAI_AGENT_CONFIG=deploy/agent.example.toml cargo run -p lightai-agent
 
 内置默认配置仍绑定 `127.0.0.1`，适合纯本机开发。示例配置文件将 `listen_addr` 设置为 `0.0.0.0`，适合从其它机器或 Windows 浏览器访问 WSL 中的 Server/Agent 服务。按需修改配置文件中的监听地址后，通过 `LIGHTAI_SERVER_CONFIG` 和 `LIGHTAI_AGENT_CONFIG` 启动即可。
 
-Agent state 文件包含 `agent_token`。Unix 下保存时会设置为 `0600` 权限，Windows 暂使用默认文件权限。
+Agent state 文件包含节点 ID 和 `agent_token`。Unix 下保存时会设置为 `0600` 权限，Windows 暂使用默认文件权限。不要把 state 文件提交到版本库或日志中。
+
+## Agent 配置策略
+
+Web 的“配置”页面提供轻量 Agent 配置入口：
+
+- 全局默认策略：适用于所有节点。
+- 节点级覆盖策略：只填写需要覆盖的字段，优先级高于全局默认。
+- Agent 生效配置：Server 按“内置默认值 + 全局默认 + 节点覆盖”计算后，通过 Agent 主动连接的心跳和任务控制通道返回。
+
+节点监控页会展示 Server 计算的生效配置、Agent 最近上报的配置版本和同步状态。策略保存后版本会递增；在线 Agent 会在下一次心跳或当前任务控制长连接返回时获取并在线应用。Server 地址、节点名称、state 文件路径和 Agent 本地 health 监听地址属于 bootstrap，修改后需要重启 Agent；Web 页面会提示这些字段不属于在线策略。
 
 ## 本机 NVIDIA 验证
 
@@ -199,24 +215,51 @@ scripts/dev_check_nvidia.sh
 
 ## Stage 3A 模型与 External 接入
 
-Stage 3A 支持模型定义管理、External 模型实例接入、运行环境登记和模型文件垃圾箱入口。
+Stage 3A 支持 Agent 配置策略、节点运行环境登记与检查、模型文件配置、External 模型实例接入、本地实例生命周期控制和模型文件垃圾箱入口。
 
-External 表示接入已有模型服务，平台不负责启动进程，也不要求先登记运行环境或绑定节点。创建流程：
+External 表示接入已有模型服务，平台不负责启动进程，也不要求先登记模型定义、运行环境或绑定节点。最小创建信息是实例名称、外部服务模型名和基础地址；健康检查地址、非标准 endpoint、服务实现、版本等属于高级配置。
 
-1. 在 Web 的“模型”页面创建模型定义。
-2. 在“实例”页面创建 External 模型实例。
-3. 填写 `backend`、`base_url`、`health_url`、`endpoint_url`、`model_name` 等外部服务信息。
+创建流程：
+
+1. 在 Web 的“实例”页面直接创建 External 模型实例。
+2. 填写实例名称、`model_name` 和 `base_url`。
+3. 按需展开高级配置，填写 `health_url`、`endpoint_url`、`backend`、版本或备注。
 4. 点击“检查状态”，Server 会按 `health_url`、`endpoint_url`、`base_url` 的顺序检查可访问性。
 
 HTTP 2xx/3xx 视为 `running`，请求失败或非成功状态视为 `failed`，没有可检查 URL 时视为 `unknown`。检查请求有超时，避免外部服务不可达时长时间阻塞。
 
-“运行环境”页面保留为高级配置，用于描述节点本地运行能力，主要服务后续 Docker / Script 部署。Docker / Script 运行环境必须绑定节点，并要求节点 Agent 在线。本阶段不会由 Server 主动连接 Agent，也不会启动 Docker 或 Script。
+“模型”页面定位为模型文件配置入口：确定某台服务器上有哪些模型文件。新增模型文件配置时必须选择节点并填写该节点上的文件路径；保存时 Server 会先创建文件验证任务，并等待对应节点 Agent 回报结果。只有验证成功后，模型和节点文件路径记录才会写入数据库。同一路径即使出现在多台节点上，也需要分别登记并由各自节点 Agent 验证。
 
-模型文件垃圾箱只是待清理记录：
+模型节点文件验证只表示：
+
+- 该节点上的路径存在；
+- 路径是普通文件；
+- 文件基础信息可读取，例如文件大小。
+
+文件验证不代表模型格式正确，不代表后端可以加载，也不代表推理服务可用。模型整体文件状态仅基于节点文件路径验证结果展示，包括未配置文件、待验证、部分节点文件已验证、全部节点文件已验证和验证失败。
+
+每个本地模型至少需要保留一条节点文件路径。删除节点文件路径只删除平台记录，不会物理删除节点上的文件；如果某模型只剩一条节点文件路径，平台会拒绝删除该记录。
+
+Agent 仍然采用主动连接模式。Agent 会主动建立任务控制长连接等待 `verify_model_file`、`check_runtime_environment`、`start_model_instance`、`stop_model_instance`、`cleanup_model_file` 等受控任务；Server 有任务或配置版本更新时会唤醒等待中的连接，让 Agent 尽快获取并执行。Server 不主动直连 Agent，也不直接检查远端节点文件。Agent 离线时相关操作会失败并返回明确中文原因；Agent 在线但未及时回报时，操作会在超时后失败并保留错误信息。
+
+“运行环境”页面用于描述某节点具备哪些本地运行能力，不再配置 External URL。运行环境必须绑定节点，Docker 方式填写镜像，Script / 本地程序方式填写受控入口路径。新增和重新检查运行环境时，会由对应节点 Agent 执行受控检查；检查通过才保存，版本优先使用 Agent 返回值，无法自动获取时会在检查信息中提示。
+
+“实例”页面区分两类实例：
+
+- External 实例：直接添加外部已有服务，不需要节点、运行环境或模型文件；删除只删除平台接入记录，不影响外部服务。
+- 本地实例：选择节点、该节点已检查通过的运行环境、该节点已验证的模型文件后创建；启动和停止都会创建 Agent 受控任务。删除本地实例只删除实例记录，不删除模型文件。
+
+当前本地实例启动/停止是平台受控生命周期动作，不拼接前端命令，不开放任意命令执行。实际推理进程的 Docker/Script 参数模板、日志采集和进程守护仍是后续扩展点。
+
+模型文件垃圾箱面向具体节点上的具体模型文件路径：
 
 - 删除模型配置不会删除磁盘模型文件。
-- 加入模型文件垃圾箱也不会立即删除文件。
-- 后续物理删除必须由 Agent 在受控目录范围内执行。
+- 删除模型配置不会自动登记垃圾箱记录。
+- 垃圾箱记录对应具体节点上的具体模型文件路径。
+- “删除文件”会创建 `cleanup_model_file` 任务，由对应节点 Agent 在本机物理删除文件。
+- “删除记录”只从垃圾箱页面移除记录，不删除任何真实文件。
+- Agent 只会删除当前生效配置中 `allowed_model_dirs` 受控目录内的普通文件；未配置受控目录时会拒绝物理删除。错误信息会区分未配置、目录不存在、目录不可访问、目标不在允许范围、目标不存在、非普通文件和软链接等安全风险。
+- 不支持批量清理、定时清理或删除目录。
 
 ## 本机 llama.cpp External 验证
 
@@ -240,7 +283,7 @@ http://127.0.0.1:8088/health
 http://127.0.0.1:8088/v1/models
 ```
 
-3. 在平台中创建模型定义，然后创建 External 模型实例：
+3. 在平台“实例”页面直接创建 External 模型实例：
 
 - `backend = llama_cpp`
 - `base_url = http://127.0.0.1:8088`
@@ -265,11 +308,11 @@ Server 在 register 和 heartbeat 响应中下发轻量 Agent 配置：
 
 Agent 本地配置作为启动默认值；Server 下发配置优先。Agent heartbeat 会上报当前实际生效配置，Web 节点列表中会展示心跳间隔、采样间隔和配置版本。
 
-未来运行环境检查将通过 Agent 主动拉取任务实现。检查动作必须是内置固定动作，例如 `ollama --version`、`llama-server --version` 或固定 HTTP endpoint；不接受前端传入任意命令，不通过 shell 拼接命令，检查超时必须可控。
+运行环境检查、本地实例启动/停止、模型文件验证和垃圾箱物理删除都通过 Agent 主动拉取任务实现。检查和启动/停止动作必须是平台定义的受控动作；不接受前端传入任意命令，不通过 shell 拼接命令，检查超时必须可控。
 
 ## 当前未实现，未来可扩展
 
-- Docker / Script 模型启动
+- 真实 Docker / Script 推理进程启动模板、进程守护和日志采集
 - OpenAI-compatible API gateway
 - API Key 管理
 - 使用量统计和计费规则

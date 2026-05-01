@@ -35,11 +35,86 @@ pub struct AgentConfig {
     pub config_version: i64,
     pub heartbeat_interval_secs: u64,
     pub metrics_sample_interval_secs: u64,
+    #[serde(default)]
     pub task_poll_interval_secs: u64,
+    #[serde(default)]
     pub config_refresh_interval_secs: u64,
     pub command_timeout_secs: u64,
     pub environment_check_timeout_secs: u64,
+    #[serde(default)]
+    pub allowed_model_dirs: Vec<String>,
+    #[serde(default = "default_nvidia_collector_enabled")]
+    pub nvidia_collector_enabled: bool,
+    #[serde(default)]
+    pub custom_collector_script: Option<String>,
+    #[serde(default = "default_collector_timeout_secs")]
+    pub collector_timeout_secs: u64,
+    #[serde(default = "default_collector_max_output_bytes")]
+    pub collector_max_output_bytes: usize,
     pub last_config_updated_at: Option<i64>,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            config_version: 0,
+            heartbeat_interval_secs: 15,
+            metrics_sample_interval_secs: 15,
+            task_poll_interval_secs: 15,
+            config_refresh_interval_secs: 60,
+            command_timeout_secs: 5,
+            environment_check_timeout_secs: 5,
+            allowed_model_dirs: Vec::new(),
+            nvidia_collector_enabled: true,
+            custom_collector_script: None,
+            collector_timeout_secs: default_collector_timeout_secs(),
+            collector_max_output_bytes: default_collector_max_output_bytes(),
+            last_config_updated_at: None,
+        }
+    }
+}
+
+fn default_nvidia_collector_enabled() -> bool {
+    true
+}
+
+fn default_collector_timeout_secs() -> u64 {
+    5
+}
+
+fn default_collector_max_output_bytes() -> usize {
+    1024 * 1024
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct AgentConfigPolicy {
+    pub heartbeat_interval_secs: Option<u64>,
+    pub metrics_sample_interval_secs: Option<u64>,
+    pub command_timeout_secs: Option<u64>,
+    pub environment_check_timeout_secs: Option<u64>,
+    pub allowed_model_dirs: Option<Vec<String>>,
+    pub nvidia_collector_enabled: Option<bool>,
+    pub custom_collector_script: Option<Option<String>>,
+    pub collector_timeout_secs: Option<u64>,
+    pub collector_max_output_bytes: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentConfigPolicyView {
+    pub scope: String,
+    pub node_id: Option<String>,
+    pub version: i64,
+    pub updated_at: i64,
+    pub policy: AgentConfigPolicy,
+    pub effective_config: AgentConfig,
+    pub restart_required_fields: Vec<&'static str>,
+    pub online_reload_fields: Vec<&'static str>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentConfigPoliciesResponse {
+    pub global: AgentConfigPolicyView,
+    pub nodes: Vec<AgentConfigPolicyView>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -93,6 +168,8 @@ pub struct NodeView {
     pub last_heartbeat_at: Option<i64>,
     pub metrics: Option<NodeMetrics>,
     pub agent_config: Option<AgentConfig>,
+    pub effective_agent_config: AgentConfig,
+    pub config_sync_status: String,
     pub gpus: Vec<GpuView>,
 }
 
@@ -115,6 +192,13 @@ pub struct GpuView {
 
 #[derive(Debug, Deserialize)]
 pub struct MetricsQuery {
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GpuMetricsQuery {
+    pub gpu_key: String,
     pub from: Option<i64>,
     pub to: Option<i64>,
 }
@@ -171,6 +255,7 @@ pub struct RuntimeEnvironmentRequest {
     pub version: Option<String>,
     pub base_url: Option<String>,
     pub health_url: Option<String>,
+    pub endpoint_url: Option<String>,
     pub binary_path: Option<String>,
     pub docker_image: Option<String>,
     pub working_dir: Option<String>,
@@ -190,6 +275,7 @@ pub struct RuntimeEnvironmentView {
     pub version: Option<String>,
     pub base_url: Option<String>,
     pub health_url: Option<String>,
+    pub endpoint_url: Option<String>,
     pub binary_path: Option<String>,
     pub docker_image: Option<String>,
     pub working_dir: Option<String>,
@@ -218,6 +304,7 @@ pub struct ModelRequest {
     pub description: Option<String>,
     pub default_backend: Option<String>,
     pub config_json: Option<String>,
+    pub initial_file: Option<ModelFileRequest>,
 }
 
 #[derive(Debug, Serialize)]
@@ -233,6 +320,11 @@ pub struct ModelView {
     pub created_at: i64,
     pub updated_at: i64,
     pub deleted_at: Option<i64>,
+    pub file_status: String,
+    pub total_file_count: i64,
+    pub verified_file_count: i64,
+    pub available_node_count: i64,
+    pub last_file_verified_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -241,11 +333,75 @@ pub struct ModelListResponse {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct ModelInstanceCreateRequest {
+pub struct ModelFileRequest {
+    pub node_id: String,
+    pub path: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModelFileView {
+    pub id: String,
     pub model_id: String,
+    pub model_name: Option<String>,
+    pub node_id: String,
+    pub node_name: Option<String>,
+    pub node_status: String,
+    pub path: String,
+    pub status: String,
+    pub size_bytes: Option<i64>,
+    pub last_verified_at: Option<i64>,
+    pub last_error: Option<String>,
+    pub verify_task_id: Option<String>,
+    pub verify_task_status: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ModelFileListResponse {
+    pub files: Vec<ModelFileView>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentTaskPollRequest {
+    pub node_id: String,
+    pub current_config_version: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentTaskPollResponse {
+    pub task: Option<AgentTaskView>,
+    pub agent_config: AgentConfig,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentTaskView {
+    pub id: String,
+    pub node_id: String,
+    pub kind: String,
+    pub status: String,
+    pub payload: serde_json::Value,
+    pub lease_until: Option<i64>,
+    pub attempt_count: i64,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentTaskResultRequest {
+    pub node_id: String,
+    pub status: String,
+    pub result: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ModelInstanceCreateRequest {
+    pub model_id: Option<String>,
+    pub model_file_id: Option<String>,
     pub node_id: Option<String>,
     pub runtime_environment_id: Option<String>,
     pub name: String,
+    pub deploy_type: Option<String>,
     pub backend: Option<String>,
     pub base_url: Option<String>,
     pub endpoint_url: Option<String>,
@@ -274,8 +430,10 @@ pub struct ModelInstanceUpdateRequest {
 #[derive(Debug, Serialize)]
 pub struct ModelInstanceView {
     pub id: String,
-    pub model_id: String,
+    pub model_id: Option<String>,
+    pub model_file_id: Option<String>,
     pub model_definition_name: Option<String>,
+    pub model_file_path: Option<String>,
     pub node_id: Option<String>,
     pub node_name: Option<String>,
     pub runtime_environment_id: Option<String>,
@@ -304,8 +462,6 @@ pub struct ModelInstanceListResponse {
 
 #[derive(Debug, Deserialize)]
 pub struct ModelFileTrashRequest {
-    pub node_id: Option<String>,
-    pub path: String,
     pub reason: Option<String>,
     pub note: Option<String>,
 }
@@ -313,6 +469,7 @@ pub struct ModelFileTrashRequest {
 #[derive(Debug, Serialize)]
 pub struct ModelFileTrashView {
     pub id: String,
+    pub model_file_id: Option<String>,
     pub model_id: Option<String>,
     pub model_name: Option<String>,
     pub node_id: Option<String>,
@@ -320,6 +477,9 @@ pub struct ModelFileTrashView {
     pub path: String,
     pub reason: Option<String>,
     pub status: String,
+    pub file_deleted_at: Option<i64>,
+    pub cleanup_task_id: Option<String>,
+    pub last_error: Option<String>,
     pub note: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,

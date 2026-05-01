@@ -1,14 +1,36 @@
 use sqlx::{Row, SqlitePool};
+use std::sync::{Arc, OnceLock};
+
+use tokio::sync::Notify;
+use tokio::time::{sleep, timeout, Duration, Instant};
 use uuid::Uuid;
 
 use crate::http_check;
 use crate::models::{
-    ModelFileTrashListResponse, ModelFileTrashRequest, ModelFileTrashView,
-    ModelInstanceCreateRequest, ModelInstanceListResponse, ModelInstanceUpdateRequest,
-    ModelInstanceView, ModelListResponse, ModelRequest, ModelView, RuntimeEnvironmentListResponse,
-    RuntimeEnvironmentRequest, RuntimeEnvironmentView,
+    AgentTaskPollResponse, AgentTaskResultRequest, AgentTaskView, ModelFileListResponse,
+    ModelFileRequest, ModelFileTrashListResponse, ModelFileTrashRequest, ModelFileTrashView,
+    ModelFileView, ModelInstanceCreateRequest, ModelInstanceListResponse,
+    ModelInstanceUpdateRequest, ModelInstanceView, ModelListResponse, ModelRequest, ModelView,
+    RuntimeEnvironmentListResponse, RuntimeEnvironmentRequest, RuntimeEnvironmentView,
 };
 use crate::repository;
+
+const AGENT_TASK_LEASE_SECS: i64 = 30;
+const AGENT_TASK_QUEUE_TIMEOUT_SECS: i64 = 300;
+const AGENT_TASK_LONG_POLL_SECS: u64 = 25;
+const MODEL_FILE_VERIFY_TIMEOUT_SECS: u64 = 5;
+const MODEL_FILE_CLEANUP_TIMEOUT_SECS: u64 = 10;
+const RUNTIME_ENVIRONMENT_CHECK_TIMEOUT_SECS: u64 = 5;
+const MODEL_INSTANCE_TASK_TIMEOUT_SECS: u64 = 10;
+static TASK_NOTIFY: OnceLock<Arc<Notify>> = OnceLock::new();
+
+pub fn task_notify() -> Arc<Notify> {
+    TASK_NOTIFY.get_or_init(|| Arc::new(Notify::new())).clone()
+}
+
+pub fn notify_agent_tasks() {
+    task_notify().notify_waiters();
+}
 
 #[derive(Debug)]
 pub enum Stage3Error {
@@ -16,6 +38,17 @@ pub enum Stage3Error {
     NotFound(String),
     Conflict(String),
     Internal(anyhow::Error),
+}
+
+struct VerifiedModelFile {
+    size_bytes: Option<i64>,
+    verified_at: i64,
+}
+
+struct InstanceModelFile {
+    model_id: String,
+    node_id: String,
+    path: String,
 }
 
 impl From<anyhow::Error> for Stage3Error {
@@ -38,30 +71,25 @@ pub async fn create_runtime_environment(
     validate_non_empty("name", &request.name)?;
     validate_backend(&request.backend)?;
     validate_deploy_type(&request.deploy_type)?;
-    validate_external_urls(&request)?;
     validate_runtime_entrypoints(&request)?;
     validate_json_field(
         "allowed_model_dirs_json",
         request.allowed_model_dirs_json.as_deref(),
     )?;
     validate_json_field("config_json", request.config_json.as_deref())?;
-    let check_status = if request.deploy_type == "external" {
-        "unknown"
-    } else {
-        ensure_node_online(pool, node_id).await?;
-        "pending"
-    };
+    ensure_node_online(pool, node_id).await?;
+    let checked = check_runtime_environment_before_save(pool, node_id, &request).await?;
 
     let now = now_unix_secs();
     let id = Uuid::new_v4().to_string();
     sqlx::query(
         r#"
         INSERT INTO runtime_environments (
-            id, node_id, name, backend, deploy_type, version, base_url, health_url,
+            id, node_id, name, backend, deploy_type, version, base_url, health_url, endpoint_url,
             binary_path, docker_image, working_dir, log_dir, allowed_model_dirs_json,
-            config_json, enabled, check_status, created_at, updated_at
+            config_json, enabled, last_checked_at, check_status, check_message, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&id)
@@ -69,9 +97,10 @@ pub async fn create_runtime_environment(
     .bind(request.name)
     .bind(request.backend)
     .bind(request.deploy_type)
-    .bind(request.version)
-    .bind(request.base_url)
-    .bind(request.health_url)
+    .bind(checked.version.or(request.version))
+    .bind(None::<String>)
+    .bind(None::<String>)
+    .bind(None::<String>)
     .bind(request.binary_path)
     .bind(request.docker_image)
     .bind(request.working_dir)
@@ -79,7 +108,9 @@ pub async fn create_runtime_environment(
     .bind(request.allowed_model_dirs_json)
     .bind(request.config_json)
     .bind(bool_to_int(request.enabled.unwrap_or(true)))
-    .bind(check_status)
+    .bind(checked.checked_at)
+    .bind(checked.check_status)
+    .bind(checked.message)
     .bind(now)
     .bind(now)
     .execute(pool)
@@ -137,7 +168,6 @@ pub async fn update_runtime_environment(
     validate_non_empty("name", &request.name)?;
     validate_backend(&request.backend)?;
     validate_deploy_type(&request.deploy_type)?;
-    validate_external_urls(&request)?;
     validate_runtime_entrypoints(&request)?;
     validate_json_field(
         "allowed_model_dirs_json",
@@ -150,7 +180,7 @@ pub async fn update_runtime_environment(
         r#"
         UPDATE runtime_environments
         SET name = ?, backend = ?, deploy_type = ?, version = ?, base_url = ?,
-            health_url = ?, binary_path = ?, docker_image = ?, working_dir = ?,
+            health_url = ?, endpoint_url = ?, binary_path = ?, docker_image = ?, working_dir = ?,
             log_dir = ?, allowed_model_dirs_json = ?, config_json = ?, enabled = ?,
             updated_at = ?
         WHERE id = ?
@@ -160,8 +190,9 @@ pub async fn update_runtime_environment(
     .bind(request.backend)
     .bind(request.deploy_type)
     .bind(request.version)
-    .bind(request.base_url)
-    .bind(request.health_url)
+    .bind(None::<String>)
+    .bind(None::<String>)
+    .bind(None::<String>)
     .bind(request.binary_path)
     .bind(request.docker_image)
     .bind(request.working_dir)
@@ -212,47 +243,52 @@ pub async fn check_runtime_environment(
     id: &str,
 ) -> Result<RuntimeEnvironmentView, Stage3Error> {
     let environment = runtime_environment(pool, id).await?;
-    if environment.deploy_type != "external" {
-        let Some(node_id) = environment.node_id.as_deref() else {
-            return Err(Stage3Error::BadRequest(
-                "node_id is required for local runtime environments".to_string(),
-            ));
-        };
-        if !node_online(pool, node_id).await? {
-            update_runtime_environment_check(
-                pool,
-                id,
-                "agent_offline",
-                "node Agent is offline; runtime environment cannot be checked",
-            )
-            .await?;
-            return Err(Stage3Error::Conflict(
-                "Agent is offline; runtime environment cannot be checked".to_string(),
-            ));
-        }
-        return update_runtime_environment_check(
+    let node_id = environment
+        .node_id
+        .as_deref()
+        .ok_or_else(|| Stage3Error::BadRequest("运行环境必须绑定节点".to_string()))?;
+    if !node_online(pool, node_id).await? {
+        update_runtime_environment_check(
             pool,
             id,
-            "pending",
-            "runtime environment check will be handled by Agent in a later stage",
+            "agent_offline",
+            "节点 Agent 离线，无法检查运行环境",
         )
-        .await;
+        .await?;
+        return Err(Stage3Error::Conflict(
+            "节点 Agent 离线，无法检查运行环境".to_string(),
+        ));
     }
-    let Some(url) = environment
-        .health_url
-        .as_deref()
-        .or(environment.base_url.as_deref())
-    else {
-        return update_runtime_environment_check(pool, id, "unknown", "no health URL configured")
-            .await;
+    let request = RuntimeEnvironmentRequest {
+        name: environment.name.clone(),
+        backend: environment.backend.clone(),
+        deploy_type: environment.deploy_type.clone(),
+        version: environment.version.clone(),
+        base_url: None,
+        health_url: None,
+        endpoint_url: None,
+        binary_path: environment.binary_path.clone(),
+        docker_image: environment.docker_image.clone(),
+        working_dir: environment.working_dir.clone(),
+        log_dir: environment.log_dir.clone(),
+        allowed_model_dirs_json: environment.allowed_model_dirs_json.clone(),
+        config_json: environment.config_json.clone(),
+        enabled: Some(environment.enabled),
     };
-    let result = http_check::check_url(url).await;
-    let status = if result.status == "running" {
-        "available"
-    } else {
-        "unavailable"
-    };
-    update_runtime_environment_check(pool, id, status, &result.message).await
+    let checked = check_runtime_environment_before_save(pool, node_id, &request).await?;
+    let now = now_unix_secs();
+    sqlx::query(
+        "UPDATE runtime_environments SET version = COALESCE(?, version), last_checked_at = ?, check_status = ?, check_message = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(checked.version)
+    .bind(checked.checked_at)
+    .bind(checked.check_status)
+    .bind(checked.message)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    runtime_environment(pool, id).await
 }
 
 async fn update_runtime_environment_check(
@@ -279,6 +315,112 @@ async fn update_runtime_environment_check(
     runtime_environment(pool, id).await
 }
 
+struct CheckedRuntimeEnvironment {
+    check_status: String,
+    version: Option<String>,
+    message: String,
+    checked_at: i64,
+}
+
+async fn check_runtime_environment_before_save(
+    pool: &SqlitePool,
+    node_id: &str,
+    request: &RuntimeEnvironmentRequest,
+) -> Result<CheckedRuntimeEnvironment, Stage3Error> {
+    let task_id = Uuid::new_v4().to_string();
+    let now = now_unix_secs();
+    let payload = serde_json::json!({
+        "name": request.name,
+        "backend": request.backend,
+        "deploy_type": request.deploy_type,
+        "binary_path": request.binary_path,
+        "docker_image": request.docker_image,
+        "working_dir": request.working_dir,
+        "config_json": request.config_json,
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO agent_tasks (
+            id, node_id, kind, status, payload_json, attempt_count, created_at, updated_at
+        )
+        VALUES (?, ?, 'check_runtime_environment', 'queued', ?, 0, ?, ?)
+        "#,
+    )
+    .bind(&task_id)
+    .bind(node_id)
+    .bind(payload.to_string())
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    notify_agent_tasks();
+
+    let deadline = Instant::now() + Duration::from_secs(RUNTIME_ENVIRONMENT_CHECK_TIMEOUT_SECS);
+    loop {
+        let row =
+            sqlx::query("SELECT status, result_json, error_message FROM agent_tasks WHERE id = ?")
+                .bind(&task_id)
+                .fetch_one(pool)
+                .await?;
+        let status: String = row.get("status");
+        match status.as_str() {
+            "succeeded" => {
+                let result = row
+                    .get::<Option<String>, _>("result_json")
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let check_status = result
+                    .get("check_status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("available");
+                if check_status != "available" {
+                    return Err(Stage3Error::BadRequest(runtime_check_message(&result)));
+                }
+                return Ok(CheckedRuntimeEnvironment {
+                    check_status: "available".to_string(),
+                    version: result
+                        .get("version")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string),
+                    message: runtime_check_message(&result),
+                    checked_at: now_unix_secs(),
+                });
+            }
+            "failed" => {
+                let result = row
+                    .get::<Option<String>, _>("result_json")
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                return Err(Stage3Error::BadRequest(runtime_check_message(&result)));
+            }
+            "timed_out" => {
+                return Err(Stage3Error::Conflict(
+                    "运行环境检查超时，请确认 Agent 在线并重试".to_string(),
+                ));
+            }
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            mark_task_timed_out(pool, &task_id).await?;
+            return Err(Stage3Error::Conflict(
+                "运行环境检查超时，请确认 Agent 在线并重试".to_string(),
+            ));
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn runtime_check_message(result: &serde_json::Value) -> String {
+    result
+        .get("message")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("运行环境检查失败")
+        .to_string()
+}
+
 pub async fn create_model(
     pool: &SqlitePool,
     request: ModelRequest,
@@ -292,9 +434,30 @@ pub async fn create_model(
         validate_path("model_path", model_path)?;
     }
     validate_json_field("config_json", request.config_json.as_deref())?;
+    let initial_file = request
+        .initial_file
+        .ok_or_else(|| Stage3Error::BadRequest("initial_file is required".to_string()))?;
+    validate_non_empty("initial_file.path", &initial_file.path)?;
+    validate_path("initial_file.path", &initial_file.path)?;
+    ensure_node_exists(pool, &initial_file.node_id).await?;
+    let verified_file =
+        verify_model_file_before_save(pool, &initial_file.node_id, &initial_file.path).await?;
 
     let now = now_unix_secs();
     let id = Uuid::new_v4().to_string();
+    let file_id = Uuid::new_v4().to_string();
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        UPDATE models
+        SET name = name || '__deleted__' || substr(id, 1, 8), updated_at = ?
+        WHERE name = ? AND deleted_at IS NOT NULL
+        "#,
+    )
+    .bind(now)
+    .bind(&request.name)
+    .execute(&mut *tx)
+    .await?;
     sqlx::query(
         r#"
         INSERT INTO models (
@@ -314,9 +477,29 @@ pub async fn create_model(
     .bind(request.config_json)
     .bind(now)
     .bind(now)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .map_err(map_sqlx_conflict)?;
+    sqlx::query(
+        r#"
+        INSERT INTO model_files (
+            id, model_id, node_id, path, status, size_bytes, last_verified_at,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 'verified', ?, ?, ?, ?)
+        "#,
+    )
+    .bind(file_id)
+    .bind(&id)
+    .bind(initial_file.node_id)
+    .bind(initial_file.path)
+    .bind(verified_file.size_bytes)
+    .bind(verified_file.verified_at)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
 
     model(pool, &id).await
 }
@@ -325,9 +508,11 @@ pub async fn list_models(pool: &SqlitePool) -> Result<ModelListResponse, Stage3E
     let rows = sqlx::query("SELECT * FROM models WHERE deleted_at IS NULL ORDER BY name")
         .fetch_all(pool)
         .await?;
-    Ok(ModelListResponse {
-        models: rows.into_iter().map(model_from_row).collect(),
-    })
+    let mut models = Vec::with_capacity(rows.len());
+    for row in rows {
+        models.push(model_from_row(pool, row).await?);
+    }
+    Ok(ModelListResponse { models })
 }
 
 pub async fn model(pool: &SqlitePool, id: &str) -> Result<ModelView, Stage3Error> {
@@ -336,7 +521,7 @@ pub async fn model(pool: &SqlitePool, id: &str) -> Result<ModelView, Stage3Error
         .fetch_optional(pool)
         .await?
         .ok_or_else(|| Stage3Error::NotFound("model not found".to_string()))?;
-    Ok(model_from_row(row))
+    model_from_row(pool, row).await
 }
 
 pub async fn update_model(
@@ -398,11 +583,37 @@ pub async fn delete_model(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error
         ));
     }
 
+    let model_exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM models WHERE id = ? AND deleted_at IS NULL")
+            .bind(id)
+            .fetch_optional(pool)
+            .await?;
+    if model_exists.is_none() {
+        return Err(Stage3Error::NotFound("model not found".to_string()));
+    }
+
+    let file_ids: Vec<String> = sqlx::query_scalar(
+        "SELECT id FROM model_files WHERE model_id = ? AND deleted_at IS NULL ORDER BY created_at",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await?;
+    for file_id in file_ids {
+        ensure_model_file_trash(
+            pool,
+            &file_id,
+            Some("删除模型配置".to_string()),
+            Some("模型配置删除后不再显示；真实文件未删除，可在模型垃圾箱中逐条处理。".to_string()),
+        )
+        .await?;
+    }
+
     let now = now_unix_secs();
     let result = sqlx::query(
         r#"
         UPDATE models
-        SET deleted_at = ?, updated_at = ?
+        SET name = name || '__deleted__' || substr(id, 1, 8),
+            deleted_at = ?, updated_at = ?
         WHERE id = ? AND deleted_at IS NULL
         "#,
     )
@@ -417,37 +628,583 @@ pub async fn delete_model(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error
     Ok(())
 }
 
+pub async fn create_model_file(
+    pool: &SqlitePool,
+    model_id: &str,
+    request: ModelFileRequest,
+) -> Result<ModelFileView, Stage3Error> {
+    validate_non_empty("path", &request.path)?;
+    validate_path("path", &request.path)?;
+    ensure_model_exists(pool, model_id).await?;
+    ensure_node_exists(pool, &request.node_id).await?;
+    let verified_file =
+        verify_model_file_before_save(pool, &request.node_id, &request.path).await?;
+
+    let now = now_unix_secs();
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO model_files (
+            id, model_id, node_id, path, status, size_bytes, last_verified_at,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 'verified', ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(model_id)
+    .bind(request.node_id)
+    .bind(request.path)
+    .bind(verified_file.size_bytes)
+    .bind(verified_file.verified_at)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+
+    model_file(pool, &id).await
+}
+
+pub async fn list_model_files(
+    pool: &SqlitePool,
+    model_id: &str,
+) -> Result<ModelFileListResponse, Stage3Error> {
+    ensure_model_exists(pool, model_id).await?;
+    let rows = model_file_rows(pool, Some(model_id), None).await?;
+    Ok(ModelFileListResponse {
+        files: rows.into_iter().map(model_file_from_row).collect(),
+    })
+}
+
+pub async fn model_file(pool: &SqlitePool, id: &str) -> Result<ModelFileView, Stage3Error> {
+    let rows = model_file_rows(pool, None, Some(id)).await?;
+    rows.into_iter()
+        .next()
+        .map(model_file_from_row)
+        .ok_or_else(|| Stage3Error::NotFound("model file not found".to_string()))
+}
+
+pub async fn update_model_file(
+    pool: &SqlitePool,
+    id: &str,
+    request: ModelFileRequest,
+) -> Result<ModelFileView, Stage3Error> {
+    validate_non_empty("path", &request.path)?;
+    validate_path("path", &request.path)?;
+    ensure_node_exists(pool, &request.node_id).await?;
+    let verified_file =
+        verify_model_file_before_save(pool, &request.node_id, &request.path).await?;
+
+    let now = now_unix_secs();
+    let result = sqlx::query(
+        r#"
+        UPDATE model_files
+        SET node_id = ?, path = ?, status = 'verified', size_bytes = ?,
+            last_verified_at = ?, last_error = NULL, verify_task_id = NULL,
+            updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(request.node_id)
+    .bind(request.path)
+    .bind(verified_file.size_bytes)
+    .bind(verified_file.verified_at)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Err(Stage3Error::NotFound("model file not found".to_string()));
+    }
+    model_file(pool, id).await
+}
+
+pub async fn delete_model_file(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error> {
+    ensure_model_file_trash(
+        pool,
+        id,
+        Some("从模型中删除节点文件路径".to_string()),
+        Some("该操作只移除模型与节点文件路径的关联；真实文件未删除。".to_string()),
+    )
+    .await?;
+    let now = now_unix_secs();
+    let result = sqlx::query("UPDATE model_files SET deleted_at = ?, updated_at = ? WHERE id = ?")
+        .bind(now)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(Stage3Error::NotFound("model file not found".to_string()));
+    }
+    Ok(())
+}
+
+pub async fn queue_model_file_verification(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<ModelFileView, Stage3Error> {
+    let file = model_file(pool, id).await?;
+    let task_id = Uuid::new_v4().to_string();
+    let now = now_unix_secs();
+    let wait_message = if node_online(pool, &file.node_id).await? {
+        "等待节点 Agent 执行验证"
+    } else {
+        "等待节点 Agent 上线后执行验证"
+    };
+    let payload = serde_json::json!({
+        "model_file_id": file.id,
+        "path": file.path,
+    });
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO agent_tasks (
+            id, node_id, kind, status, payload_json, attempt_count, created_at, updated_at
+        )
+        VALUES (?, ?, 'verify_model_file', 'queued', ?, 0, ?, ?)
+        "#,
+    )
+    .bind(&task_id)
+    .bind(&file.node_id)
+    .bind(payload.to_string())
+    .bind(now)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        r#"
+        UPDATE model_files
+        SET status = 'verify_pending', verify_task_id = ?, last_error = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&task_id)
+    .bind(wait_message)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    notify_agent_tasks();
+    model_file(pool, id).await
+}
+
+async fn verify_model_file_before_save(
+    pool: &SqlitePool,
+    node_id: &str,
+    path: &str,
+) -> Result<VerifiedModelFile, Stage3Error> {
+    if !node_online(pool, node_id).await? {
+        return Err(Stage3Error::Conflict(
+            "节点 Agent 离线，无法验证模型文件".to_string(),
+        ));
+    }
+
+    let task_id = Uuid::new_v4().to_string();
+    let now = now_unix_secs();
+    let payload = serde_json::json!({ "path": path });
+    sqlx::query(
+        r#"
+        INSERT INTO agent_tasks (
+            id, node_id, kind, status, payload_json, attempt_count, created_at, updated_at
+        )
+        VALUES (?, ?, 'verify_model_file', 'queued', ?, 0, ?, ?)
+        "#,
+    )
+    .bind(&task_id)
+    .bind(node_id)
+    .bind(payload.to_string())
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    notify_agent_tasks();
+
+    wait_for_model_file_verification(pool, &task_id).await
+}
+
+async fn wait_for_model_file_verification(
+    pool: &SqlitePool,
+    task_id: &str,
+) -> Result<VerifiedModelFile, Stage3Error> {
+    let deadline = Instant::now() + Duration::from_secs(MODEL_FILE_VERIFY_TIMEOUT_SECS);
+    loop {
+        let row =
+            sqlx::query("SELECT status, result_json, error_message FROM agent_tasks WHERE id = ?")
+                .bind(task_id)
+                .fetch_one(pool)
+                .await?;
+        let status: String = row.get("status");
+        match status.as_str() {
+            "succeeded" => {
+                let result_json: Option<String> = row.get("result_json");
+                let result = result_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                    .unwrap_or_else(|| serde_json::json!({}));
+                let file_status = result
+                    .get("file_status")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("verified");
+                if file_status != "verified" {
+                    return Err(Stage3Error::BadRequest(verification_error_message(&result)));
+                }
+                return Ok(VerifiedModelFile {
+                    size_bytes: result.get("size_bytes").and_then(|value| value.as_i64()),
+                    verified_at: now_unix_secs(),
+                });
+            }
+            "failed" => {
+                let result_json: Option<String> = row.get("result_json");
+                let message = result_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                    .map(|value| verification_error_message(&value))
+                    .or_else(|| row.get::<Option<String>, _>("error_message"))
+                    .unwrap_or_else(|| "模型文件验证失败".to_string());
+                return Err(Stage3Error::BadRequest(message));
+            }
+            "timed_out" => {
+                return Err(Stage3Error::Conflict(
+                    "模型文件验证超时，请确认 Agent 在线并重试".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        if Instant::now() >= deadline {
+            mark_task_timed_out(pool, task_id).await?;
+            return Err(Stage3Error::Conflict(
+                "模型文件验证超时，请确认 Agent 在线并重试".to_string(),
+            ));
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+fn verification_error_message(result: &serde_json::Value) -> String {
+    result
+        .get("message")
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or("模型文件验证失败")
+        .to_string()
+}
+
+pub async fn poll_agent_task(
+    pool: &SqlitePool,
+    node_id: &str,
+    current_config_version: Option<i64>,
+) -> Result<AgentTaskPollResponse, Stage3Error> {
+    let deadline = Instant::now() + Duration::from_secs(AGENT_TASK_LONG_POLL_SECS);
+    let row = loop {
+        mark_timed_out_tasks(pool).await?;
+        if let Some(row) = next_queued_agent_task(pool, node_id).await? {
+            break row;
+        }
+        if Instant::now() >= deadline {
+            return Ok(AgentTaskPollResponse {
+                task: None,
+                agent_config: repository::effective_agent_config(pool, node_id).await?,
+            });
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let wait = remaining.min(Duration::from_secs(AGENT_TASK_LONG_POLL_SECS));
+        if timeout(wait, task_notify().notified()).await.is_ok() {
+            let effective_config = repository::effective_agent_config(pool, node_id).await?;
+            if next_queued_agent_task(pool, node_id).await?.is_none()
+                && current_config_version
+                    .is_some_and(|version| version != effective_config.config_version)
+            {
+                return Ok(AgentTaskPollResponse {
+                    task: None,
+                    agent_config: effective_config,
+                });
+            }
+        }
+    };
+    let task_id: String = row.get("id");
+    let now = now_unix_secs();
+    let lease_until = now + AGENT_TASK_LEASE_SECS;
+    sqlx::query(
+        r#"
+        UPDATE agent_tasks
+        SET status = 'running', started_at = COALESCE(started_at, ?),
+            lease_until = ?, attempt_count = attempt_count + 1, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(now)
+    .bind(lease_until)
+    .bind(now)
+    .bind(&task_id)
+    .execute(pool)
+    .await?;
+    if row.get::<String, _>("kind") == "verify_model_file" {
+        if let Ok(payload) =
+            serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("payload_json"))
+        {
+            if let Some(model_file_id) = payload
+                .get("model_file_id")
+                .and_then(|value| value.as_str())
+            {
+                sqlx::query(
+                    "UPDATE model_files SET status = 'verifying', updated_at = ? WHERE id = ?",
+                )
+                .bind(now)
+                .bind(model_file_id)
+                .execute(pool)
+                .await?;
+            }
+        }
+    } else if row.get::<String, _>("kind") == "cleanup_model_file" {
+        if let Ok(payload) =
+            serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("payload_json"))
+        {
+            if let Some(trash_id) = payload.get("trash_id").and_then(|value| value.as_str()) {
+                sqlx::query(
+                    "UPDATE model_file_trash SET status = 'cleanup_running', updated_at = ? WHERE id = ?",
+                )
+                .bind(now)
+                .bind(trash_id)
+                .execute(pool)
+                .await?;
+            }
+        }
+    }
+    let row = sqlx::query("SELECT * FROM agent_tasks WHERE id = ?")
+        .bind(&task_id)
+        .fetch_one(pool)
+        .await?;
+    Ok(AgentTaskPollResponse {
+        task: Some(agent_task_from_row(row)?),
+        agent_config: repository::effective_agent_config(pool, node_id).await?,
+    })
+}
+
+async fn next_queued_agent_task(
+    pool: &SqlitePool,
+    node_id: &str,
+) -> Result<Option<sqlx::sqlite::SqliteRow>, Stage3Error> {
+    Ok(sqlx::query(
+        r#"
+        SELECT * FROM agent_tasks
+        WHERE node_id = ? AND status = 'queued'
+        ORDER BY created_at
+        LIMIT 1
+        "#,
+    )
+    .bind(node_id)
+    .fetch_optional(pool)
+    .await?)
+}
+
+pub async fn record_agent_task_result(
+    pool: &SqlitePool,
+    task_id: &str,
+    request: AgentTaskResultRequest,
+) -> Result<(), Stage3Error> {
+    let task = sqlx::query("SELECT * FROM agent_tasks WHERE id = ? AND node_id = ?")
+        .bind(task_id)
+        .bind(&request.node_id)
+        .fetch_optional(pool)
+        .await?
+        .ok_or_else(|| Stage3Error::NotFound("agent task not found".to_string()))?;
+    validate_one_of("status", &request.status, &["succeeded", "failed"])?;
+
+    let now = now_unix_secs();
+    let result_json = request.result.to_string();
+    let error_message = request
+        .result
+        .get("message")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        UPDATE agent_tasks
+        SET status = ?, result_json = ?, error_message = ?, completed_at = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&request.status)
+    .bind(result_json)
+    .bind(if request.status == "failed" {
+        error_message.as_deref()
+    } else {
+        None
+    })
+    .bind(now)
+    .bind(now)
+    .bind(task_id)
+    .execute(&mut *tx)
+    .await?;
+
+    if task.get::<String, _>("kind") == "verify_model_file" {
+        let payload: serde_json::Value =
+            serde_json::from_str(&task.get::<String, _>("payload_json"))
+                .map_err(|error| Stage3Error::Internal(error.into()))?;
+        let model_file_id = payload
+            .get("model_file_id")
+            .and_then(|value| value.as_str());
+        let file_status = request
+            .result
+            .get("file_status")
+            .and_then(|value| value.as_str())
+            .unwrap_or(if request.status == "succeeded" {
+                "verified"
+            } else {
+                "failed"
+            });
+        let size_bytes = request
+            .result
+            .get("size_bytes")
+            .and_then(|value| value.as_i64());
+        let last_error = if file_status == "verified" {
+            None
+        } else {
+            error_message.as_deref().or(Some("文件验证失败"))
+        };
+        if let Some(model_file_id) = model_file_id {
+            sqlx::query(
+                r#"
+                UPDATE model_files
+                SET status = ?, size_bytes = ?, last_verified_at = ?, last_error = ?, updated_at = ?
+                WHERE id = ?
+                "#,
+            )
+            .bind(file_status)
+            .bind(size_bytes)
+            .bind(now)
+            .bind(last_error)
+            .bind(now)
+            .bind(model_file_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    } else if task.get::<String, _>("kind") == "cleanup_model_file" {
+        let payload: serde_json::Value =
+            serde_json::from_str(&task.get::<String, _>("payload_json"))
+                .map_err(|error| Stage3Error::Internal(error.into()))?;
+        let trash_id = payload
+            .get("trash_id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| Stage3Error::BadRequest("task payload is invalid".to_string()))?;
+        let message = error_message
+            .as_deref()
+            .unwrap_or(if request.status == "succeeded" {
+                "文件已清理"
+            } else {
+                "文件清理失败"
+            });
+        if request.status == "succeeded" {
+            sqlx::query(
+                r#"
+                UPDATE model_file_trash
+                SET status = 'cleaned', file_deleted_at = ?, last_error = NULL, updated_at = ?
+                WHERE id = ?
+                "#,
+            )
+            .bind(now)
+            .bind(now)
+            .bind(trash_id)
+            .execute(&mut *tx)
+            .await?;
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE model_file_trash
+                SET status = 'cleanup_failed', last_error = ?, updated_at = ?
+                WHERE id = ?
+                "#,
+            )
+            .bind(message)
+            .bind(now)
+            .bind(trash_id)
+            .execute(&mut *tx)
+            .await?;
+        }
+    } else if matches!(
+        task.get::<String, _>("kind").as_str(),
+        "start_model_instance" | "stop_model_instance"
+    ) {
+        let payload: serde_json::Value =
+            serde_json::from_str(&task.get::<String, _>("payload_json"))
+                .map_err(|error| Stage3Error::Internal(error.into()))?;
+        let instance_id = payload
+            .get("instance_id")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| Stage3Error::BadRequest("task payload is invalid".to_string()))?;
+        let next_status = request
+            .result
+            .get("instance_status")
+            .and_then(|value| value.as_str())
+            .unwrap_or(if request.status == "succeeded" {
+                if task.get::<String, _>("kind") == "start_model_instance" {
+                    "running"
+                } else {
+                    "stopped"
+                }
+            } else {
+                "failed"
+            });
+        let last_error = if request.status == "succeeded" {
+            None
+        } else {
+            error_message.as_deref().or(Some("实例任务执行失败"))
+        };
+        sqlx::query(
+            "UPDATE model_instances SET status = ?, last_checked_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(next_status)
+        .bind(now)
+        .bind(last_error)
+        .bind(now)
+        .bind(instance_id)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(())
+}
+
 pub async fn create_model_instance(
     pool: &SqlitePool,
     request: ModelInstanceCreateRequest,
 ) -> Result<ModelInstanceView, Stage3Error> {
     validate_non_empty("name", &request.name)?;
     validate_instance_status(request.status.as_deref().unwrap_or("unknown"))?;
-    let deploy_type = "external";
+    let deploy_type = request.deploy_type.as_deref().unwrap_or("external");
+    validate_instance_deploy_type(deploy_type)?;
+    if deploy_type == "local" {
+        return create_local_model_instance(pool, request).await;
+    }
     let backend = request
         .backend
         .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("backend is required".to_string()))?;
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("custom");
     validate_backend(backend)?;
+    validate_base_url_required(&request.base_url)?;
+    validate_optional_non_empty("model_name", request.model_name.as_deref())?;
     validate_instance_urls(
-        &request.base_url,
-        &request.endpoint_url,
-        &request.health_url,
-    )?;
-    validate_has_check_url(
         &request.base_url,
         &request.endpoint_url,
         &request.health_url,
     )?;
     validate_json_field("params_json", request.params_json.as_deref())?;
 
-    let model_exists: Option<i64> =
-        sqlx::query_scalar("SELECT 1 FROM models WHERE id = ? AND deleted_at IS NULL")
-            .bind(&request.model_id)
-            .fetch_optional(pool)
-            .await?;
-    if model_exists.is_none() {
-        return Err(Stage3Error::BadRequest("model not found".to_string()));
+    if let Some(model_id) = request.model_id.as_deref() {
+        let model_exists: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM models WHERE id = ? AND deleted_at IS NULL")
+                .bind(model_id)
+                .fetch_optional(pool)
+                .await?;
+        if model_exists.is_none() {
+            return Err(Stage3Error::BadRequest("model not found".to_string()));
+        }
     }
 
     let now = now_unix_secs();
@@ -455,15 +1212,16 @@ pub async fn create_model_instance(
     sqlx::query(
         r#"
         INSERT INTO model_instances (
-            id, model_id, node_id, runtime_environment_id, name, backend,
+            id, model_id, model_file_id, node_id, runtime_environment_id, name, backend,
             deploy_type, status, base_url, endpoint_url, health_url, runtime_version,
             model_name, description, params_json, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&id)
     .bind(request.model_id)
+    .bind(None::<String>)
     .bind(request.node_id)
     .bind(request.runtime_environment_id)
     .bind(request.name)
@@ -485,15 +1243,80 @@ pub async fn create_model_instance(
     model_instance(pool, &id).await
 }
 
+async fn create_local_model_instance(
+    pool: &SqlitePool,
+    request: ModelInstanceCreateRequest,
+) -> Result<ModelInstanceView, Stage3Error> {
+    let node_id = request
+        .node_id
+        .as_deref()
+        .ok_or_else(|| Stage3Error::BadRequest("本地实例必须选择节点".to_string()))?;
+    let runtime_environment_id = request
+        .runtime_environment_id
+        .as_deref()
+        .ok_or_else(|| Stage3Error::BadRequest("本地实例必须选择运行环境".to_string()))?;
+    let model_file_id = request
+        .model_file_id
+        .as_deref()
+        .ok_or_else(|| Stage3Error::BadRequest("本地实例必须选择已验证模型文件".to_string()))?;
+    let env = runtime_environment(pool, runtime_environment_id).await?;
+    if env.node_id.as_deref() != Some(node_id) {
+        return Err(Stage3Error::BadRequest(
+            "运行环境不属于所选节点".to_string(),
+        ));
+    }
+    if env.check_status.as_deref() != Some("available") {
+        return Err(Stage3Error::BadRequest(
+            "运行环境未通过 Agent 检查".to_string(),
+        ));
+    }
+    let file = verified_model_file_for_instance(pool, model_file_id).await?;
+    if file.node_id != node_id {
+        return Err(Stage3Error::BadRequest(
+            "模型文件不属于所选节点".to_string(),
+        ));
+    }
+
+    let now = now_unix_secs();
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO model_instances (
+            id, model_id, model_file_id, node_id, runtime_environment_id, name, backend,
+            deploy_type, status, runtime_version, model_name, description, params_json,
+            created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, 'local', 'stopped', ?, ?, ?, ?, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(file.model_id)
+    .bind(model_file_id)
+    .bind(node_id)
+    .bind(runtime_environment_id)
+    .bind(request.name)
+    .bind(env.backend)
+    .bind(env.version)
+    .bind(request.model_name)
+    .bind(request.description)
+    .bind(request.params_json)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    model_instance(pool, &id).await
+}
+
 pub async fn list_model_instances(
     pool: &SqlitePool,
 ) -> Result<ModelInstanceListResponse, Stage3Error> {
     let rows = sqlx::query(
         r#"
-        SELECT mi.*, m.name AS model_definition_name, n.name AS node_name,
-               re.name AS runtime_environment_name
+        SELECT mi.*, m.name AS model_definition_name, mf.path AS model_file_path,
+               n.name AS node_name, re.name AS runtime_environment_name
         FROM model_instances mi
         LEFT JOIN models m ON m.id = mi.model_id
+        LEFT JOIN model_files mf ON mf.id = mi.model_file_id
         LEFT JOIN nodes n ON n.id = mi.node_id
         LEFT JOIN runtime_environments re ON re.id = mi.runtime_environment_id
         ORDER BY mi.created_at DESC
@@ -509,10 +1332,11 @@ pub async fn list_model_instances(
 pub async fn model_instance(pool: &SqlitePool, id: &str) -> Result<ModelInstanceView, Stage3Error> {
     let row = sqlx::query(
         r#"
-        SELECT mi.*, m.name AS model_definition_name, n.name AS node_name,
-               re.name AS runtime_environment_name
+        SELECT mi.*, m.name AS model_definition_name, mf.path AS model_file_path,
+               n.name AS node_name, re.name AS runtime_environment_name
         FROM model_instances mi
         LEFT JOIN models m ON m.id = mi.model_id
+        LEFT JOIN model_files mf ON mf.id = mi.model_file_id
         LEFT JOIN nodes n ON n.id = mi.node_id
         LEFT JOIN runtime_environments re ON re.id = mi.runtime_environment_id
         WHERE mi.id = ?
@@ -531,10 +1355,41 @@ pub async fn update_model_instance(
     request: ModelInstanceUpdateRequest,
 ) -> Result<ModelInstanceView, Stage3Error> {
     let current = model_instance(pool, id).await?;
+    if current.deploy_type == "local" {
+        let name = request.name.unwrap_or(current.name);
+        validate_non_empty("name", &name)?;
+        let params_json = request.params_json.or(current.params_json);
+        validate_json_field("params_json", params_json.as_deref())?;
+        let now = now_unix_secs();
+        sqlx::query(
+            "UPDATE model_instances SET name = ?, description = ?, params_json = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(name)
+        .bind(request.description.or(current.description))
+        .bind(params_json)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+        return model_instance(pool, id).await;
+    }
     let name = request.name.unwrap_or(current.name);
     validate_non_empty("name", &name)?;
     let status = request.status.unwrap_or(current.status);
     validate_instance_status(&status)?;
+    if let Some(backend) = request.backend.as_deref() {
+        if !backend.trim().is_empty() {
+            validate_backend(backend)?;
+        }
+    }
+    validate_base_url_required(&request.base_url.clone().or(current.base_url.clone()))?;
+    validate_optional_non_empty(
+        "model_name",
+        request
+            .model_name
+            .as_deref()
+            .or(current.model_name.as_deref()),
+    )?;
     validate_instance_urls(
         &request.base_url,
         &request.endpoint_url,
@@ -554,7 +1409,12 @@ pub async fn update_model_instance(
         "#,
     )
     .bind(name)
-    .bind(request.backend.unwrap_or(current.backend))
+    .bind(
+        request
+            .backend
+            .filter(|value| !value.trim().is_empty())
+            .unwrap_or(current.backend),
+    )
     .bind(status)
     .bind(request.base_url.or(current.base_url))
     .bind(request.endpoint_url.or(current.endpoint_url))
@@ -610,6 +1470,148 @@ pub async fn check_model_instance(
     update_instance_check(pool, id, &result.status, error).await
 }
 
+pub async fn start_model_instance(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<ModelInstanceView, Stage3Error> {
+    run_local_instance_task(pool, id, "start_model_instance", "starting").await
+}
+
+pub async fn stop_model_instance(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<ModelInstanceView, Stage3Error> {
+    run_local_instance_task(pool, id, "stop_model_instance", "stopping").await
+}
+
+async fn run_local_instance_task(
+    pool: &SqlitePool,
+    id: &str,
+    task_kind: &str,
+    pending_status: &str,
+) -> Result<ModelInstanceView, Stage3Error> {
+    let instance = model_instance(pool, id).await?;
+    if instance.deploy_type != "local" {
+        return Err(Stage3Error::BadRequest(
+            "External 实例不由平台启动或停止".to_string(),
+        ));
+    }
+    let node_id = instance
+        .node_id
+        .as_deref()
+        .ok_or_else(|| Stage3Error::BadRequest("本地实例缺少节点".to_string()))?;
+    if !node_online(pool, node_id).await? {
+        return Err(Stage3Error::Conflict(
+            "节点 Agent 离线，无法执行本地实例任务".to_string(),
+        ));
+    }
+    let model_file_id = instance
+        .model_file_id
+        .as_deref()
+        .ok_or_else(|| Stage3Error::BadRequest("本地实例缺少模型文件".to_string()))?;
+    let file = verified_model_file_for_instance(pool, model_file_id).await?;
+    let runtime_environment_id = instance
+        .runtime_environment_id
+        .as_deref()
+        .ok_or_else(|| Stage3Error::BadRequest("本地实例缺少运行环境".to_string()))?;
+    let env = runtime_environment(pool, runtime_environment_id).await?;
+    if env.check_status.as_deref() != Some("available") {
+        return Err(Stage3Error::BadRequest(
+            "运行环境未通过 Agent 检查".to_string(),
+        ));
+    }
+
+    let task_id = Uuid::new_v4().to_string();
+    let now = now_unix_secs();
+    let payload = serde_json::json!({
+        "instance_id": id,
+        "runtime_environment_id": runtime_environment_id,
+        "backend": env.backend,
+        "deploy_type": env.deploy_type,
+        "binary_path": env.binary_path,
+        "docker_image": env.docker_image,
+        "working_dir": env.working_dir,
+        "model_file_id": model_file_id,
+        "model_path": file.path,
+    });
+    let mut tx = pool.begin().await?;
+    sqlx::query(
+        r#"
+        INSERT INTO agent_tasks (
+            id, node_id, kind, status, payload_json, attempt_count, created_at, updated_at
+        )
+        VALUES (?, ?, ?, 'queued', ?, 0, ?, ?)
+        "#,
+    )
+    .bind(&task_id)
+    .bind(node_id)
+    .bind(task_kind)
+    .bind(payload.to_string())
+    .bind(now)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+    sqlx::query(
+        "UPDATE model_instances SET status = ?, last_error = NULL, updated_at = ? WHERE id = ?",
+    )
+    .bind(pending_status)
+    .bind(now)
+    .bind(id)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    notify_agent_tasks();
+    wait_for_model_instance_task(pool, id, &task_id).await
+}
+
+async fn wait_for_model_instance_task(
+    pool: &SqlitePool,
+    instance_id: &str,
+    task_id: &str,
+) -> Result<ModelInstanceView, Stage3Error> {
+    let deadline = Instant::now() + Duration::from_secs(MODEL_INSTANCE_TASK_TIMEOUT_SECS);
+    loop {
+        let row =
+            sqlx::query("SELECT status, result_json, error_message FROM agent_tasks WHERE id = ?")
+                .bind(task_id)
+                .fetch_one(pool)
+                .await?;
+        let status: String = row.get("status");
+        match status.as_str() {
+            "succeeded" => return model_instance(pool, instance_id).await,
+            "failed" => {
+                let result_json: Option<String> = row.get("result_json");
+                let message = result_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                    .and_then(|value| {
+                        value
+                            .get("message")
+                            .and_then(|m| m.as_str())
+                            .map(str::to_string)
+                    })
+                    .or_else(|| row.get::<Option<String>, _>("error_message"))
+                    .unwrap_or_else(|| "本地实例任务失败".to_string());
+                return Err(Stage3Error::Conflict(message));
+            }
+            "timed_out" => {
+                return Err(Stage3Error::Conflict(
+                    "本地实例任务超时，请确认 Agent 在线并重试".to_string(),
+                ));
+            }
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            mark_task_timed_out(pool, task_id).await?;
+            update_instance_check(pool, instance_id, "failed", Some("本地实例任务超时")).await?;
+            return Err(Stage3Error::Conflict(
+                "本地实例任务超时，请确认 Agent 在线并重试".to_string(),
+            ));
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn update_instance_check(
     pool: &SqlitePool,
     id: &str,
@@ -636,34 +1638,46 @@ async fn update_instance_check(
 
 pub async fn create_model_file_trash(
     pool: &SqlitePool,
-    model_id: &str,
+    model_file_id: &str,
     request: ModelFileTrashRequest,
 ) -> Result<ModelFileTrashView, Stage3Error> {
-    validate_non_empty("path", &request.path)?;
-    let model_exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM models WHERE id = ?")
-        .bind(model_id)
-        .fetch_optional(pool)
-        .await?;
-    if model_exists.is_none() {
-        return Err(Stage3Error::NotFound("model not found".to_string()));
+    ensure_model_file_trash(pool, model_file_id, request.reason, request.note).await
+}
+
+async fn ensure_model_file_trash(
+    pool: &SqlitePool,
+    model_file_id: &str,
+    reason: Option<String>,
+    note: Option<String>,
+) -> Result<ModelFileTrashView, Stage3Error> {
+    if let Some(existing_id) = sqlx::query_scalar::<_, String>(
+        "SELECT id FROM model_file_trash WHERE model_file_id = ? ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(model_file_id)
+    .fetch_optional(pool)
+    .await?
+    {
+        return model_file_trash_item(pool, &existing_id).await;
     }
+    let file = model_file(pool, model_file_id).await?;
 
     let now = now_unix_secs();
     let id = Uuid::new_v4().to_string();
     sqlx::query(
         r#"
         INSERT INTO model_file_trash (
-            id, model_id, node_id, path, reason, status, note, created_at, updated_at
+            id, model_file_id, model_id, node_id, path, reason, status, note, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, ?, 'pending', ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?)
         "#,
     )
     .bind(&id)
-    .bind(model_id)
-    .bind(request.node_id)
-    .bind(request.path)
-    .bind(request.reason)
-    .bind(request.note)
+    .bind(model_file_id)
+    .bind(file.model_id)
+    .bind(file.node_id)
+    .bind(file.path)
+    .bind(reason)
+    .bind(note)
     .bind(now)
     .bind(now)
     .execute(pool)
@@ -677,7 +1691,14 @@ pub async fn list_model_file_trash(
 ) -> Result<ModelFileTrashListResponse, Stage3Error> {
     let rows = sqlx::query(
         r#"
-        SELECT t.*, m.name AS model_name, n.name AS node_name
+        SELECT
+            t.*,
+            CASE
+                WHEN m.deleted_at IS NOT NULL AND instr(m.name, '__deleted__') > 0
+                THEN substr(m.name, 1, instr(m.name, '__deleted__') - 1)
+                ELSE m.name
+            END AS model_name,
+            n.name AS node_name
         FROM model_file_trash t
         LEFT JOIN models m ON m.id = t.model_id
         LEFT JOIN nodes n ON n.id = t.node_id
@@ -691,13 +1712,87 @@ pub async fn list_model_file_trash(
     })
 }
 
+pub async fn cleanup_model_file_trash(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<ModelFileTrashView, Stage3Error> {
+    let item = model_file_trash_item(pool, id).await?;
+    let node_id = item
+        .node_id
+        .clone()
+        .ok_or_else(|| Stage3Error::BadRequest("trash item has no node".to_string()))?;
+    if item.file_deleted_at.is_some() {
+        return Ok(item);
+    }
+    if !node_online(pool, &node_id).await? {
+        let message = "节点 Agent 离线，无法清理文件";
+        update_trash_failure(pool, id, "cleanup_failed", message).await?;
+        return Err(Stage3Error::Conflict(message.to_string()));
+    }
+
+    let task_id = Uuid::new_v4().to_string();
+    let now = now_unix_secs();
+    let payload = serde_json::json!({
+        "trash_id": id,
+        "path": item.path,
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO agent_tasks (
+            id, node_id, kind, status, payload_json, attempt_count, created_at, updated_at
+        )
+        VALUES (?, ?, 'cleanup_model_file', 'queued', ?, 0, ?, ?)
+        "#,
+    )
+    .bind(&task_id)
+    .bind(&node_id)
+    .bind(payload.to_string())
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    notify_agent_tasks();
+    sqlx::query(
+        r#"
+        UPDATE model_file_trash
+        SET status = 'cleanup_pending', cleanup_task_id = ?, last_error = NULL, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(&task_id)
+    .bind(now)
+    .bind(id)
+    .execute(pool)
+    .await?;
+
+    wait_for_model_file_cleanup(pool, id, &task_id).await
+}
+
+pub async fn delete_model_file_trash(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error> {
+    let result = sqlx::query("DELETE FROM model_file_trash WHERE id = ?")
+        .bind(id)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        return Err(Stage3Error::NotFound("trash item not found".to_string()));
+    }
+    Ok(())
+}
+
 async fn model_file_trash_item(
     pool: &SqlitePool,
     id: &str,
 ) -> Result<ModelFileTrashView, Stage3Error> {
     let row = sqlx::query(
         r#"
-        SELECT t.*, m.name AS model_name, n.name AS node_name
+        SELECT
+            t.*,
+            CASE
+                WHEN m.deleted_at IS NOT NULL AND instr(m.name, '__deleted__') > 0
+                THEN substr(m.name, 1, instr(m.name, '__deleted__') - 1)
+                ELSE m.name
+            END AS model_name,
+            n.name AS node_name
         FROM model_file_trash t
         LEFT JOIN models m ON m.id = t.model_id
         LEFT JOIN nodes n ON n.id = t.node_id
@@ -711,6 +1806,73 @@ async fn model_file_trash_item(
     Ok(model_file_trash_from_row(row))
 }
 
+async fn wait_for_model_file_cleanup(
+    pool: &SqlitePool,
+    trash_id: &str,
+    task_id: &str,
+) -> Result<ModelFileTrashView, Stage3Error> {
+    let deadline = Instant::now() + Duration::from_secs(MODEL_FILE_CLEANUP_TIMEOUT_SECS);
+    loop {
+        let row =
+            sqlx::query("SELECT status, result_json, error_message FROM agent_tasks WHERE id = ?")
+                .bind(task_id)
+                .fetch_one(pool)
+                .await?;
+        let status: String = row.get("status");
+        match status.as_str() {
+            "succeeded" => return model_file_trash_item(pool, trash_id).await,
+            "failed" => {
+                let result_json: Option<String> = row.get("result_json");
+                let message = result_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                    .and_then(|value| {
+                        value
+                            .get("message")
+                            .and_then(|message| message.as_str())
+                            .map(str::to_string)
+                    })
+                    .or_else(|| row.get::<Option<String>, _>("error_message"))
+                    .unwrap_or_else(|| "文件清理失败".to_string());
+                return Err(Stage3Error::Conflict(message));
+            }
+            "timed_out" => {
+                return Err(Stage3Error::Conflict(
+                    "文件清理超时，请确认 Agent 在线并重试".to_string(),
+                ));
+            }
+            _ => {}
+        }
+
+        if Instant::now() >= deadline {
+            mark_task_timed_out(pool, task_id).await?;
+            update_trash_failure(pool, trash_id, "cleanup_timeout", "文件清理超时").await?;
+            return Err(Stage3Error::Conflict(
+                "文件清理超时，请确认 Agent 在线并重试".to_string(),
+            ));
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+async fn update_trash_failure(
+    pool: &SqlitePool,
+    trash_id: &str,
+    status: &str,
+    message: &str,
+) -> Result<(), Stage3Error> {
+    sqlx::query(
+        "UPDATE model_file_trash SET status = ?, last_error = ?, updated_at = ? WHERE id = ?",
+    )
+    .bind(status)
+    .bind(message)
+    .bind(now_unix_secs())
+    .bind(trash_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 fn runtime_environment_from_row(row: sqlx::sqlite::SqliteRow) -> RuntimeEnvironmentView {
     RuntimeEnvironmentView {
         id: row.get("id"),
@@ -721,6 +1883,7 @@ fn runtime_environment_from_row(row: sqlx::sqlite::SqliteRow) -> RuntimeEnvironm
         version: row.get("version"),
         base_url: row.get("base_url"),
         health_url: row.get("health_url"),
+        endpoint_url: row.get("endpoint_url"),
         binary_path: row.get("binary_path"),
         docker_image: row.get("docker_image"),
         working_dir: row.get("working_dir"),
@@ -736,9 +1899,14 @@ fn runtime_environment_from_row(row: sqlx::sqlite::SqliteRow) -> RuntimeEnvironm
     }
 }
 
-fn model_from_row(row: sqlx::sqlite::SqliteRow) -> ModelView {
-    ModelView {
-        id: row.get("id"),
+async fn model_from_row(
+    pool: &SqlitePool,
+    row: sqlx::sqlite::SqliteRow,
+) -> Result<ModelView, Stage3Error> {
+    let id: String = row.get("id");
+    let summary = model_file_summary(pool, &id).await?;
+    Ok(ModelView {
+        id,
         name: row.get("name"),
         display_name: row.get("display_name"),
         model_type: row.get("model_type"),
@@ -749,14 +1917,175 @@ fn model_from_row(row: sqlx::sqlite::SqliteRow) -> ModelView {
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         deleted_at: row.get("deleted_at"),
+        file_status: summary.file_status,
+        total_file_count: summary.total_file_count,
+        verified_file_count: summary.verified_file_count,
+        available_node_count: summary.available_node_count,
+        last_file_verified_at: summary.last_file_verified_at,
+    })
+}
+
+struct ModelFileSummary {
+    file_status: String,
+    total_file_count: i64,
+    verified_file_count: i64,
+    available_node_count: i64,
+    last_file_verified_at: Option<i64>,
+}
+
+async fn model_file_summary(
+    pool: &SqlitePool,
+    model_id: &str,
+) -> Result<ModelFileSummary, Stage3Error> {
+    mark_timed_out_tasks(pool).await?;
+    let rows = sqlx::query(
+        r#"
+        SELECT status, node_id, last_verified_at
+        FROM model_files
+        WHERE model_id = ? AND deleted_at IS NULL
+        "#,
+    )
+    .bind(model_id)
+    .fetch_all(pool)
+    .await?;
+    let total_file_count = rows.len() as i64;
+    let verified_file_count = rows
+        .iter()
+        .filter(|row| row.get::<String, _>("status") == "verified")
+        .count() as i64;
+    let mut verified_nodes = std::collections::BTreeSet::new();
+    let mut last_file_verified_at = None;
+    let mut has_pending = false;
+    let mut has_failed = false;
+    for row in &rows {
+        let status: String = row.get("status");
+        match status.as_str() {
+            "verified" => {
+                verified_nodes.insert(row.get::<String, _>("node_id"));
+            }
+            "unverified" | "verify_pending" | "verifying" => has_pending = true,
+            _ => has_failed = true,
+        }
+        if let Some(value) = row.get::<Option<i64>, _>("last_verified_at") {
+            last_file_verified_at =
+                Some(last_file_verified_at.map_or(value, |current: i64| current.max(value)));
+        }
     }
+    let file_status = if total_file_count == 0 {
+        "no_files"
+    } else if verified_file_count == total_file_count {
+        "all_files_verified"
+    } else if verified_file_count > 0 {
+        "partially_verified"
+    } else if has_pending && !has_failed {
+        "pending_verification"
+    } else {
+        "verification_failed"
+    }
+    .to_string();
+    Ok(ModelFileSummary {
+        file_status,
+        total_file_count,
+        verified_file_count,
+        available_node_count: verified_nodes.len() as i64,
+        last_file_verified_at,
+    })
+}
+
+async fn model_file_rows(
+    pool: &SqlitePool,
+    model_id: Option<&str>,
+    file_id: Option<&str>,
+) -> Result<Vec<sqlx::sqlite::SqliteRow>, Stage3Error> {
+    mark_timed_out_tasks(pool).await?;
+    let now = now_unix_secs();
+    let query = r#"
+        SELECT mf.*, m.name AS model_name, n.name AS node_name, n.last_heartbeat_at,
+               t.status AS verify_task_status
+        FROM model_files mf
+        LEFT JOIN models m ON m.id = mf.model_id
+        LEFT JOIN nodes n ON n.id = mf.node_id
+        LEFT JOIN agent_tasks t ON t.id = mf.verify_task_id
+        WHERE (? IS NULL OR mf.model_id = ?)
+          AND (? IS NULL OR mf.id = ?)
+          AND mf.deleted_at IS NULL
+        ORDER BY n.name, mf.path
+        "#;
+    let rows = sqlx::query(query)
+        .bind(model_id)
+        .bind(model_id)
+        .bind(file_id)
+        .bind(file_id)
+        .fetch_all(pool)
+        .await?;
+    for row in &rows {
+        let status: String = row.get("status");
+        let task_status: Option<String> = row.get("verify_task_status");
+        if status == "verifying" && task_status.as_deref() == Some("timed_out") {
+            sqlx::query(
+                "UPDATE model_files SET status = 'verify_timeout', last_error = '验证超时', updated_at = ? WHERE id = ?",
+            )
+            .bind(now)
+            .bind(row.get::<String, _>("id"))
+            .execute(pool)
+            .await?;
+        }
+    }
+    Ok(rows)
+}
+
+fn model_file_from_row(row: sqlx::sqlite::SqliteRow) -> ModelFileView {
+    let now = now_unix_secs();
+    let last_heartbeat_at: Option<i64> = row.get("last_heartbeat_at");
+    let node_status = match last_heartbeat_at {
+        Some(last_seen) if now - last_seen <= repository::ONLINE_THRESHOLD_SECS => "online",
+        Some(_) => "offline",
+        None => "registered",
+    }
+    .to_string();
+    ModelFileView {
+        id: row.get("id"),
+        model_id: row.get("model_id"),
+        model_name: row.get("model_name"),
+        node_id: row.get("node_id"),
+        node_name: row.get("node_name"),
+        node_status,
+        path: row.get("path"),
+        status: row.get("status"),
+        size_bytes: row.get("size_bytes"),
+        last_verified_at: row.get("last_verified_at"),
+        last_error: row.get("last_error"),
+        verify_task_id: row.get("verify_task_id"),
+        verify_task_status: row.get("verify_task_status"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn agent_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<AgentTaskView, Stage3Error> {
+    let payload_json: String = row.get("payload_json");
+    let payload =
+        serde_json::from_str(&payload_json).map_err(|error| Stage3Error::Internal(error.into()))?;
+    Ok(AgentTaskView {
+        id: row.get("id"),
+        node_id: row.get("node_id"),
+        kind: row.get("kind"),
+        status: row.get("status"),
+        payload,
+        lease_until: row.get("lease_until"),
+        attempt_count: row.get("attempt_count"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    })
 }
 
 fn model_instance_from_row(row: sqlx::sqlite::SqliteRow) -> ModelInstanceView {
     ModelInstanceView {
         id: row.get("id"),
         model_id: row.get("model_id"),
+        model_file_id: row.get("model_file_id"),
         model_definition_name: row.get("model_definition_name"),
+        model_file_path: row.get("model_file_path"),
         node_id: row.get("node_id"),
         node_name: row.get("node_name"),
         runtime_environment_id: row.get("runtime_environment_id"),
@@ -782,6 +2111,7 @@ fn model_instance_from_row(row: sqlx::sqlite::SqliteRow) -> ModelInstanceView {
 fn model_file_trash_from_row(row: sqlx::sqlite::SqliteRow) -> ModelFileTrashView {
     ModelFileTrashView {
         id: row.get("id"),
+        model_file_id: row.get("model_file_id"),
         model_id: row.get("model_id"),
         model_name: row.get("model_name"),
         node_id: row.get("node_id"),
@@ -789,6 +2119,9 @@ fn model_file_trash_from_row(row: sqlx::sqlite::SqliteRow) -> ModelFileTrashView
         path: row.get("path"),
         reason: row.get("reason"),
         status: row.get("status"),
+        file_deleted_at: row.get("file_deleted_at"),
+        cleanup_task_id: row.get("cleanup_task_id"),
+        last_error: row.get("last_error"),
         note: row.get("note"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
@@ -800,6 +2133,13 @@ fn validate_non_empty(field: &str, value: &str) -> Result<(), Stage3Error> {
         return Err(Stage3Error::BadRequest(format!("{field} is required")));
     }
     Ok(())
+}
+
+fn validate_optional_non_empty(field: &str, value: Option<&str>) -> Result<(), Stage3Error> {
+    match value {
+        Some(value) if !value.trim().is_empty() => Ok(()),
+        _ => Err(Stage3Error::BadRequest(format!("{field} is required"))),
+    }
 }
 
 fn validate_backend(value: &str) -> Result<(), Stage3Error> {
@@ -819,7 +2159,11 @@ fn validate_backend(value: &str) -> Result<(), Stage3Error> {
 }
 
 fn validate_deploy_type(value: &str) -> Result<(), Stage3Error> {
-    validate_one_of("deploy_type", value, &["external", "docker", "script"])
+    validate_one_of("deploy_type", value, &["docker", "script", "binary"])
+}
+
+fn validate_instance_deploy_type(value: &str) -> Result<(), Stage3Error> {
+    validate_one_of("deploy_type", value, &["external", "local"])
 }
 
 fn validate_model_type(value: &str) -> Result<(), Stage3Error> {
@@ -848,18 +2192,6 @@ fn validate_one_of(field: &str, value: &str, allowed: &[&str]) -> Result<(), Sta
     }
 }
 
-fn validate_external_urls(request: &RuntimeEnvironmentRequest) -> Result<(), Stage3Error> {
-    for (field, value) in [
-        ("base_url", request.base_url.as_deref()),
-        ("health_url", request.health_url.as_deref()),
-    ] {
-        if let Some(value) = value {
-            validate_http_url(field, value)?;
-        }
-    }
-    Ok(())
-}
-
 fn validate_instance_urls(
     base_url: &Option<String>,
     endpoint_url: &Option<String>,
@@ -877,36 +2209,43 @@ fn validate_instance_urls(
     Ok(())
 }
 
-fn validate_has_check_url(
-    base_url: &Option<String>,
-    endpoint_url: &Option<String>,
-    health_url: &Option<String>,
-) -> Result<(), Stage3Error> {
-    if health_url
-        .as_deref()
-        .or(endpoint_url.as_deref())
-        .or(base_url.as_deref())
-        .is_some()
-    {
-        Ok(())
-    } else {
-        Err(Stage3Error::BadRequest(
-            "base_url, endpoint_url, or health_url is required".to_string(),
-        ))
+fn validate_base_url_required(base_url: &Option<String>) -> Result<(), Stage3Error> {
+    match base_url.as_deref() {
+        Some(value) if !value.trim().is_empty() => Ok(()),
+        _ => Err(Stage3Error::BadRequest("base_url is required".to_string())),
     }
 }
 
 fn validate_http_url(field: &str, value: &str) -> Result<(), Stage3Error> {
-    if value.starts_with("http://") || value.starts_with("https://") {
-        Ok(())
-    } else {
-        Err(Stage3Error::BadRequest(format!(
-            "{field} must start with http:// or https://"
-        )))
+    let parsed = reqwest::Url::parse(value).map_err(|_| {
+        Stage3Error::BadRequest(format!("{field} must be a valid http:// or https:// URL"))
+    })?;
+    match parsed.scheme() {
+        "http" | "https" => Ok(()),
+        _ => Err(Stage3Error::BadRequest(format!(
+            "{field} must use http:// or https://"
+        ))),
     }
 }
 
 fn validate_runtime_entrypoints(request: &RuntimeEnvironmentRequest) -> Result<(), Stage3Error> {
+    if request
+        .base_url
+        .as_deref()
+        .is_some_and(|value| !value.trim().is_empty())
+        || request
+            .health_url
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+        || request
+            .endpoint_url
+            .as_deref()
+            .is_some_and(|value| !value.trim().is_empty())
+    {
+        return Err(Stage3Error::BadRequest(
+            "运行环境不再配置 External URL，请在实例中接入外部服务".to_string(),
+        ));
+    }
     for (field, value) in [
         ("binary_path", request.binary_path.as_deref()),
         ("working_dir", request.working_dir.as_deref()),
@@ -918,6 +2257,19 @@ fn validate_runtime_entrypoints(request: &RuntimeEnvironmentRequest) -> Result<(
     }
     if let Some(value) = request.docker_image.as_deref() {
         validate_no_whitespace("docker_image", value)?;
+    }
+    match request.deploy_type.as_str() {
+        "docker" if request.docker_image.as_deref().is_none_or(str::is_empty) => {
+            return Err(Stage3Error::BadRequest(
+                "Docker 运行环境必须配置镜像".to_string(),
+            ));
+        }
+        "script" | "binary" if request.binary_path.as_deref().is_none_or(str::is_empty) => {
+            return Err(Stage3Error::BadRequest(
+                "运行环境必须配置受控入口路径".to_string(),
+            ));
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -955,6 +2307,131 @@ async fn ensure_node_online(pool: &SqlitePool, node_id: &str) -> Result<(), Stag
     }
 }
 
+async fn ensure_model_exists(pool: &SqlitePool, model_id: &str) -> Result<(), Stage3Error> {
+    let exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM models WHERE id = ? AND deleted_at IS NULL")
+            .bind(model_id)
+            .fetch_optional(pool)
+            .await?;
+    if exists.is_some() {
+        Ok(())
+    } else {
+        Err(Stage3Error::NotFound("model not found".to_string()))
+    }
+}
+
+async fn ensure_node_exists(pool: &SqlitePool, node_id: &str) -> Result<(), Stage3Error> {
+    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM nodes WHERE id = ?")
+        .bind(node_id)
+        .fetch_optional(pool)
+        .await?;
+    if exists.is_some() {
+        Ok(())
+    } else {
+        Err(Stage3Error::NotFound("node not found".to_string()))
+    }
+}
+
+async fn verified_model_file_for_instance(
+    pool: &SqlitePool,
+    model_file_id: &str,
+) -> Result<InstanceModelFile, Stage3Error> {
+    let row = sqlx::query(
+        r#"
+        SELECT model_id, node_id, path, status
+        FROM model_files
+        WHERE id = ? AND deleted_at IS NULL
+        "#,
+    )
+    .bind(model_file_id)
+    .fetch_optional(pool)
+    .await?
+    .ok_or_else(|| Stage3Error::BadRequest("模型文件不存在".to_string()))?;
+    let status: String = row.get("status");
+    if status != "verified" {
+        return Err(Stage3Error::BadRequest(
+            "本地实例只能使用已验证通过的模型文件".to_string(),
+        ));
+    }
+    Ok(InstanceModelFile {
+        model_id: row.get("model_id"),
+        node_id: row.get("node_id"),
+        path: row.get("path"),
+    })
+}
+
+async fn mark_timed_out_tasks(pool: &SqlitePool) -> Result<(), Stage3Error> {
+    let now = now_unix_secs();
+    let rows = sqlx::query(
+        r#"
+        SELECT id, kind, payload_json
+        FROM agent_tasks
+        WHERE (status = 'running' AND lease_until IS NOT NULL AND lease_until < ?)
+           OR (status = 'queued' AND created_at < ?)
+        "#,
+    )
+    .bind(now)
+    .bind(now - AGENT_TASK_QUEUE_TIMEOUT_SECS)
+    .fetch_all(pool)
+    .await?;
+    for row in rows {
+        let task_id: String = row.get("id");
+        mark_task_timed_out(pool, &task_id).await?;
+        if row.get::<String, _>("kind") == "verify_model_file" {
+            if let Ok(payload) =
+                serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("payload_json"))
+            {
+                if let Some(model_file_id) = payload
+                    .get("model_file_id")
+                    .and_then(|value| value.as_str())
+                {
+                    sqlx::query(
+                        "UPDATE model_files SET status = 'verify_timeout', last_error = '验证超时', updated_at = ? WHERE id = ?",
+                    )
+                    .bind(now)
+                    .bind(model_file_id)
+                    .execute(pool)
+                    .await?;
+                }
+            }
+        } else if row.get::<String, _>("kind") == "cleanup_model_file" {
+            if let Ok(payload) =
+                serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("payload_json"))
+            {
+                if let Some(trash_id) = payload.get("trash_id").and_then(|value| value.as_str()) {
+                    update_trash_failure(pool, trash_id, "cleanup_timeout", "文件清理超时").await?;
+                }
+            }
+        } else if matches!(
+            row.get::<String, _>("kind").as_str(),
+            "start_model_instance" | "stop_model_instance"
+        ) {
+            if let Ok(payload) =
+                serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("payload_json"))
+            {
+                if let Some(instance_id) =
+                    payload.get("instance_id").and_then(|value| value.as_str())
+                {
+                    update_instance_check(pool, instance_id, "failed", Some("本地实例任务超时"))
+                        .await?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn mark_task_timed_out(pool: &SqlitePool, task_id: &str) -> Result<(), Stage3Error> {
+    sqlx::query(
+        "UPDATE agent_tasks SET status = 'timed_out', error_message = '任务执行超时', updated_at = ? WHERE id = ? AND status IN ('queued', 'running')",
+    )
+    .bind(now_unix_secs())
+    .bind(task_id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
 async fn node_online(pool: &SqlitePool, node_id: &str) -> Result<bool, Stage3Error> {
     let last_heartbeat_at: Option<i64> =
         sqlx::query_scalar("SELECT last_heartbeat_at FROM nodes WHERE id = ?")
@@ -987,7 +2464,7 @@ fn map_sqlx_conflict(error: sqlx::Error) -> Stage3Error {
                 .message()
                 .contains("UNIQUE constraint failed") =>
         {
-            Stage3Error::Conflict(database_error.message().to_string())
+            Stage3Error::Conflict("模型名称已存在，请使用其他名称".to_string())
         }
         _ => Stage3Error::Internal(error.into()),
     }

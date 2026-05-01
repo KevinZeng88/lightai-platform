@@ -1,4 +1,7 @@
-use crate::models::{HeartbeatRequest, HeartbeatResponse, RegisterRequest, RegisterResponse};
+use crate::models::{
+    AgentTaskPollRequest, AgentTaskPollResponse, AgentTaskResultRequest, HeartbeatRequest,
+    HeartbeatResponse, RegisterRequest, RegisterResponse,
+};
 
 #[derive(Clone)]
 pub struct ServerClient {
@@ -41,5 +44,41 @@ impl ServerClient {
             .error_for_status()?;
 
         Ok(response.json().await?)
+    }
+
+    pub async fn poll_task(
+        &self,
+        token: &str,
+        request: &AgentTaskPollRequest,
+    ) -> anyhow::Result<AgentTaskPollResponse> {
+        let response = self
+            .client
+            .post(format!("{}/api/agent/tasks/poll", self.base_url))
+            .bearer_auth(token)
+            .json(request)
+            .send()
+            .await?
+            .error_for_status()?;
+
+        Ok(response.json().await?)
+    }
+
+    pub async fn report_task_result(
+        &self,
+        token: &str,
+        task_id: &str,
+        request: &AgentTaskResultRequest,
+    ) -> anyhow::Result<()> {
+        self.client
+            .post(format!(
+                "{}/api/agent/tasks/{task_id}/result",
+                self.base_url
+            ))
+            .bearer_auth(token)
+            .json(request)
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
     }
 }

@@ -27,11 +27,55 @@ pub struct AgentConfig {
     pub config_version: i64,
     pub heartbeat_interval_secs: u64,
     pub metrics_sample_interval_secs: u64,
+    #[serde(default)]
     pub task_poll_interval_secs: u64,
+    #[serde(default)]
     pub config_refresh_interval_secs: u64,
     pub command_timeout_secs: u64,
     pub environment_check_timeout_secs: u64,
+    #[serde(default)]
+    pub allowed_model_dirs: Vec<String>,
+    #[serde(default = "default_nvidia_collector_enabled")]
+    pub nvidia_collector_enabled: bool,
+    #[serde(default)]
+    pub custom_collector_script: Option<String>,
+    #[serde(default = "default_collector_timeout_secs")]
+    pub collector_timeout_secs: u64,
+    #[serde(default = "default_collector_max_output_bytes")]
+    pub collector_max_output_bytes: usize,
     pub last_config_updated_at: Option<i64>,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            config_version: 0,
+            heartbeat_interval_secs: 15,
+            metrics_sample_interval_secs: 15,
+            task_poll_interval_secs: 15,
+            config_refresh_interval_secs: 60,
+            command_timeout_secs: 5,
+            environment_check_timeout_secs: 5,
+            allowed_model_dirs: Vec::new(),
+            nvidia_collector_enabled: true,
+            custom_collector_script: None,
+            collector_timeout_secs: default_collector_timeout_secs(),
+            collector_max_output_bytes: default_collector_max_output_bytes(),
+            last_config_updated_at: None,
+        }
+    }
+}
+
+fn default_nvidia_collector_enabled() -> bool {
+    true
+}
+
+fn default_collector_timeout_secs() -> u64 {
+    5
+}
+
+fn default_collector_max_output_bytes() -> usize {
+    1024 * 1024
 }
 
 #[derive(Debug, Serialize)]
@@ -68,4 +112,30 @@ pub struct GpuMetrics {
     pub power_watts: Option<f64>,
     pub collector: String,
     pub raw_json: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentTaskPollRequest {
+    pub node_id: String,
+    pub current_config_version: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentTaskPollResponse {
+    pub task: Option<AgentTask>,
+    pub agent_config: Option<AgentConfig>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AgentTask {
+    pub id: String,
+    pub kind: String,
+    pub payload: serde_json::Value,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AgentTaskResultRequest {
+    pub node_id: String,
+    pub status: String,
+    pub result: serde_json::Value,
 }

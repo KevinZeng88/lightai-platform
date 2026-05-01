@@ -1,4 +1,7 @@
 import type {
+  AgentConfigPoliciesResponse,
+  AgentConfigPolicy,
+  AgentConfigPolicyView,
   GpuMetricSample,
   MetricSampleResponse,
   ModelDefinition,
@@ -54,6 +57,23 @@ export async function fetchNodes(): Promise<NodeStatus[]> {
   }
   const payload = await response.json()
   return payload.nodes
+}
+
+export async function fetchAgentConfigPolicies(): Promise<AgentConfigPoliciesResponse> {
+  return sendJson('/api/config/agent', 'GET')
+}
+
+export async function updateGlobalAgentConfigPolicy(
+  payload: AgentConfigPolicy
+): Promise<AgentConfigPolicyView> {
+  return sendJson('/api/config/agent/global', 'PUT', payload)
+}
+
+export async function updateNodeAgentConfigPolicy(
+  nodeId: string,
+  payload: AgentConfigPolicy
+): Promise<AgentConfigPolicyView> {
+  return sendJson(`/api/nodes/${nodeId}/config`, 'PUT', payload)
 }
 
 export async function fetchNodeMetrics(
@@ -167,9 +187,11 @@ export async function fetchModelInstances(): Promise<ModelInstance[]> {
 
 export async function createModelInstance(payload: {
   model_id?: string | null
+  model_file_id?: string | null
   node_id?: string | null
   runtime_environment_id?: string | null
   name: string
+  deploy_type?: string | null
   backend?: string | null
   base_url?: string | null
   endpoint_url?: string | null
@@ -187,6 +209,10 @@ export async function updateModelInstance(
   id: string,
   payload: {
     name?: string | null
+    deploy_type?: string | null
+    model_file_id?: string | null
+    node_id?: string | null
+    runtime_environment_id?: string | null
     backend?: string | null
     base_url?: string | null
     endpoint_url?: string | null
@@ -209,6 +235,14 @@ export async function checkModelInstance(id: string): Promise<ModelInstance> {
   return sendJson(`/api/model-instances/${id}/check`, 'POST')
 }
 
+export async function startModelInstance(id: string): Promise<ModelInstance> {
+  return sendJson(`/api/model-instances/${id}/start`, 'POST')
+}
+
+export async function stopModelInstance(id: string): Promise<ModelInstance> {
+  return sendJson(`/api/model-instances/${id}/stop`, 'POST')
+}
+
 export async function fetchModelFileTrash(): Promise<ModelFileTrashItem[]> {
   const payload = await sendJson<{ items: ModelFileTrashItem[] }>('/api/model-file-trash', 'GET')
   return payload.items
@@ -222,6 +256,14 @@ export async function addModelFileTrash(
   }
 ): Promise<ModelFileTrashItem> {
   return sendJson(`/api/model-files/${modelFileId}/trash`, 'POST', payload)
+}
+
+export async function cleanupModelFileTrash(id: string): Promise<ModelFileTrashItem> {
+  return sendJson(`/api/model-file-trash/${id}/cleanup`, 'POST')
+}
+
+export async function deleteModelFileTrash(id: string): Promise<void> {
+  await sendEmpty(`/api/model-file-trash/${id}`, 'DELETE')
 }
 
 export async function fetchGpuMetrics(

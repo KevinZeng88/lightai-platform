@@ -1,12 +1,13 @@
 use axum::extract::{Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
-use axum::{routing::get, routing::post, Json, Router};
+use axum::{routing::delete, routing::get, routing::post, Json, Router};
 use serde::Serialize;
 use sqlx::SqlitePool;
 
 use crate::models::{
-    HeartbeatRequest, HeartbeatResponse, MetricsQuery, ModelFileTrashRequest,
+    AgentConfigPolicy, AgentTaskPollRequest, AgentTaskResultRequest, GpuMetricsQuery,
+    HeartbeatRequest, HeartbeatResponse, MetricsQuery, ModelFileRequest, ModelFileTrashRequest,
     ModelInstanceCreateRequest, ModelInstanceUpdateRequest, ModelRequest, RegisterRequest,
     RuntimeEnvironmentRequest,
 };
@@ -25,10 +26,23 @@ pub fn app(pool: SqlitePool) -> Router {
         .route("/api/agent/register", post(register_agent))
         .route("/api/agent/heartbeat", post(agent_heartbeat))
         .route("/api/nodes", get(list_nodes))
+        .route("/api/config/agent", get(list_agent_config_policies))
+        .route(
+            "/api/config/agent/global",
+            get(get_global_agent_config_policy).put(update_global_agent_config_policy),
+        )
+        .route(
+            "/api/nodes/{node_id}/config",
+            get(get_node_agent_config_policy).put(update_node_agent_config_policy),
+        )
         .route("/api/nodes/{node_id}/metrics", get(node_metrics))
         .route(
             "/api/nodes/{node_id}/gpus/{gpu_key}/metrics",
             get(gpu_metrics),
+        )
+        .route(
+            "/api/nodes/{node_id}/gpu-metrics",
+            get(gpu_metrics_by_query),
         )
         .route("/api/runtime-environments", get(list_runtime_environments))
         .route(
@@ -51,6 +65,18 @@ pub fn app(pool: SqlitePool) -> Router {
             get(get_model).put(update_model).delete(delete_model),
         )
         .route(
+            "/api/models/{id}/files",
+            get(list_model_files).post(create_model_file),
+        )
+        .route(
+            "/api/model-files/{id}",
+            get(get_model_file)
+                .put(update_model_file)
+                .delete(delete_model_file),
+        )
+        .route("/api/model-files/{id}/verify", post(verify_model_file))
+        .route("/api/model-files/{id}/trash", post(create_model_file_trash))
+        .route(
             "/api/model-instances",
             get(list_model_instances).post(create_model_instance),
         )
@@ -64,8 +90,22 @@ pub fn app(pool: SqlitePool) -> Router {
             "/api/model-instances/{id}/check",
             post(check_model_instance),
         )
+        .route(
+            "/api/model-instances/{id}/start",
+            post(start_model_instance),
+        )
+        .route("/api/model-instances/{id}/stop", post(stop_model_instance))
         .route("/api/model-file-trash", get(list_model_file_trash))
-        .route("/api/models/{id}/file-trash", post(create_model_file_trash))
+        .route(
+            "/api/model-file-trash/{id}/cleanup",
+            post(cleanup_model_file_trash),
+        )
+        .route(
+            "/api/model-file-trash/{id}",
+            delete(delete_model_file_trash),
+        )
+        .route("/api/agent/tasks/poll", post(agent_task_poll))
+        .route("/api/agent/tasks/{id}/result", post(agent_task_result))
         .with_state(pool)
 }
 
@@ -93,10 +133,11 @@ async fn agent_heartbeat(
         return Err(ApiError::Unauthorized);
     }
 
+    let node_id = request.node_id.clone();
     repository::record_heartbeat(&pool, request).await?;
     Ok(Json(HeartbeatResponse {
         status: "ok",
-        agent_config: repository::default_agent_config(current_unix_secs()),
+        agent_config: repository::effective_agent_config(&pool, &node_id).await?,
     }))
 }
 
@@ -104,6 +145,46 @@ async fn list_nodes(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<crate::models::NodeListResponse>, ApiError> {
     Ok(Json(repository::list_nodes(&pool).await?))
+}
+
+async fn list_agent_config_policies(
+    State(pool): State<SqlitePool>,
+) -> Result<Json<crate::models::AgentConfigPoliciesResponse>, ApiError> {
+    Ok(Json(repository::list_agent_config_policies(&pool).await?))
+}
+
+async fn get_global_agent_config_policy(
+    State(pool): State<SqlitePool>,
+) -> Result<Json<crate::models::AgentConfigPolicyView>, ApiError> {
+    Ok(Json(repository::global_agent_config_policy(&pool).await?))
+}
+
+async fn update_global_agent_config_policy(
+    State(pool): State<SqlitePool>,
+    Json(request): Json<AgentConfigPolicy>,
+) -> Result<Json<crate::models::AgentConfigPolicyView>, ApiError> {
+    let view = repository::update_global_agent_config_policy(&pool, request).await?;
+    stage3a::notify_agent_tasks();
+    Ok(Json(view))
+}
+
+async fn get_node_agent_config_policy(
+    State(pool): State<SqlitePool>,
+    Path(node_id): Path<String>,
+) -> Result<Json<crate::models::AgentConfigPolicyView>, ApiError> {
+    Ok(Json(
+        repository::node_agent_config_policy(&pool, &node_id).await?,
+    ))
+}
+
+async fn update_node_agent_config_policy(
+    State(pool): State<SqlitePool>,
+    Path(node_id): Path<String>,
+    Json(request): Json<AgentConfigPolicy>,
+) -> Result<Json<crate::models::AgentConfigPolicyView>, ApiError> {
+    let view = repository::update_node_agent_config_policy(&pool, &node_id, request).await?;
+    stage3a::notify_agent_tasks();
+    Ok(Json(view))
 }
 
 async fn node_metrics(
@@ -125,6 +206,20 @@ async fn gpu_metrics(
     let (from, to) = time_window(query);
     Ok(Json(
         repository::gpu_metric_samples(&pool, &node_id, &gpu_key, from, to).await?,
+    ))
+}
+
+async fn gpu_metrics_by_query(
+    State(pool): State<SqlitePool>,
+    Path(node_id): Path<String>,
+    Query(query): Query<GpuMetricsQuery>,
+) -> Result<Json<crate::models::GpuMetricSamplesResponse>, ApiError> {
+    let (from, to) = time_window(MetricsQuery {
+        from: query.from,
+        to: query.to,
+    });
+    Ok(Json(
+        repository::gpu_metric_samples(&pool, &node_id, &query.gpu_key, from, to).await?,
     ))
 }
 
@@ -221,6 +316,53 @@ async fn delete_model(
     Ok(StatusCode::OK)
 }
 
+async fn list_model_files(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::models::ModelFileListResponse>, ApiError> {
+    Ok(Json(stage3a::list_model_files(&pool, &id).await?))
+}
+
+async fn create_model_file(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+    Json(request): Json<ModelFileRequest>,
+) -> Result<Json<crate::models::ModelFileView>, ApiError> {
+    Ok(Json(stage3a::create_model_file(&pool, &id, request).await?))
+}
+
+async fn get_model_file(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::models::ModelFileView>, ApiError> {
+    Ok(Json(stage3a::model_file(&pool, &id).await?))
+}
+
+async fn update_model_file(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+    Json(request): Json<ModelFileRequest>,
+) -> Result<Json<crate::models::ModelFileView>, ApiError> {
+    Ok(Json(stage3a::update_model_file(&pool, &id, request).await?))
+}
+
+async fn delete_model_file(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    stage3a::delete_model_file(&pool, &id).await?;
+    Ok(StatusCode::OK)
+}
+
+async fn verify_model_file(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::models::ModelFileView>, ApiError> {
+    Ok(Json(
+        stage3a::queue_model_file_verification(&pool, &id).await?,
+    ))
+}
+
 async fn list_model_instances(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<crate::models::ModelInstanceListResponse>, ApiError> {
@@ -266,6 +408,20 @@ async fn check_model_instance(
     Ok(Json(stage3a::check_model_instance(&pool, &id).await?))
 }
 
+async fn start_model_instance(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
+    Ok(Json(stage3a::start_model_instance(&pool, &id).await?))
+}
+
+async fn stop_model_instance(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
+    Ok(Json(stage3a::stop_model_instance(&pool, &id).await?))
+}
+
 async fn list_model_file_trash(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<crate::models::ModelFileTrashListResponse>, ApiError> {
@@ -280,6 +436,49 @@ async fn create_model_file_trash(
     Ok(Json(
         stage3a::create_model_file_trash(&pool, &id, request).await?,
     ))
+}
+
+async fn cleanup_model_file_trash(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::models::ModelFileTrashView>, ApiError> {
+    Ok(Json(stage3a::cleanup_model_file_trash(&pool, &id).await?))
+}
+
+async fn delete_model_file_trash(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    stage3a::delete_model_file_trash(&pool, &id).await?;
+    Ok(StatusCode::OK)
+}
+
+async fn agent_task_poll(
+    State(pool): State<SqlitePool>,
+    headers: HeaderMap,
+    Json(request): Json<AgentTaskPollRequest>,
+) -> Result<Json<crate::models::AgentTaskPollResponse>, ApiError> {
+    let token = bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
+    if !repository::authenticate_node(&pool, &request.node_id, token).await? {
+        return Err(ApiError::Unauthorized);
+    }
+    Ok(Json(
+        stage3a::poll_agent_task(&pool, &request.node_id, request.current_config_version).await?,
+    ))
+}
+
+async fn agent_task_result(
+    State(pool): State<SqlitePool>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(request): Json<AgentTaskResultRequest>,
+) -> Result<StatusCode, ApiError> {
+    let token = bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
+    if !repository::authenticate_node(&pool, &request.node_id, token).await? {
+        return Err(ApiError::Unauthorized);
+    }
+    stage3a::record_agent_task_result(&pool, &id, request).await?;
+    Ok(StatusCode::OK)
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<&str> {

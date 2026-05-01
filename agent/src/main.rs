@@ -1,6 +1,8 @@
 use std::net::SocketAddr;
+use std::sync::Arc;
 
-use lightai_agent::{config::Config, heartbeat, routes};
+use lightai_agent::{config::Config, heartbeat, routes, tasks};
+use tokio::sync::RwLock;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -12,6 +14,8 @@ async fn main() -> anyhow::Result<()> {
     let listen_addr: SocketAddr = config.listen_addr.parse()?;
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
     let heartbeat_config = config.clone();
+    let task_config = config.clone();
+    let runtime_config = Arc::new(RwLock::new(heartbeat::RuntimeConfig::from_config(&config)));
 
     tracing::info!(
         service = "agent",
@@ -23,7 +27,8 @@ async fn main() -> anyhow::Result<()> {
     let server = axum::serve(listener, routes::app());
     tokio::select! {
         result = server => result?,
-        _ = heartbeat::run(heartbeat_config) => {}
+        _ = heartbeat::run(heartbeat_config, runtime_config.clone()) => {}
+        _ = tasks::run(task_config, runtime_config.clone()) => {}
     }
 
     Ok(())

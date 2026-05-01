@@ -2,7 +2,7 @@
   <section class="panel-header">
     <div>
       <h2>运行环境</h2>
-      <p>登记节点本地运行能力，主要服务后续 Docker / Script；External 接入不依赖运行环境。</p>
+      <p>运行环境表示某节点具备哪些本地运行能力；External 服务请在“实例”中直接接入。</p>
     </div>
     <div class="toolbar compact">
       <el-button :loading="loading" @click="loadData">刷新</el-button>
@@ -66,27 +66,30 @@
           <el-option v-for="backend in backends" :key="backend" :label="backend" :value="backend" />
         </el-select>
       </el-form-item>
-      <el-form-item label="部署方式">
+      <el-form-item label="运行方式">
         <el-select v-model="form.deploy_type">
-          <el-option label="external" value="external" />
-          <el-option label="docker" value="docker" />
-          <el-option label="script" value="script" />
+          <el-option label="Docker" value="docker" />
+          <el-option label="Script" value="script" />
+          <el-option label="本地程序" value="binary" />
         </el-select>
       </el-form-item>
-      <el-form-item label="版本">
-        <el-input v-model="form.version" />
+      <el-alert
+        title="保存时会由所选节点 Agent 立即检查，检查通过才会保存；版本优先由 Agent 返回，无法获取时会在检查信息中提示。"
+        type="info"
+        show-icon
+        class="alert"
+      />
+      <el-form-item v-if="form.deploy_type === 'docker'" label="Docker Image">
+        <el-input v-model="form.docker_image" placeholder="vllm/vllm-openai:latest" />
       </el-form-item>
-      <el-form-item label="Base URL">
-        <el-input v-model="form.base_url" placeholder="http://127.0.0.1:11434" />
+      <el-form-item v-if="form.deploy_type === 'script'" label="脚本路径">
+        <el-input v-model="form.binary_path" placeholder="/opt/lightai/scripts/start-vllm" />
       </el-form-item>
-      <el-form-item label="Health URL">
-        <el-input v-model="form.health_url" placeholder="http://127.0.0.1:11434/api/tags" />
-      </el-form-item>
-      <el-form-item label="Binary Path">
+      <el-form-item v-if="form.deploy_type === 'binary'" label="程序路径">
         <el-input v-model="form.binary_path" placeholder="/usr/local/bin/ollama" />
       </el-form-item>
-      <el-form-item label="Docker Image">
-        <el-input v-model="form.docker_image" placeholder="vllm/vllm-openai:latest" />
+      <el-form-item label="工作目录">
+        <el-input v-model="form.working_dir" placeholder="/opt/lightai" />
       </el-form-item>
       <el-form-item label="启用">
         <el-switch v-model="form.enabled" />
@@ -123,12 +126,11 @@ const form = ref({
   node_id: '',
   name: '',
   backend: 'ollama',
-  deploy_type: 'external',
+  deploy_type: 'binary',
   version: '',
-  base_url: '',
-  health_url: '',
   binary_path: '',
   docker_image: '',
+  working_dir: '',
   enabled: true
 })
 
@@ -155,12 +157,11 @@ function openCreate() {
     node_id: nodes.value[0]?.id ?? '',
     name: '',
     backend: 'ollama',
-    deploy_type: 'external',
+    deploy_type: 'binary',
     version: '',
-    base_url: '',
-    health_url: '',
     binary_path: '',
     docker_image: '',
+    working_dir: '',
     enabled: true
   }
   dialogVisible.value = true
@@ -174,10 +175,9 @@ function openEdit(row: RuntimeEnvironment) {
     backend: row.backend,
     deploy_type: row.deploy_type,
     version: row.version ?? '',
-    base_url: row.base_url ?? '',
-    health_url: row.health_url ?? '',
     binary_path: row.binary_path ?? '',
     docker_image: row.docker_image ?? '',
+    working_dir: row.working_dir ?? '',
     enabled: row.enabled
   }
   dialogVisible.value = true
@@ -190,10 +190,12 @@ async function submit() {
     backend: form.value.backend,
     deploy_type: form.value.deploy_type,
     version: emptyToNull(form.value.version),
-    base_url: emptyToNull(form.value.base_url),
-    health_url: emptyToNull(form.value.health_url),
+    base_url: null,
+    health_url: null,
+    endpoint_url: null,
     binary_path: emptyToNull(form.value.binary_path),
     docker_image: emptyToNull(form.value.docker_image),
+    working_dir: emptyToNull(form.value.working_dir),
     enabled: form.value.enabled
   }
   if (editingId.value) {
@@ -260,4 +262,5 @@ function toBusinessMessage(err: unknown) {
 }
 
 onMounted(loadData)
+defineExpose({ refresh: loadData })
 </script>

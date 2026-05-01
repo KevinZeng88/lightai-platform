@@ -1,10 +1,17 @@
 pub mod custom;
 pub mod nvidia;
 
-use crate::config::Config;
 use crate::models::GpuMetrics;
 
-pub async fn collect_gpus(config: &Config) -> (Vec<GpuMetrics>, Vec<String>) {
+#[derive(Debug, Clone)]
+pub struct CollectorConfig {
+    pub nvidia_collector_enabled: bool,
+    pub custom_collector_script: Option<String>,
+    pub collector_timeout_secs: u64,
+    pub collector_max_output_bytes: usize,
+}
+
+pub async fn collect_gpus(config: &CollectorConfig) -> (Vec<GpuMetrics>, Vec<String>) {
     let mut gpus = Vec::new();
     let mut errors = Vec::new();
 

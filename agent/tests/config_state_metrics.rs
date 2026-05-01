@@ -16,21 +16,7 @@ fn loads_agent_config_from_toml_file() {
 listen_addr = "127.0.0.1:18081"
 server_url = "http://127.0.0.1:18080"
 node_name = "gpu-node-test"
-heartbeat_interval_secs = 30
-metrics_sample_interval_secs = 45
-task_poll_interval_secs = 20
-config_refresh_interval_secs = 90
-command_timeout_secs = 8
-environment_check_timeout_secs = 11
 state_path = "data/test-agent-state.toml"
-
-[collectors.nvidia]
-enabled = false
-
-[collectors.custom]
-script_path = "/opt/lightai/custom-gpu"
-timeout_secs = 9
-max_output_bytes = 2048
 "#,
     )
     .unwrap();
@@ -40,20 +26,35 @@ max_output_bytes = 2048
     assert_eq!(config.listen_addr, "127.0.0.1:18081");
     assert_eq!(config.server_url, "http://127.0.0.1:18080");
     assert_eq!(config.node_name, "gpu-node-test");
-    assert_eq!(config.heartbeat_interval_secs, 30);
-    assert_eq!(config.metrics_sample_interval_secs, 45);
-    assert_eq!(config.task_poll_interval_secs, 20);
-    assert_eq!(config.config_refresh_interval_secs, 90);
-    assert_eq!(config.command_timeout_secs, 8);
-    assert_eq!(config.environment_check_timeout_secs, 11);
     assert_eq!(config.state_path, "data/test-agent-state.toml");
-    assert!(!config.nvidia_collector_enabled);
-    assert_eq!(
-        config.custom_collector_script.as_deref(),
-        Some("/opt/lightai/custom-gpu")
-    );
-    assert_eq!(config.collector_timeout_secs, 9);
-    assert_eq!(config.collector_max_output_bytes, 2048);
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn ignores_runtime_policy_fields_in_local_agent_bootstrap_config() {
+    let path = unique_temp_path("agent-bootstrap-only.toml");
+    fs::write(
+        &path,
+        r#"
+[agent]
+server_url = "http://127.0.0.1:18080"
+node_name = "gpu-node-test"
+heartbeat_interval_secs = 30
+metrics_sample_interval_secs = 45
+allowed_model_dirs = ["/models"]
+
+[collectors.nvidia]
+enabled = false
+"#,
+    )
+    .unwrap();
+
+    let config = Config::from_file(&path).unwrap();
+
+    assert_eq!(config.server_url, "http://127.0.0.1:18080");
+    assert_eq!(config.node_name, "gpu-node-test");
+    assert_eq!(config.state_path, Config::default().state_path);
 
     let _ = fs::remove_file(path);
 }
@@ -105,10 +106,15 @@ fn runtime_config_applies_server_config_and_reports_effective_values() {
         config_version: 2,
         heartbeat_interval_secs: 30,
         metrics_sample_interval_secs: 60,
-        task_poll_interval_secs: 20,
-        config_refresh_interval_secs: 90,
+        task_poll_interval_secs: 15,
+        config_refresh_interval_secs: 60,
         command_timeout_secs: 7,
         environment_check_timeout_secs: 8,
+        allowed_model_dirs: vec!["/models".to_string()],
+        nvidia_collector_enabled: false,
+        custom_collector_script: Some("/opt/lightai/gpu".to_string()),
+        collector_timeout_secs: 9,
+        collector_max_output_bytes: 4096,
         last_config_updated_at: Some(1_700_000_000),
     }));
 
@@ -116,7 +122,12 @@ fn runtime_config_applies_server_config_and_reports_effective_values() {
     assert_eq!(effective.config_version, 2);
     assert_eq!(effective.heartbeat_interval_secs, 30);
     assert_eq!(effective.metrics_sample_interval_secs, 60);
-    assert_eq!(effective.task_poll_interval_secs, 20);
+    assert_eq!(effective.allowed_model_dirs, vec!["/models"]);
+    assert!(!effective.nvidia_collector_enabled);
+    assert_eq!(
+        effective.custom_collector_script.as_deref(),
+        Some("/opt/lightai/gpu")
+    );
     assert_eq!(effective.last_config_updated_at, Some(1_700_000_000));
 }
 

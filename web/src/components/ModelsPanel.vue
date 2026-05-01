@@ -52,7 +52,7 @@
               <template #default="{ row: file }">
                 <el-button size="small" @click="verifyFile(file)">验证文件</el-button>
                 <el-button size="small" @click="openFileEdit(row, file)">编辑</el-button>
-                <el-button size="small" type="danger" @click="removeFile(row, file)">删除记录</el-button>
+                <el-button size="small" type="danger" @click="removeFile(row, file)">删除</el-button>
               </template>
             </el-table-column>
           </el-table>
@@ -409,23 +409,18 @@ function isVerificationActive(status: string) {
 }
 
 async function removeFile(model: ModelDefinition, file: ModelFile) {
-  const files = filesByModel.value[model.id] ?? []
-  if (files.length <= 1) {
-    ElMessage.error('模型至少需要保留一个节点文件路径')
-    return
-  }
   await ElMessageBox.confirm(
-    `删除节点文件路径记录？该操作不会删除 ${file.path} 对应的节点文件。`,
-    '确认删除记录',
+    `从模型中删除该节点文件路径？该操作会将 ${file.path} 加入模型垃圾箱，不会立即删除真实文件。后续可在模型垃圾箱中执行“删除文件”或“删除记录”。`,
+    '确认删除',
     {
       type: 'warning',
-      confirmButtonText: '确认',
+      confirmButtonText: '确认删除',
       cancelButtonText: '取消'
     }
   )
   try {
     await deleteModelFile(file.id)
-    ElMessage.success('节点文件路径记录已删除，不会删除真实模型文件')
+    ElMessage.success('节点文件路径已移入模型垃圾箱')
     await loadModelFiles(model.id)
     await loadData()
   } catch (err) {
@@ -435,17 +430,17 @@ async function removeFile(model: ModelDefinition, file: ModelFile) {
 
 async function remove(row: ModelDefinition) {
   await ElMessageBox.confirm(
-    `删除模型配置 ${row.name}？该操作不会物理删除任何节点上的模型文件；文件清理需通过后续垃圾箱清理流程单独确认。`,
+    `删除模型配置 ${row.name}？删除后模型配置将不再显示，关联的所有节点文件路径将进入模型垃圾箱，真实文件不会立即删除。如需物理删除，需要到模型垃圾箱中逐条执行“删除文件”。`,
     '确认删除模型配置',
     {
       type: 'warning',
-      confirmButtonText: '确认',
+      confirmButtonText: '确认删除',
       cancelButtonText: '取消'
     }
   )
   try {
     await deleteModel(row.id)
-    ElMessage.success('模型配置已删除')
+    ElMessage.success('模型配置已删除，关联路径已进入模型垃圾箱')
     await loadData()
   } catch (err) {
     ElMessage.error(toBusinessMessage(err))
@@ -517,9 +512,6 @@ function toBusinessMessage(err: unknown) {
   if (message.includes('trash records')) {
     return '该节点文件路径已有垃圾箱记录，不能直接删除记录'
   }
-  if (message.includes('at least one node file path')) {
-    return '模型至少需要保留一个节点文件路径'
-  }
   if (message.includes('initial_file is required')) {
     return '新增模型时必须配置至少一个节点文件路径'
   }
@@ -555,4 +547,5 @@ onUnmounted(() => {
     stopVerificationRefresh(modelId)
   }
 })
+defineExpose({ refresh: loadData })
 </script>

@@ -57,3 +57,4 @@ docker-compose.override.yml
 
 # Codex / local scratch
 .codex/
+.codex

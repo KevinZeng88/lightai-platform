@@ -167,6 +167,18 @@ h1 {
   overflow-wrap: anywhere;
 }
 
+.wide-detail {
+  grid-column: 1 / -1;
+}
+
+.config-form {
+  max-width: 720px;
+}
+
+.node-config-select {
+  width: min(420px, 100%);
+}
+
 .model-files-block {
   display: grid;
   gap: 12px;

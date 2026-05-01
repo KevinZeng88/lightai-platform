@@ -57,6 +57,10 @@ async fn execute_migration(pool: &SqlitePool, sql: &str) -> anyhow::Result<()> {
 }
 
 async fn migrate_stage3a_corrections(pool: &SqlitePool) -> anyhow::Result<()> {
+    // This project does not yet have a migration ledger, so schema corrections that
+    // rebuild SQLite tables must stay idempotent here. Plain SQL files cannot safely
+    // express "rebuild this table only if this column is still NOT NULL" without a
+    // larger migration framework, which is intentionally out of scope for Stage 3A.
     add_node_status_column_if_missing(pool, "agent_config_version", "INTEGER").await?;
     add_node_status_column_if_missing(pool, "heartbeat_interval_secs", "INTEGER").await?;
     add_node_status_column_if_missing(pool, "metrics_sample_interval_secs", "INTEGER").await?;
@@ -64,12 +68,20 @@ async fn migrate_stage3a_corrections(pool: &SqlitePool) -> anyhow::Result<()> {
     add_node_status_column_if_missing(pool, "config_refresh_interval_secs", "INTEGER").await?;
     add_node_status_column_if_missing(pool, "command_timeout_secs", "INTEGER").await?;
     add_node_status_column_if_missing(pool, "environment_check_timeout_secs", "INTEGER").await?;
+    add_node_status_column_if_missing(pool, "allowed_model_dirs_json", "TEXT").await?;
+    add_node_status_column_if_missing(pool, "nvidia_collector_enabled", "INTEGER").await?;
+    add_node_status_column_if_missing(pool, "custom_collector_script", "TEXT").await?;
+    add_node_status_column_if_missing(pool, "collector_timeout_secs", "INTEGER").await?;
+    add_node_status_column_if_missing(pool, "collector_max_output_bytes", "INTEGER").await?;
     add_node_status_column_if_missing(pool, "last_config_updated_at", "INTEGER").await?;
 
     let columns = table_columns(pool, "model_instances").await?;
     let needs_rebuild = columns
         .iter()
-        .any(|column| column.name == "runtime_environment_id" && column.not_null)
+        .any(|column| column.name == "model_id" && column.not_null)
+        || columns
+            .iter()
+            .any(|column| column.name == "runtime_environment_id" && column.not_null)
         || !columns.iter().any(|column| column.name == "base_url")
         || !columns.iter().any(|column| column.name == "model_name")
         || !columns.iter().any(|column| column.name == "description");
@@ -77,7 +89,42 @@ async fn migrate_stage3a_corrections(pool: &SqlitePool) -> anyhow::Result<()> {
     if needs_rebuild {
         rebuild_model_instances_table(pool).await?;
     }
+    ensure_stage3b_tables(pool).await?;
+    ensure_agent_config_tables(pool).await?;
 
+    Ok(())
+}
+
+async fn ensure_agent_config_tables(pool: &SqlitePool) -> anyhow::Result<()> {
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS agent_config_policies (
+            scope TEXT NOT NULL,
+            node_id TEXT NOT NULL,
+            policy_json TEXT NOT NULL,
+            version INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL,
+            PRIMARY KEY (scope, node_id)
+        )
+        "#,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn ensure_stage3b_tables(pool: &SqlitePool) -> anyhow::Result<()> {
+    execute_migration(
+        pool,
+        include_str!("../../migrations/0003_stage3a_models.sql"),
+    )
+    .await?;
+    add_model_file_trash_column_if_missing(pool, "model_file_id", "TEXT").await?;
+    add_model_file_trash_column_if_missing(pool, "file_deleted_at", "INTEGER").await?;
+    add_model_file_trash_column_if_missing(pool, "cleanup_task_id", "TEXT").await?;
+    add_model_file_trash_column_if_missing(pool, "last_error", "TEXT").await?;
+    add_model_file_column_if_missing(pool, "deleted_at", "INTEGER").await?;
+    add_runtime_environment_column_if_missing(pool, "endpoint_url", "TEXT").await?;
+    add_model_instance_column_if_missing(pool, "model_file_id", "TEXT").await?;
     Ok(())
 }
 
@@ -90,6 +137,64 @@ async fn add_node_status_column_if_missing(
     if !columns.iter().any(|existing| existing.name == column) {
         pool.execute(format!("ALTER TABLE node_status ADD COLUMN {column} {column_type}").as_str())
             .await?;
+    }
+    Ok(())
+}
+
+async fn add_model_file_trash_column_if_missing(
+    pool: &SqlitePool,
+    column: &str,
+    column_type: &str,
+) -> anyhow::Result<()> {
+    let columns = table_columns(pool, "model_file_trash").await?;
+    if !columns.iter().any(|existing| existing.name == column) {
+        pool.execute(
+            format!("ALTER TABLE model_file_trash ADD COLUMN {column} {column_type}").as_str(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn add_model_file_column_if_missing(
+    pool: &SqlitePool,
+    column: &str,
+    column_type: &str,
+) -> anyhow::Result<()> {
+    let columns = table_columns(pool, "model_files").await?;
+    if !columns.iter().any(|existing| existing.name == column) {
+        pool.execute(format!("ALTER TABLE model_files ADD COLUMN {column} {column_type}").as_str())
+            .await?;
+    }
+    Ok(())
+}
+
+async fn add_runtime_environment_column_if_missing(
+    pool: &SqlitePool,
+    column: &str,
+    column_type: &str,
+) -> anyhow::Result<()> {
+    let columns = table_columns(pool, "runtime_environments").await?;
+    if !columns.iter().any(|existing| existing.name == column) {
+        pool.execute(
+            format!("ALTER TABLE runtime_environments ADD COLUMN {column} {column_type}").as_str(),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn add_model_instance_column_if_missing(
+    pool: &SqlitePool,
+    column: &str,
+    column_type: &str,
+) -> anyhow::Result<()> {
+    let columns = table_columns(pool, "model_instances").await?;
+    if !columns.iter().any(|existing| existing.name == column) {
+        pool.execute(
+            format!("ALTER TABLE model_instances ADD COLUMN {column} {column_type}").as_str(),
+        )
+        .await?;
     }
     Ok(())
 }
@@ -119,7 +224,8 @@ async fn rebuild_model_instances_table(pool: &SqlitePool) -> anyhow::Result<()> 
         r#"
         CREATE TABLE model_instances (
             id TEXT PRIMARY KEY,
-            model_id TEXT NOT NULL REFERENCES models(id),
+            model_id TEXT REFERENCES models(id),
+            model_file_id TEXT REFERENCES model_files(id),
             node_id TEXT REFERENCES nodes(id),
             runtime_environment_id TEXT REFERENCES runtime_environments(id),
             name TEXT NOT NULL,

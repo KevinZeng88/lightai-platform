@@ -63,6 +63,129 @@ async fn register_returns_node_id_and_stores_only_token_hash() {
 }
 
 #[tokio::test]
+async fn agent_config_policy_supports_global_defaults_and_node_override() {
+    let (_pool, app) = test_app().await;
+    let registered = register_node(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+    let token = registered["agent_token"].as_str().unwrap();
+
+    let global_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri("/api/config/agent/global")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "heartbeat_interval_secs": 20,
+                        "metrics_sample_interval_secs": 25,
+                        "command_timeout_secs": 6,
+                        "environment_check_timeout_secs": 7,
+                        "allowed_model_dirs": ["/models"],
+                        "nvidia_collector_enabled": true,
+                        "collector_timeout_secs": 5,
+                        "collector_max_output_bytes": 1048576
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(global_response.status(), StatusCode::OK);
+
+    let node_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/api/nodes/{node_id}/config"))
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({
+                        "metrics_sample_interval_secs": 5,
+                        "allowed_model_dirs": ["/models", "/mnt/models"]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(node_response.status(), StatusCode::OK);
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agent/heartbeat")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    json!({
+                        "node_id": node_id,
+                        "sampled_at": 1_700_000_000i64,
+                        "metrics": {},
+                        "gpus": [],
+                        "collector_errors": [],
+                        "agent_config": {
+                            "config_version": 1,
+                            "heartbeat_interval_secs": 15,
+                            "metrics_sample_interval_secs": 15,
+                            "command_timeout_secs": 5,
+                            "environment_check_timeout_secs": 5,
+                            "allowed_model_dirs": [],
+                            "nvidia_collector_enabled": true,
+                            "custom_collector_script": null,
+                            "collector_timeout_secs": 5,
+                            "collector_max_output_bytes": 1048576,
+                            "last_config_updated_at": null
+                        }
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let heartbeat_json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(
+        heartbeat_json["agent_config"]["heartbeat_interval_secs"],
+        20
+    );
+    assert_eq!(
+        heartbeat_json["agent_config"]["metrics_sample_interval_secs"],
+        5
+    );
+    assert_eq!(
+        heartbeat_json["agent_config"]["allowed_model_dirs"][1],
+        "/mnt/models"
+    );
+
+    let nodes_response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/nodes")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let body = to_bytes(nodes_response.into_body(), 4096).await.unwrap();
+    let nodes_json: Value = serde_json::from_slice(&body).unwrap();
+    let node = &nodes_json["nodes"][0];
+    assert_eq!(
+        node["effective_agent_config"]["metrics_sample_interval_secs"],
+        5
+    );
+    assert_eq!(node["config_sync_status"], "out_of_sync");
+}
+
+#[tokio::test]
 async fn heartbeat_updates_latest_status_and_inserts_metric_samples() {
     let (pool, app) = test_app().await;
     let registered = register_node(app.clone()).await;
@@ -231,6 +354,71 @@ async fn metrics_api_returns_raw_samples_in_time_window() {
     assert_eq!(json["actual_to"], 200);
     assert_eq!(json["sample_count"], 2);
     assert_eq!(json["samples"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn gpu_metrics_query_endpoint_handles_gpu_keys_with_path_separators() {
+    let (_pool, app) = test_app().await;
+    let registered = register_node(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+    let token = registered["agent_token"].as_str().unwrap();
+
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agent/heartbeat")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .body(Body::from(
+                    json!({
+                        "node_id": node_id,
+                        "sampled_at": 300i64,
+                        "metrics": {},
+                        "gpus": [{
+                            "gpu_key": "custom:slot/0",
+                            "gpu_index": 0,
+                            "vendor": "custom",
+                            "name": "Custom GPU",
+                            "uuid": null,
+                            "driver_version": null,
+                            "memory_total_bytes": 1000,
+                            "memory_used_bytes": 500,
+                            "utilization_percent": 72.0,
+                            "temperature_celsius": null,
+                            "power_watts": null,
+                            "collector": "custom",
+                            "raw_json": null
+                        }],
+                        "collector_errors": []
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/nodes/{node_id}/gpu-metrics?gpu_key=custom%3Aslot%2F0&from=0&to=400"
+                ))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+    let json: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["gpu_key"], "custom:slot/0");
+    assert_eq!(json["sample_count"], 1);
+    assert_eq!(json["samples"][0]["utilization_percent"], 72.0);
 }
 
 #[tokio::test]

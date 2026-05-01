@@ -1,3 +1,13 @@
+-- Historical Stage 3A correction reference.
+--
+-- This file is intentionally NOT executed automatically by server/src/db.rs.
+-- The project does not yet maintain a migration ledger, and several SQLite
+-- corrections below require table rebuilds that must be guarded by live schema
+-- inspection. The executable, idempotent version of this logic lives in
+-- server/src/db.rs::migrate_stage3a_corrections.
+--
+-- Do not append new production migrations here expecting them to run.
+
 ALTER TABLE node_status ADD COLUMN agent_config_version INTEGER;
 ALTER TABLE node_status ADD COLUMN heartbeat_interval_secs INTEGER;
 ALTER TABLE node_status ADD COLUMN metrics_sample_interval_secs INTEGER;

@@ -35,6 +35,8 @@ export interface NodeStatus {
   last_heartbeat_at?: number | null
   metrics?: NodeMetrics | null
   agent_config?: AgentConfig | null
+  effective_agent_config: AgentConfig
+  config_sync_status: string
   gpus: GpuStatus[]
 }
 
@@ -46,7 +48,40 @@ export interface AgentConfig {
   config_refresh_interval_secs: number
   command_timeout_secs: number
   environment_check_timeout_secs: number
+  allowed_model_dirs: string[]
+  nvidia_collector_enabled: boolean
+  custom_collector_script?: string | null
+  collector_timeout_secs: number
+  collector_max_output_bytes: number
   last_config_updated_at?: number | null
+}
+
+export interface AgentConfigPolicy {
+  heartbeat_interval_secs?: number | null
+  metrics_sample_interval_secs?: number | null
+  command_timeout_secs?: number | null
+  environment_check_timeout_secs?: number | null
+  allowed_model_dirs?: string[] | null
+  nvidia_collector_enabled?: boolean | null
+  custom_collector_script?: string | null
+  collector_timeout_secs?: number | null
+  collector_max_output_bytes?: number | null
+}
+
+export interface AgentConfigPolicyView {
+  scope: string
+  node_id?: string | null
+  version: number
+  updated_at: number
+  policy: AgentConfigPolicy
+  effective_config: AgentConfig
+  restart_required_fields: string[]
+  online_reload_fields: string[]
+}
+
+export interface AgentConfigPoliciesResponse {
+  global: AgentConfigPolicyView
+  nodes: AgentConfigPolicyView[]
 }
 
 export interface NodeMetricSample extends NodeMetrics {
@@ -81,6 +116,7 @@ export interface RuntimeEnvironment {
   version?: string | null
   base_url?: string | null
   health_url?: string | null
+  endpoint_url?: string | null
   binary_path?: string | null
   docker_image?: string | null
   working_dir?: string | null
@@ -135,7 +171,9 @@ export interface ModelFile {
 export interface ModelInstance {
   id: string
   model_id?: string | null
+  model_file_id?: string | null
   model_definition_name?: string | null
+  model_file_path?: string | null
   model_name?: string | null
   node_id?: string | null
   node_name?: string | null
