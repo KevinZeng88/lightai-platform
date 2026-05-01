@@ -192,6 +192,8 @@ export interface ModelInstance {
   params_json?: string | null
   process_id?: number | null
   process_ref?: string | null
+  log_tail?: string | null
+  command?: string | null
   last_checked_at?: number | null
   last_error?: string | null
   created_at: number

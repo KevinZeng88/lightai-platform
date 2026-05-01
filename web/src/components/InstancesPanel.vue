@@ -16,7 +16,7 @@
     <el-table-column prop="name" label="实例" min-width="150" fixed="left" />
     <el-table-column label="状态" width="120">
       <template #default="{ row }">
-        <el-tag :type="statusType(row.status)">{{ row.status }}</el-tag>
+        <el-tag :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag>
       </template>
     </el-table-column>
     <el-table-column label="检查结果" min-width="280">
@@ -26,7 +26,12 @@
       </template>
     </el-table-column>
     <el-table-column prop="model_name" label="服务模型名" min-width="150" />
-    <el-table-column prop="deploy_type" label="类型" width="100" />
+    <el-table-column label="类型" width="100">
+      <template #default="{ row }">{{ deployTypeLabel(row.deploy_type) }}</template>
+    </el-table-column>
+    <el-table-column label="后端" width="120">
+      <template #default="{ row }">{{ backendLabel(row.backend) }}</template>
+    </el-table-column>
     <el-table-column label="节点 / 运行环境" min-width="220">
       <template #default="{ row }">{{ row.deploy_type === 'local' ? `${row.node_name ?? row.node_id} / ${row.runtime_environment_name ?? row.runtime_environment_id}` : '-' }}</template>
     </el-table-column>
@@ -42,9 +47,11 @@
     <el-table-column label="操作" width="360" fixed="right">
       <template #default="{ row }">
         <el-button v-if="row.deploy_type === 'external'" size="small" @click="check(row)">检查状态</el-button>
+        <el-button v-else size="small" :disabled="row.status !== 'running'" @click="check(row)">检查状态</el-button>
         <el-button v-if="row.deploy_type === 'local'" size="small" type="success" :disabled="row.status === 'running' || row.status === 'starting'" @click="start(row)">启动</el-button>
         <el-button v-if="row.deploy_type === 'local'" size="small" :disabled="row.status === 'stopped' || row.status === 'stopping'" @click="stop(row)">停止</el-button>
         <el-button v-if="row.deploy_type === 'local'" size="small" :disabled="row.status !== 'running'" @click="testLocal(row)">测试</el-button>
+        <el-button size="small" @click="openLogs(row)">日志</el-button>
         <el-button size="small" @click="openEdit(row)">编辑</el-button>
         <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
       </template>
@@ -82,7 +89,7 @@
           </el-form-item>
           <el-form-item label="服务实现">
             <el-select v-model="form.backend" clearable placeholder="可选；默认由服务端兼容字段处理">
-          <el-option v-for="backend in backends" :key="backend" :label="backend" :value="backend" />
+          <el-option v-for="backend in backends" :key="backend" :label="backendLabel(backend)" :value="backend" />
             </el-select>
           </el-form-item>
           <el-form-item label="接口类型">
@@ -111,7 +118,7 @@
             <el-option
               v-for="env in localRuntimeOptions"
               :key="env.id"
-              :label="`${env.name} (${env.backend}/${env.deploy_type})`"
+              :label="`${env.name} (${backendLabel(env.backend)} / ${runtimeDeployTypeLabel(env.deploy_type)})`"
               :value="env.id"
             />
           </el-select>
@@ -150,6 +157,12 @@
             placeholder="一行一个参数，例如：&#10;--verbose&#10;--batch-size&#10;512"
           />
         </el-form-item>
+        <el-alert
+          title="工作目录来自运行环境配置。未配置时 Agent 使用自身启动目录；建议为程序或脚本配置固定应用目录，避免依赖 /tmp、用户家目录等不稳定位置。"
+          type="info"
+          show-icon
+          class="alert"
+        />
       </template>
     </el-form>
     <template #footer>
@@ -157,10 +170,23 @@
       <el-button type="primary" @click="submit">保存</el-button>
     </template>
   </el-dialog>
+
+  <el-dialog v-model="logDialogVisible" title="实例日志" width="780px">
+    <div v-if="selectedLogInstance" class="log-detail">
+      <div class="detail-grid compact-detail">
+        <div><span class="muted">实例</span><p>{{ selectedLogInstance.name }}</p></div>
+        <div><span class="muted">状态</span><p>{{ statusLabel(selectedLogInstance.status) }}</p></div>
+        <div class="wide-detail"><span class="muted">启动命令</span><p>{{ selectedLogInstance.command ?? '暂无命令摘要' }}</p></div>
+      </div>
+      <pre class="log-box">{{ selectedLogInstance.log_tail ?? selectedLogInstance.last_error ?? '暂无日志' }}</pre>
+    </div>
+  </el-dialog>
 </template>
 
 <script setup lang="ts">
-import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
+import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
+import { ElNotification } from 'element-plus/es/components/notification/index'
 import { computed, onMounted, ref } from 'vue'
 import {
   checkModelInstance,
@@ -178,7 +204,7 @@ import {
 } from '../api'
 import type { ModelDefinition, ModelFile, ModelInstance, NodeStatus, RuntimeEnvironment } from '../types'
 
-const backends = ['vllm', 'ollama', 'lmdeploy', 'mindie', 'llama_cpp', 'triton', 'custom']
+const backends = ['ollama', 'llama_cpp', 'vllm', 'custom']
 const models = ref<ModelDefinition[]>([])
 const nodes = ref<NodeStatus[]>([])
 const runtimeEnvironments = ref<RuntimeEnvironment[]>([])
@@ -187,10 +213,12 @@ const instances = ref<ModelInstance[]>([])
 const loading = ref(false)
 const error = ref('')
 const dialogVisible = ref(false)
+const logDialogVisible = ref(false)
 const editingId = ref('')
+const selectedLogInstance = ref<ModelInstance | null>(null)
 const form = ref(emptyForm())
 const instanceTypeOptions = [
-  { label: 'External', value: 'external' },
+  { label: '外部服务', value: 'external' },
   { label: '本地', value: 'local' }
 ]
 
@@ -273,6 +301,11 @@ function openEdit(row: ModelInstance) {
   dialogVisible.value = true
 }
 
+function openLogs(row: ModelInstance) {
+  selectedLogInstance.value = row
+  logDialogVisible.value = true
+}
+
 async function submit() {
   if (form.value.deploy_type === 'external' && (!form.value.name || !form.value.model_name || !form.value.base_url)) {
     error.value = '请填写实例名称、服务模型名和基础地址'
@@ -311,7 +344,7 @@ async function submit() {
 async function check(row: ModelInstance) {
   const checked = await checkModelInstance(row.id)
   ElNotification({
-    title: `检查结果：${checked.status}`,
+    title: `检查结果：${statusLabel(checked.status)}`,
     message: checked.last_error ?? formatTime(checked.last_checked_at),
     type: checked.status === 'running' ? 'success' : checked.status === 'failed' ? 'error' : 'warning'
   })
@@ -321,20 +354,22 @@ async function check(row: ModelInstance) {
 async function start(row: ModelInstance) {
   try {
     const started = await startModelInstance(row.id)
-    ElNotification({ title: `启动结果：${started.status}`, message: started.last_error ?? '实例状态已更新', type: started.status === 'running' ? 'success' : 'warning' })
+    ElNotification({ title: `启动结果：${statusLabel(started.status)}`, message: started.last_error ?? '实例状态已更新', type: started.status === 'running' ? 'success' : 'warning' })
     await loadData()
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '启动失败')
+    await loadData()
   }
 }
 
 async function stop(row: ModelInstance) {
   try {
     const stopped = await stopModelInstance(row.id)
-    ElNotification({ title: `停止结果：${stopped.status}`, message: stopped.last_error ?? '实例状态已更新', type: stopped.status === 'stopped' ? 'success' : 'warning' })
+    ElNotification({ title: `停止结果：${statusLabel(stopped.status)}`, message: stopped.last_error ?? '实例状态已更新', type: stopped.status === 'stopped' ? 'success' : 'warning' })
     await loadData()
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '停止失败')
+    await loadData()
   }
 }
 
@@ -349,6 +384,7 @@ async function testLocal(row: ModelInstance) {
     await loadData()
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '测试失败')
+    await loadData()
   }
 }
 
@@ -382,6 +418,42 @@ function statusType(status: string) {
   if (status === 'failed') return 'danger'
   if (status === 'pending' || status === 'starting') return 'warning'
   return 'info'
+}
+
+function statusLabel(status: string) {
+  const labels: Record<string, string> = {
+    pending: '待处理',
+    starting: '启动中',
+    running: '运行中',
+    stopping: '停止中',
+    stopped: '已停止',
+    failed: '失败',
+    unknown: '未知'
+  }
+  return labels[status] ?? status
+}
+
+function deployTypeLabel(value: string) {
+  if (value === 'external') return '外部服务'
+  if (value === 'local') return '本地实例'
+  return value
+}
+
+function runtimeDeployTypeLabel(value: string) {
+  if (value === 'binary') return '程序'
+  if (value === 'script') return '脚本'
+  if (value === 'docker') return '容器'
+  return value
+}
+
+function backendLabel(value: string) {
+  const labels: Record<string, string> = {
+    ollama: 'Ollama',
+    llama_cpp: 'llama.cpp',
+    vllm: 'vLLM',
+    custom: '自定义'
+  }
+  return labels[value] ?? value
 }
 
 function emptyToNull(value: string) {

@@ -240,16 +240,29 @@ HTTP 2xx/3xx 视为 `running`，请求失败或非成功状态视为 `failed`，
 
 每个本地模型至少需要保留一条节点文件路径。删除节点文件路径只删除平台记录，不会物理删除节点上的文件；如果某模型只剩一条节点文件路径，平台会拒绝删除该记录。
 
-Agent 仍然采用主动连接模式。Agent 会主动建立任务控制长连接等待 `verify_model_file`、`check_runtime_environment`、`start_model_instance`、`stop_model_instance`、`cleanup_model_file` 等受控任务；Server 有任务或配置版本更新时会唤醒等待中的连接，让 Agent 尽快获取并执行。Server 不主动直连 Agent，也不直接检查远端节点文件。Agent 离线时相关操作会失败并返回明确中文原因；Agent 在线但未及时回报时，操作会在超时后失败并保留错误信息。
+Agent 仍然采用主动连接模式。Agent 会主动建立任务控制长连接等待 `verify_model_file`、`check_runtime_environment`、`start_model_instance`、`stop_model_instance`、`test_model_instance`、`cleanup_model_file` 等受控任务；Server 有任务或配置版本更新时会唤醒等待中的连接，让 Agent 尽快获取并执行。Server 不主动直连 Agent，也不直接检查远端节点文件。Agent 离线时相关操作会失败并返回明确中文原因；Agent 在线但未及时回报时，操作会在超时后失败并保留错误信息。
 
-“运行环境”页面用于描述某节点具备哪些本地运行能力，不再配置 External URL。运行环境必须绑定节点，Docker 方式填写镜像，Script / 本地程序方式填写受控入口路径。新增和重新检查运行环境时，会由对应节点 Agent 执行受控检查；检查结果会区分入口可用、版本可获取、版本不可获取、不可执行、路径错误等状态。版本优先使用 Agent 返回值；无法自动获取时会提示原因，也可以在 Web 中手工填写或覆盖版本。
+“运行环境”页面用于描述某节点具备哪些本地运行能力，不再配置 External URL。运行环境必须绑定节点，当前优先支持 `ollama`、`llama_cpp`、`vllm` 和 `custom`；运行方式收敛为本地程序、脚本和 Docker。Docker 方式填写镜像，Script / 本地程序方式填写受控入口路径。新增和重新检查运行环境时，会由对应节点 Agent 执行受控检查；检查结果会区分入口可用、版本可获取、版本不可获取、不可执行、路径错误等状态。版本优先使用 Agent 返回值；无法自动获取时会提示原因，也可以在 Web 中手工填写或覆盖版本。llama.cpp/llama-server 的 `--version` 输出会过滤 CUDA/ggml 初始化噪声，不能可靠识别时显示“版本无法自动获取”。
 
 “实例”页面区分两类实例：
 
 - External 实例：直接添加外部已有服务，不需要节点、运行环境或模型文件；删除只删除平台接入记录，不影响外部服务。
 - 本地实例：选择节点、该节点已检查通过的运行环境、该节点已验证的模型文件或目录后创建；可配置监听地址、端口、上下文、GPU 层数、线程数和一行一个的高级参数。启动、停止和测试都会创建 Agent 受控任务。删除本地实例只删除实例记录，不删除模型文件。
 
-当前本地实例支持通过 Agent 真实启动受控本地进程，优先覆盖 llama.cpp/llama-server 形态：Agent 使用运行环境入口、模型路径和实例参数生成 argv 并直接执行，不通过 shell 拼接。Script 方式也只把参数作为 argv 传入受控脚本路径。启动成功后会记录 endpoint、PID 或进程引用；停止会通过 Agent 停止对应进程。Docker 启动模板、日志采集和进程守护仍是后续扩展点。
+当前本地实例支持通过 Agent 真实启动受控本地进程，优先覆盖 llama.cpp/llama-server、Ollama、vLLM 和 custom 脚本形态：Agent 使用运行环境入口、模型路径和实例参数生成 argv 并直接执行，不通过 shell 拼接。启动后不再立即判定为 `running`，而是结合进程是否仍存在、端口和常见健康接口（`/health`、`/v1/models`、`/`）判断。启动失败会标记为失败，并把最近 stdout/stderr 摘要、错误原因和“程序 + 参数列表”形式的受控命令摘要保存到实例记录；日志会隐藏疑似 token、secret、password、authorization 等敏感行或参数。
+
+custom 后端必须使用运行环境中配置的受控脚本路径。启动时 Agent 以 argv 方式调用脚本，停止、检查和测试也只能通过对应 Agent 任务触发；Web 不提供任意 shell 命令入口。脚本需要自行实现可审计、可超时的动作语义，平台会记录执行输出摘要。Docker 启动模板、完整日志文件采集和进程守护仍是后续扩展点。
+
+工作目录是运行环境配置项，用于设置本地程序或脚本的 `current_dir`。未配置时 Agent 使用自身启动目录；建议为每个运行环境配置固定应用目录，例如 `/opt/lightai/apps/<runtime>`，不要依赖 `/tmp`、用户家目录或其它不稳定目录。
+
+## GPU 发现与采集边界
+
+当前 Agent GPU 采集有两条路径：
+
+- 内置 NVIDIA collector：启用后调用 `nvidia-smi --query-gpu=... --format=csv,noheader,nounits`，解析显存、利用率、温度、功耗、驱动等基础字段。
+- 自定义 collector 脚本：由 Agent 配置策略下发明确脚本路径，Agent 直接执行该路径，不通过 shell。脚本输出统一 JSON 后可映射到 `gpu_key`、vendor、名称、显存、利用率、温度、功耗和 raw JSON。
+
+国产 GPU 当前不做大而全硬件管理，也不直接依赖厂商 SDK。推荐扩展路径是在节点上安装厂商工具或轻量适配脚本，通过自定义 collector 返回统一 GPU 指标。后续如需正式支持某类国产卡，应优先新增独立 collector adapter，而不是把厂商 SDK 逻辑散落到 Server 或 Web。
 
 模型文件垃圾箱面向具体节点上的具体模型文件路径：
 

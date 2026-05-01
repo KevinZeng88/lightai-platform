@@ -16,6 +16,13 @@
     class="alert"
   />
 
+  <el-alert
+    title="GPU 采集当前内置 NVIDIA nvidia-smi；国产或其它 GPU 可通过自定义采集脚本接入，脚本由 Agent 按受控路径直接执行并返回统一 JSON。"
+    type="info"
+    show-icon
+    class="alert"
+  />
+
   <el-card shadow="never" class="section-card">
     <template #header>全局默认策略</template>
     <el-form label-width="170px" class="config-form">
@@ -54,13 +61,19 @@
       <div><span class="muted">心跳 / 采样</span><p>{{ selectedNode.effective_agent_config.heartbeat_interval_secs }}s / {{ selectedNode.effective_agent_config.metrics_sample_interval_secs }}s</p></div>
       <div><span class="muted">命令 / 环境检查</span><p>{{ selectedNode.effective_agent_config.command_timeout_secs }}s / {{ selectedNode.effective_agent_config.environment_check_timeout_secs }}s</p></div>
       <div class="wide-detail"><span class="muted">Allowed dirs</span><p>{{ selectedNode.effective_agent_config.allowed_model_dirs.join(', ') || '未配置' }}</p></div>
+      <div><span class="muted">NVIDIA 采集</span><p>{{ selectedNode.effective_agent_config.nvidia_collector_enabled ? '启用' : '停用' }}</p></div>
+      <div class="wide-detail"><span class="muted">自定义 GPU 采集脚本</span><p>{{ selectedNode.effective_agent_config.custom_collector_script || '未配置' }}</p></div>
     </div>
   </el-card>
 </template>
 
 <script setup lang="ts">
 import { computed, defineComponent, h, onMounted, ref, watch } from 'vue'
-import { ElCheckbox, ElFormItem, ElInput, ElInputNumber, ElMessage } from 'element-plus'
+import { ElCheckbox } from 'element-plus/es/components/checkbox/index'
+import { ElFormItem } from 'element-plus/es/components/form/index'
+import { ElInput } from 'element-plus/es/components/input/index'
+import { ElInputNumber } from 'element-plus/es/components/input-number/index'
+import { ElMessage } from 'element-plus/es/components/message/index'
 import {
   fetchAgentConfigPolicies,
   fetchNodes,

@@ -3,8 +3,26 @@
 </template>
 
 <script setup lang="ts">
-import * as echarts from 'echarts'
+import { LineChart } from 'echarts/charts'
+import {
+  GridComponent,
+  LegendComponent,
+  TitleComponent,
+  TooltipComponent
+} from 'echarts/components'
+import * as echarts from 'echarts/core'
+import type { EChartsType } from 'echarts/core'
+import { CanvasRenderer } from 'echarts/renderers'
 import { onBeforeUnmount, onMounted, ref, watch } from 'vue'
+
+echarts.use([
+  LineChart,
+  GridComponent,
+  LegendComponent,
+  TitleComponent,
+  TooltipComponent,
+  CanvasRenderer
+])
 
 const props = defineProps<{
   title: string
@@ -15,7 +33,7 @@ const props = defineProps<{
 }>()
 
 const chartEl = ref<HTMLElement>()
-let chart: echarts.ECharts | undefined
+let chart: EChartsType | undefined
 
 function renderChart() {
   if (!chartEl.value) return

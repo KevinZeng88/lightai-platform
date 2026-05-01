@@ -16,7 +16,7 @@
     <el-table-column prop="name" label="名称" min-width="150" fixed="left" />
     <el-table-column label="检查状态" width="130">
       <template #default="{ row }">
-        <el-tag :type="checkType(row.check_status)">{{ row.check_status ?? 'unknown' }}</el-tag>
+        <el-tag :type="checkType(row.check_status)">{{ checkLabel(row.check_status) }}</el-tag>
       </template>
     </el-table-column>
     <el-table-column label="检查信息" min-width="240">
@@ -27,13 +27,17 @@
     <el-table-column label="节点" min-width="150">
       <template #default="{ row }">{{ nodeName(row.node_id) }}</template>
     </el-table-column>
-    <el-table-column prop="backend" label="后端" width="120" />
-    <el-table-column prop="deploy_type" label="部署方式" width="120" />
+    <el-table-column label="后端" width="120">
+      <template #default="{ row }">{{ backendLabel(row.backend) }}</template>
+    </el-table-column>
+    <el-table-column label="运行方式" width="120">
+      <template #default="{ row }">{{ deployTypeLabel(row.deploy_type) }}</template>
+    </el-table-column>
     <el-table-column prop="version" label="版本" width="120" />
     <el-table-column label="状态" width="120">
       <template #default="{ row }">
         <el-tag :type="row.enabled ? 'success' : 'info'">
-          {{ row.enabled ? 'enabled' : 'disabled' }}
+          {{ row.enabled ? '启用' : '停用' }}
         </el-tag>
       </template>
     </el-table-column>
@@ -63,13 +67,13 @@
       </el-form-item>
       <el-form-item label="后端">
         <el-select v-model="form.backend">
-          <el-option v-for="backend in backends" :key="backend" :label="backend" :value="backend" />
+          <el-option v-for="backend in backends" :key="backend" :label="backendLabel(backend)" :value="backend" />
         </el-select>
       </el-form-item>
       <el-form-item label="运行方式">
         <el-select v-model="form.deploy_type">
-          <el-option label="Docker" value="docker" />
-          <el-option label="Script" value="script" />
+          <el-option label="容器 / Docker" value="docker" />
+          <el-option label="脚本 / Script" value="script" />
           <el-option label="本地程序" value="binary" />
         </el-select>
       </el-form-item>
@@ -92,8 +96,14 @@
         <el-input v-model="form.binary_path" placeholder="/usr/local/bin/ollama" />
       </el-form-item>
       <el-form-item label="工作目录">
-        <el-input v-model="form.working_dir" placeholder="/opt/lightai" />
+        <el-input v-model="form.working_dir" placeholder="/opt/lightai/apps/llama.cpp" />
       </el-form-item>
+      <el-alert
+        title="工作目录用于设置程序或脚本的 current_dir。未配置时 Agent 使用自身启动目录；建议配置固定应用目录，不要依赖 /tmp 或用户家目录。"
+        type="info"
+        show-icon
+        class="alert"
+      />
       <el-form-item label="启用">
         <el-switch v-model="form.enabled" />
       </el-form-item>
@@ -106,7 +116,9 @@
 </template>
 
 <script setup lang="ts">
-import { ElMessage, ElMessageBox, ElNotification } from 'element-plus'
+import { ElMessage } from 'element-plus/es/components/message/index'
+import { ElMessageBox } from 'element-plus/es/components/message-box/index'
+import { ElNotification } from 'element-plus/es/components/notification/index'
 import { onMounted, ref } from 'vue'
 import {
   checkRuntimeEnvironment,
@@ -118,7 +130,7 @@ import {
 } from '../api'
 import type { NodeStatus, RuntimeEnvironment } from '../types'
 
-const backends = ['vllm', 'ollama', 'lmdeploy', 'mindie', 'llama_cpp', 'triton', 'custom']
+const backends = ['ollama', 'llama_cpp', 'vllm', 'custom']
 const nodes = ref<NodeStatus[]>([])
 const environments = ref<RuntimeEnvironment[]>([])
 const loading = ref(false)
@@ -213,7 +225,7 @@ async function submit() {
 async function check(row: RuntimeEnvironment) {
   const checked = await checkRuntimeEnvironment(row.id)
   ElNotification({
-    title: `检查状态：${checked.check_status ?? 'unknown'}`,
+    title: `检查状态：${checkLabel(checked.check_status)}`,
     message: checked.check_message ?? formatTime(checked.last_checked_at),
     type: checked.check_status === 'available' ? 'success' : checked.check_status === 'agent_offline' ? 'error' : 'warning'
   })
@@ -249,6 +261,37 @@ function checkType(status?: string | null) {
   if (status === 'unavailable' || status === 'check_timeout' || status === 'agent_offline' || status === 'not_executable' || status === 'invalid_path') return 'danger'
   if (status === 'pending' || status === 'version_unavailable') return 'warning'
   return 'info'
+}
+
+function checkLabel(status?: string | null) {
+  const labels: Record<string, string> = {
+    available: '入口可用',
+    version_unavailable: '版本无法自动获取',
+    unavailable: '不可用',
+    not_executable: '不可执行',
+    invalid_path: '路径错误',
+    check_timeout: '检查超时',
+    agent_offline: 'Agent 离线',
+    pending: '待检查'
+  }
+  return labels[status ?? ''] ?? '未知'
+}
+
+function backendLabel(value: string) {
+  const labels: Record<string, string> = {
+    ollama: 'Ollama',
+    llama_cpp: 'llama.cpp',
+    vllm: 'vLLM',
+    custom: '自定义'
+  }
+  return labels[value] ?? value
+}
+
+function deployTypeLabel(value: string) {
+  if (value === 'binary') return '本地程序'
+  if (value === 'script') return '脚本'
+  if (value === 'docker') return '容器'
+  return value
 }
 
 function formatTime(value?: number | null) {
