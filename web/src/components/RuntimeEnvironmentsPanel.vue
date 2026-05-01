@@ -74,11 +74,14 @@
         </el-select>
       </el-form-item>
       <el-alert
-        title="保存时会由所选节点 Agent 立即检查，检查通过才会保存；版本优先由 Agent 返回，无法获取时会在检查信息中提示。"
+        title="保存时会由所选节点 Agent 立即检查。版本优先由 Agent 返回；无法自动获取时会说明原因，也可手工填写/覆盖版本。"
         type="info"
         show-icon
         class="alert"
       />
+      <el-form-item label="版本">
+        <el-input v-model="form.version" placeholder="可选；无法自动获取时可手工填写" />
+      </el-form-item>
       <el-form-item v-if="form.deploy_type === 'docker'" label="Docker Image">
         <el-input v-model="form.docker_image" placeholder="vllm/vllm-openai:latest" />
       </el-form-item>
@@ -243,8 +246,8 @@ function emptyToNull(value: string) {
 
 function checkType(status?: string | null) {
   if (status === 'available') return 'success'
-  if (status === 'unavailable' || status === 'check_timeout' || status === 'agent_offline') return 'danger'
-  if (status === 'pending') return 'warning'
+  if (status === 'unavailable' || status === 'check_timeout' || status === 'agent_offline' || status === 'not_executable' || status === 'invalid_path') return 'danger'
+  if (status === 'pending' || status === 'version_unavailable') return 'warning'
   return 'info'
 }
 

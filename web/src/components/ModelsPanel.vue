@@ -18,8 +18,8 @@
         <section class="model-files-block">
           <div class="card-header-row">
             <div>
-              <strong>节点文件路径</strong>
-              <p class="muted">同一路径在不同节点也需要分别验证；验证成功不代表模型格式正确或推理可用。</p>
+              <strong>节点模型路径</strong>
+              <p class="muted">支持单文件模型和目录模型；同一路径在不同节点也需要分别验证。</p>
             </div>
             <el-button size="small" type="primary" @click="openFileCreate(row)">新增节点路径</el-button>
           </div>
@@ -33,6 +33,9 @@
               </template>
             </el-table-column>
             <el-table-column prop="path" label="路径" min-width="260" show-overflow-tooltip />
+            <el-table-column label="类型" width="90">
+              <template #default="{ row: file }">{{ file.path_type === 'directory' ? '目录' : '文件' }}</template>
+            </el-table-column>
             <el-table-column label="验证状态" width="150">
               <template #default="{ row: file }">
                 <el-tag :type="fileStatusType(file.status)">{{ fileStatusLabel(file.status) }}</el-tag>
@@ -107,7 +110,7 @@
       </el-form-item>
       <template v-if="!editingId">
         <el-alert
-          title="保存前会由所选节点 Agent 验证文件路径；验证成功后才会创建模型。"
+          title="保存前会由所选节点 Agent 验证模型文件或目录；验证成功后才会创建模型。"
           type="info"
           show-icon
           class="alert"
@@ -124,8 +127,8 @@
             <el-option v-for="node in nodes" :key="node.id" :label="node.name" :value="node.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="文件路径">
-          <el-input v-model="form.initial_path" placeholder="/models/qwen2.5-0.5b/model.gguf" />
+        <el-form-item label="模型路径">
+          <el-input v-model="form.initial_path" placeholder="/models/qwen2.5-0.5b 或 /models/model.gguf" />
         </el-form-item>
       </template>
     </el-form>
@@ -137,7 +140,7 @@
 
   <el-dialog v-model="fileDialogVisible" :title="editingFileId ? '编辑节点文件路径' : '新增节点文件路径'" width="640px">
     <el-alert
-      title="文件验证由所选节点 Agent 执行，只确认文件存在、是普通文件且基础信息可读取。"
+      title="路径验证由所选节点 Agent 执行，支持普通文件和目录；验证不代表模型格式或推理可用。"
       type="info"
       show-icon
       class="alert"
@@ -158,8 +161,8 @@
           <el-option v-for="node in nodes" :key="node.id" :label="node.name" :value="node.id" />
         </el-select>
       </el-form-item>
-      <el-form-item label="文件路径">
-        <el-input v-model="fileForm.path" placeholder="/models/qwen2.5-0.5b/model.gguf" />
+      <el-form-item label="模型路径">
+        <el-input v-model="fileForm.path" placeholder="/models/qwen2.5-0.5b 或 /models/model.gguf" />
       </el-form-item>
     </el-form>
     <template #footer>

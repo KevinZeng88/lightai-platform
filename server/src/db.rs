@@ -123,8 +123,11 @@ async fn ensure_stage3b_tables(pool: &SqlitePool) -> anyhow::Result<()> {
     add_model_file_trash_column_if_missing(pool, "cleanup_task_id", "TEXT").await?;
     add_model_file_trash_column_if_missing(pool, "last_error", "TEXT").await?;
     add_model_file_column_if_missing(pool, "deleted_at", "INTEGER").await?;
+    add_model_file_column_if_missing(pool, "path_type", "TEXT").await?;
     add_runtime_environment_column_if_missing(pool, "endpoint_url", "TEXT").await?;
     add_model_instance_column_if_missing(pool, "model_file_id", "TEXT").await?;
+    add_model_instance_column_if_missing(pool, "process_id", "INTEGER").await?;
+    add_model_instance_column_if_missing(pool, "process_ref", "TEXT").await?;
     Ok(())
 }
 

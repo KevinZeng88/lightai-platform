@@ -33,11 +33,18 @@
     <el-table-column label="模型文件 / 外部地址" min-width="260" show-overflow-tooltip>
       <template #default="{ row }">{{ row.deploy_type === 'local' ? row.model_file_path : row.base_url }}</template>
     </el-table-column>
-    <el-table-column label="操作" width="310" fixed="right">
+    <el-table-column label="Endpoint / 进程" min-width="230" show-overflow-tooltip>
+      <template #default="{ row }">
+        <div>{{ row.endpoint_url ?? row.base_url ?? '-' }}</div>
+        <div v-if="row.process_id" class="muted tiny-text">PID: {{ row.process_id }}</div>
+      </template>
+    </el-table-column>
+    <el-table-column label="操作" width="360" fixed="right">
       <template #default="{ row }">
         <el-button v-if="row.deploy_type === 'external'" size="small" @click="check(row)">检查状态</el-button>
         <el-button v-if="row.deploy_type === 'local'" size="small" type="success" :disabled="row.status === 'running' || row.status === 'starting'" @click="start(row)">启动</el-button>
         <el-button v-if="row.deploy_type === 'local'" size="small" :disabled="row.status === 'stopped' || row.status === 'stopping'" @click="stop(row)">停止</el-button>
+        <el-button v-if="row.deploy_type === 'local'" size="small" :disabled="row.status !== 'running'" @click="testLocal(row)">测试</el-button>
         <el-button size="small" @click="openEdit(row)">编辑</el-button>
         <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
       </template>
@@ -114,10 +121,34 @@
             <el-option
               v-for="file in localFileOptions"
               :key="file.id"
-              :label="`${file.model_name ?? file.model_id}: ${file.path}`"
+              :label="`${file.model_name ?? file.model_id}: ${file.path} (${file.path_type === 'directory' ? '目录' : '文件'})`"
               :value="file.id"
             />
           </el-select>
+        </el-form-item>
+        <el-divider content-position="left">运行参数</el-divider>
+        <el-form-item label="监听地址">
+          <el-input v-model="form.host" placeholder="127.0.0.1" />
+        </el-form-item>
+        <el-form-item label="端口">
+          <el-input-number v-model="form.port" :min="1" :max="65535" />
+        </el-form-item>
+        <el-form-item label="上下文">
+          <el-input-number v-model="form.ctx_size" :min="0" :step="512" />
+        </el-form-item>
+        <el-form-item label="GPU 层数">
+          <el-input-number v-model="form.gpu_layers" :min="-1" />
+        </el-form-item>
+        <el-form-item label="线程数">
+          <el-input-number v-model="form.threads" :min="0" />
+        </el-form-item>
+        <el-form-item label="高级参数">
+          <el-input
+            v-model="form.extra_args_text"
+            type="textarea"
+            :rows="4"
+            placeholder="一行一个参数，例如：&#10;--verbose&#10;--batch-size&#10;512"
+          />
         </el-form-item>
       </template>
     </el-form>
@@ -142,6 +173,7 @@ import {
   fetchRuntimeEnvironments,
   startModelInstance,
   stopModelInstance,
+  testModelInstance,
   updateModelInstance
 } from '../api'
 import type { ModelDefinition, ModelFile, ModelInstance, NodeStatus, RuntimeEnvironment } from '../types'
@@ -176,7 +208,13 @@ function emptyForm() {
     base_url: '',
     endpoint_url: '',
     health_url: '',
-    description: ''
+    description: '',
+    host: '127.0.0.1',
+    port: 8080,
+    ctx_size: 4096,
+    gpu_layers: 0,
+    threads: 0,
+    extra_args_text: ''
   }
 }
 
@@ -210,6 +248,7 @@ function openCreate() {
 
 function openEdit(row: ModelInstance) {
   editingId.value = row.id
+  const params = parseParams(row.params_json)
   form.value = {
     model_id: row.model_id ?? '',
     model_file_id: row.model_file_id ?? '',
@@ -223,7 +262,13 @@ function openEdit(row: ModelInstance) {
     base_url: row.base_url ?? '',
     endpoint_url: row.endpoint_url ?? '',
     health_url: row.health_url ?? '',
-    description: row.description ?? ''
+    description: row.description ?? '',
+    host: params.host,
+    port: params.port,
+    ctx_size: params.ctx_size,
+    gpu_layers: params.gpu_layers,
+    threads: params.threads,
+    extra_args_text: params.extra_args.join('\n')
   }
   dialogVisible.value = true
 }
@@ -251,6 +296,7 @@ async function submit() {
     runtime_version: emptyToNull(form.value.runtime_version),
     model_name: emptyToNull(form.value.model_name),
     description: emptyToNull(form.value.description),
+    params_json: form.value.deploy_type === 'local' ? JSON.stringify(localParams()) : null,
     status: 'unknown'
   }
   if (editingId.value) {
@@ -292,6 +338,20 @@ async function stop(row: ModelInstance) {
   }
 }
 
+async function testLocal(row: ModelInstance) {
+  try {
+    const tested = await testModelInstance(row.id)
+    ElNotification({
+      title: '测试完成',
+      message: tested.last_error ?? '测试成功',
+      type: tested.status === 'running' ? 'success' : 'warning'
+    })
+    await loadData()
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '测试失败')
+  }
+}
+
 const localRuntimeOptions = computed(() =>
   runtimeEnvironments.value.filter(
     (env) => env.node_id === form.value.node_id && env.check_status === 'available'
@@ -326,6 +386,43 @@ function statusType(status: string) {
 
 function emptyToNull(value: string) {
   return value.trim() ? value.trim() : null
+}
+
+function localParams() {
+  return {
+    host: form.value.host.trim() || '127.0.0.1',
+    port: form.value.port,
+    ctx_size: form.value.ctx_size || undefined,
+    gpu_layers: form.value.gpu_layers,
+    threads: form.value.threads || undefined,
+    extra_args: form.value.extra_args_text
+      .split('\n')
+      .map((line) => line.trim())
+      .filter(Boolean)
+  }
+}
+
+function parseParams(value?: string | null) {
+  try {
+    const parsed = value ? JSON.parse(value) : {}
+    return {
+      host: typeof parsed.host === 'string' ? parsed.host : '127.0.0.1',
+      port: typeof parsed.port === 'number' ? parsed.port : 8080,
+      ctx_size: typeof parsed.ctx_size === 'number' ? parsed.ctx_size : 4096,
+      gpu_layers: typeof parsed.gpu_layers === 'number' ? parsed.gpu_layers : 0,
+      threads: typeof parsed.threads === 'number' ? parsed.threads : 0,
+      extra_args: Array.isArray(parsed.extra_args) ? parsed.extra_args.filter((item: unknown) => typeof item === 'string') : []
+    }
+  } catch {
+    return {
+      host: '127.0.0.1',
+      port: 8080,
+      ctx_size: 4096,
+      gpu_layers: 0,
+      threads: 0,
+      extra_args: [] as string[]
+    }
+  }
 }
 
 function formatTime(value?: number | null) {

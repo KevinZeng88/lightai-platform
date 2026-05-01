@@ -158,6 +158,7 @@ export interface ModelFile {
   node_name?: string | null
   node_status: string
   path: string
+  path_type?: string | null
   status: string
   size_bytes?: number | null
   last_verified_at?: number | null
@@ -189,6 +190,8 @@ export interface ModelInstance {
   runtime_version?: string | null
   description?: string | null
   params_json?: string | null
+  process_id?: number | null
+  process_ref?: string | null
   last_checked_at?: number | null
   last_error?: string | null
   created_at: number

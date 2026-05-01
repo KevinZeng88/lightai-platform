@@ -243,6 +243,10 @@ export async function stopModelInstance(id: string): Promise<ModelInstance> {
   return sendJson(`/api/model-instances/${id}/stop`, 'POST')
 }
 
+export async function testModelInstance(id: string): Promise<ModelInstance> {
+  return sendJson(`/api/model-instances/${id}/test`, 'POST')
+}
+
 export async function fetchModelFileTrash(): Promise<ModelFileTrashItem[]> {
   const payload = await sendJson<{ items: ModelFileTrashItem[] }>('/api/model-file-trash', 'GET')
   return payload.items

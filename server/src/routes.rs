@@ -95,6 +95,7 @@ pub fn app(pool: SqlitePool) -> Router {
             post(start_model_instance),
         )
         .route("/api/model-instances/{id}/stop", post(stop_model_instance))
+        .route("/api/model-instances/{id}/test", post(test_model_instance))
         .route("/api/model-file-trash", get(list_model_file_trash))
         .route(
             "/api/model-file-trash/{id}/cleanup",
@@ -420,6 +421,13 @@ async fn stop_model_instance(
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
     Ok(Json(stage3a::stop_model_instance(&pool, &id).await?))
+}
+
+async fn test_model_instance(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
+    Ok(Json(stage3a::test_model_instance(&pool, &id).await?))
 }
 
 async fn list_model_file_trash(

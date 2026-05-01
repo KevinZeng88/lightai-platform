@@ -42,6 +42,7 @@ pub enum Stage3Error {
 
 struct VerifiedModelFile {
     size_bytes: Option<i64>,
+    path_type: Option<String>,
     verified_at: i64,
 }
 
@@ -49,6 +50,7 @@ struct InstanceModelFile {
     model_id: String,
     node_id: String,
     path: String,
+    path_type: Option<String>,
 }
 
 impl From<anyhow::Error> for Stage3Error {
@@ -333,6 +335,7 @@ async fn check_runtime_environment_before_save(
         "name": request.name,
         "backend": request.backend,
         "deploy_type": request.deploy_type,
+        "version": request.version,
         "binary_path": request.binary_path,
         "docker_image": request.docker_image,
         "working_dir": request.working_dir,
@@ -374,11 +377,11 @@ async fn check_runtime_environment_before_save(
                     .get("check_status")
                     .and_then(|value| value.as_str())
                     .unwrap_or("available");
-                if check_status != "available" {
+                if !matches!(check_status, "available" | "version_unavailable") {
                     return Err(Stage3Error::BadRequest(runtime_check_message(&result)));
                 }
                 return Ok(CheckedRuntimeEnvironment {
-                    check_status: "available".to_string(),
+                    check_status: check_status.to_string(),
                     version: result
                         .get("version")
                         .and_then(|value| value.as_str())
@@ -484,9 +487,9 @@ pub async fn create_model(
         r#"
         INSERT INTO model_files (
             id, model_id, node_id, path, status, size_bytes, last_verified_at,
-            created_at, updated_at
+            path_type, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, 'verified', ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, 'verified', ?, ?, ?, ?, ?)
         "#,
     )
     .bind(file_id)
@@ -495,6 +498,7 @@ pub async fn create_model(
     .bind(initial_file.path)
     .bind(verified_file.size_bytes)
     .bind(verified_file.verified_at)
+    .bind(verified_file.path_type)
     .bind(now)
     .bind(now)
     .execute(&mut *tx)
@@ -646,9 +650,9 @@ pub async fn create_model_file(
         r#"
         INSERT INTO model_files (
             id, model_id, node_id, path, status, size_bytes, last_verified_at,
-            created_at, updated_at
+            path_type, created_at, updated_at
         )
-        VALUES (?, ?, ?, ?, 'verified', ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, 'verified', ?, ?, ?, ?, ?)
         "#,
     )
     .bind(&id)
@@ -657,6 +661,7 @@ pub async fn create_model_file(
     .bind(request.path)
     .bind(verified_file.size_bytes)
     .bind(verified_file.verified_at)
+    .bind(verified_file.path_type)
     .bind(now)
     .bind(now)
     .execute(pool)
@@ -700,7 +705,7 @@ pub async fn update_model_file(
         r#"
         UPDATE model_files
         SET node_id = ?, path = ?, status = 'verified', size_bytes = ?,
-            last_verified_at = ?, last_error = NULL, verify_task_id = NULL,
+            last_verified_at = ?, path_type = ?, last_error = NULL, verify_task_id = NULL,
             updated_at = ?
         WHERE id = ?
         "#,
@@ -709,6 +714,7 @@ pub async fn update_model_file(
     .bind(request.path)
     .bind(verified_file.size_bytes)
     .bind(verified_file.verified_at)
+    .bind(verified_file.path_type)
     .bind(now)
     .bind(id)
     .execute(pool)
@@ -852,6 +858,11 @@ async fn wait_for_model_file_verification(
                 }
                 return Ok(VerifiedModelFile {
                     size_bytes: result.get("size_bytes").and_then(|value| value.as_i64()),
+                    path_type: result
+                        .get("path_type")
+                        .and_then(|value| value.as_str())
+                        .map(str::to_string)
+                        .or_else(|| Some("file".to_string())),
                     verified_at: now_unix_secs(),
                 });
             }
@@ -1061,6 +1072,11 @@ pub async fn record_agent_task_result(
             .result
             .get("size_bytes")
             .and_then(|value| value.as_i64());
+        let path_type = request
+            .result
+            .get("path_type")
+            .and_then(|value| value.as_str())
+            .unwrap_or("file");
         let last_error = if file_status == "verified" {
             None
         } else {
@@ -1070,12 +1086,13 @@ pub async fn record_agent_task_result(
             sqlx::query(
                 r#"
                 UPDATE model_files
-                SET status = ?, size_bytes = ?, last_verified_at = ?, last_error = ?, updated_at = ?
+                SET status = ?, size_bytes = ?, path_type = ?, last_verified_at = ?, last_error = ?, updated_at = ?
                 WHERE id = ?
                 "#,
             )
             .bind(file_status)
             .bind(size_bytes)
+            .bind(path_type)
             .bind(now)
             .bind(last_error)
             .bind(now)
@@ -1127,7 +1144,7 @@ pub async fn record_agent_task_result(
         }
     } else if matches!(
         task.get::<String, _>("kind").as_str(),
-        "start_model_instance" | "stop_model_instance"
+        "start_model_instance" | "stop_model_instance" | "test_model_instance"
     ) {
         let payload: serde_json::Value =
             serde_json::from_str(&task.get::<String, _>("payload_json"))
@@ -1136,28 +1153,82 @@ pub async fn record_agent_task_result(
             .get("instance_id")
             .and_then(|value| value.as_str())
             .ok_or_else(|| Stage3Error::BadRequest("task payload is invalid".to_string()))?;
+        let kind = task.get::<String, _>("kind");
         let next_status = request
             .result
             .get("instance_status")
             .and_then(|value| value.as_str())
             .unwrap_or(if request.status == "succeeded" {
-                if task.get::<String, _>("kind") == "start_model_instance" {
-                    "running"
-                } else {
+                if kind == "stop_model_instance" {
                     "stopped"
+                } else {
+                    "running"
                 }
             } else {
                 "failed"
             });
-        let last_error = if request.status == "succeeded" {
+        let mut last_error = if request.status == "succeeded" {
             None
         } else {
-            error_message.as_deref().or(Some("实例任务执行失败"))
+            error_message
+                .clone()
+                .or(Some("实例任务执行失败".to_string()))
         };
+        if kind == "test_model_instance" && request.status == "succeeded" {
+            let message = request
+                .result
+                .get("message")
+                .and_then(|value| value.as_str())
+                .unwrap_or("测试成功");
+            let summary = request
+                .result
+                .get("response_summary")
+                .and_then(|value| value.as_str())
+                .unwrap_or_default();
+            last_error = Some(if summary.trim().is_empty() {
+                message.to_string()
+            } else {
+                format!("{message}：{summary}")
+            });
+        }
+        let base_url = request
+            .result
+            .get("base_url")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let endpoint_url = request
+            .result
+            .get("endpoint_url")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+        let process_id = request
+            .result
+            .get("process_id")
+            .and_then(|value| value.as_i64());
+        let process_ref = request
+            .result
+            .get("process_ref")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
         sqlx::query(
-            "UPDATE model_instances SET status = ?, last_checked_at = ?, last_error = ?, updated_at = ? WHERE id = ?",
+            r#"
+            UPDATE model_instances
+            SET status = ?,
+                base_url = COALESCE(?, base_url),
+                endpoint_url = COALESCE(?, endpoint_url),
+                process_id = CASE WHEN ? = 'stop_model_instance' THEN NULL ELSE COALESCE(?, process_id) END,
+                process_ref = CASE WHEN ? = 'stop_model_instance' THEN NULL ELSE COALESCE(?, process_ref) END,
+                last_checked_at = ?, last_error = ?, updated_at = ?
+            WHERE id = ?
+            "#,
         )
         .bind(next_status)
+        .bind(base_url)
+        .bind(endpoint_url)
+        .bind(&kind)
+        .bind(process_id)
+        .bind(&kind)
+        .bind(process_ref)
         .bind(now)
         .bind(last_error)
         .bind(now)
@@ -1247,6 +1318,9 @@ async fn create_local_model_instance(
     pool: &SqlitePool,
     request: ModelInstanceCreateRequest,
 ) -> Result<ModelInstanceView, Stage3Error> {
+    validate_json_field("params_json", request.params_json.as_deref())?;
+    let params_json = request.params_json;
+    parse_instance_params(params_json.as_deref())?;
     let node_id = request
         .node_id
         .as_deref()
@@ -1265,7 +1339,7 @@ async fn create_local_model_instance(
             "运行环境不属于所选节点".to_string(),
         ));
     }
-    if env.check_status.as_deref() != Some("available") {
+    if !runtime_environment_usable(env.check_status.as_deref()) {
         return Err(Stage3Error::BadRequest(
             "运行环境未通过 Agent 检查".to_string(),
         ));
@@ -1299,7 +1373,7 @@ async fn create_local_model_instance(
     .bind(env.version)
     .bind(request.model_name)
     .bind(request.description)
-    .bind(request.params_json)
+    .bind(params_json)
     .bind(now)
     .bind(now)
     .execute(pool)
@@ -1484,6 +1558,22 @@ pub async fn stop_model_instance(
     run_local_instance_task(pool, id, "stop_model_instance", "stopping").await
 }
 
+pub async fn test_model_instance(
+    pool: &SqlitePool,
+    id: &str,
+) -> Result<ModelInstanceView, Stage3Error> {
+    let instance = model_instance(pool, id).await?;
+    if instance.deploy_type == "external" {
+        return check_model_instance(pool, id).await;
+    }
+    if instance.status != "running" {
+        return Err(Stage3Error::BadRequest(
+            "本地实例未运行，无法测试".to_string(),
+        ));
+    }
+    run_local_instance_task(pool, id, "test_model_instance", "running").await
+}
+
 async fn run_local_instance_task(
     pool: &SqlitePool,
     id: &str,
@@ -1515,11 +1605,12 @@ async fn run_local_instance_task(
         .as_deref()
         .ok_or_else(|| Stage3Error::BadRequest("本地实例缺少运行环境".to_string()))?;
     let env = runtime_environment(pool, runtime_environment_id).await?;
-    if env.check_status.as_deref() != Some("available") {
+    if !runtime_environment_usable(env.check_status.as_deref()) {
         return Err(Stage3Error::BadRequest(
             "运行环境未通过 Agent 检查".to_string(),
         ));
     }
+    let params = parse_instance_params(instance.params_json.as_deref())?;
 
     let task_id = Uuid::new_v4().to_string();
     let now = now_unix_secs();
@@ -1533,6 +1624,10 @@ async fn run_local_instance_task(
         "working_dir": env.working_dir,
         "model_file_id": model_file_id,
         "model_path": file.path,
+        "model_path_type": file.path_type,
+        "base_url": instance.base_url,
+        "endpoint_url": instance.endpoint_url,
+        "params": params,
     });
     let mut tx = pool.begin().await?;
     sqlx::query(
@@ -2051,6 +2146,7 @@ fn model_file_from_row(row: sqlx::sqlite::SqliteRow) -> ModelFileView {
         node_name: row.get("node_name"),
         node_status,
         path: row.get("path"),
+        path_type: row.get("path_type"),
         status: row.get("status"),
         size_bytes: row.get("size_bytes"),
         last_verified_at: row.get("last_verified_at"),
@@ -2101,6 +2197,8 @@ fn model_instance_from_row(row: sqlx::sqlite::SqliteRow) -> ModelInstanceView {
         model_name: row.get("model_name"),
         description: row.get("description"),
         params_json: row.get("params_json"),
+        process_id: row.get("process_id"),
+        process_ref: row.get("process_ref"),
         last_checked_at: row.get("last_checked_at"),
         last_error: row.get("last_error"),
         created_at: row.get("created_at"),
@@ -2297,6 +2395,46 @@ fn validate_json_field(field: &str, value: Option<&str>) -> Result<(), Stage3Err
     Ok(())
 }
 
+fn parse_instance_params(value: Option<&str>) -> Result<serde_json::Value, Stage3Error> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(serde_json::json!({}));
+    };
+    let parsed = serde_json::from_str::<serde_json::Value>(value)
+        .map_err(|_| Stage3Error::BadRequest("params_json must be valid JSON".to_string()))?;
+    if !parsed.is_object() {
+        return Err(Stage3Error::BadRequest(
+            "运行参数必须是 JSON 对象".to_string(),
+        ));
+    }
+    if let Some(host) = parsed.get("host").and_then(|value| value.as_str()) {
+        if host.trim().is_empty() || host.len() > 128 || host.chars().any(char::is_control) {
+            return Err(Stage3Error::BadRequest("监听地址非法".to_string()));
+        }
+    }
+    if let Some(port) = parsed.get("port").and_then(|value| value.as_u64()) {
+        if port == 0 || port > u16::MAX as u64 {
+            return Err(Stage3Error::BadRequest("监听端口非法".to_string()));
+        }
+    }
+    if let Some(extra_args) = parsed.get("extra_args").and_then(|value| value.as_array()) {
+        for arg in extra_args {
+            let Some(arg) = arg.as_str() else {
+                return Err(Stage3Error::BadRequest(
+                    "高级参数必须是一行一个字符串".to_string(),
+                ));
+            };
+            if arg.trim().is_empty() || arg.len() > 256 || arg.chars().any(char::is_control) {
+                return Err(Stage3Error::BadRequest("高级参数非法".to_string()));
+            }
+        }
+    }
+    Ok(parsed)
+}
+
+fn runtime_environment_usable(status: Option<&str>) -> bool {
+    matches!(status, Some("available" | "version_unavailable"))
+}
+
 async fn ensure_node_online(pool: &SqlitePool, node_id: &str) -> Result<(), Stage3Error> {
     if node_online(pool, node_id).await? {
         Ok(())
@@ -2338,7 +2476,7 @@ async fn verified_model_file_for_instance(
 ) -> Result<InstanceModelFile, Stage3Error> {
     let row = sqlx::query(
         r#"
-        SELECT model_id, node_id, path, status
+        SELECT model_id, node_id, path, path_type, status
         FROM model_files
         WHERE id = ? AND deleted_at IS NULL
         "#,
@@ -2357,6 +2495,7 @@ async fn verified_model_file_for_instance(
         model_id: row.get("model_id"),
         node_id: row.get("node_id"),
         path: row.get("path"),
+        path_type: row.get("path_type"),
     })
 }
 
@@ -2404,7 +2543,7 @@ async fn mark_timed_out_tasks(pool: &SqlitePool) -> Result<(), Stage3Error> {
             }
         } else if matches!(
             row.get::<String, _>("kind").as_str(),
-            "start_model_instance" | "stop_model_instance"
+            "start_model_instance" | "stop_model_instance" | "test_model_instance"
         ) {
             if let Ok(payload) =
                 serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("payload_json"))
