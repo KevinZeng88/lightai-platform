@@ -44,7 +44,7 @@
   <el-alert v-if="error" :title="error" type="error" show-icon class="alert" />
 
   <el-card shadow="never" class="section-card">
-    <template #header>节点列表</template>
+    <template #header>节点信息</template>
     <el-table :data="nodes" row-key="id" border highlight-current-row @current-change="selectNode">
       <el-table-column prop="name" label="节点" min-width="150" fixed="left" />
       <el-table-column label="状态" width="100">
@@ -104,7 +104,12 @@
   </el-card>
 
   <el-card v-if="selectedNode" shadow="never" class="section-card">
-    <template #header>GPU 列表 · {{ selectedNode.name }}</template>
+    <template #header>
+      <div class="card-header-row">
+        <span>GPU 列表 · {{ selectedNode.name }}</span>
+        <span v-if="selectedGpu" class="muted">当前趋势：{{ selectedGpu.name }}</span>
+      </div>
+    </template>
     <el-table :data="selectedNode.gpus" row-key="gpu_key" size="small" border highlight-current-row @current-change="selectGpu">
       <el-table-column prop="name" label="GPU" min-width="180" fixed="left" />
       <el-table-column prop="vendor" label="厂商" width="110" />
@@ -133,6 +138,12 @@
 
   <el-card v-if="selectedNode && selectedGpu" shadow="never" class="section-card">
     <template #header>GPU 趋势 · {{ selectedGpu.name }}</template>
+    <el-alert
+      :title="`当前展示 ${selectedGpu.name} 的 GPU 利用率、显存和温度历史趋势`"
+      type="info"
+      show-icon
+      class="history-alert"
+    />
     <div class="trend-meta">
       <span>范围：{{ selectedRangeLabel }}</span>
       <span>请求：{{ formatRange(gpuMetrics) }}</span>
@@ -328,7 +339,7 @@ function point(time: number, value: number | null): [number, number | null] {
 }
 
 function percent(used?: number | null, total?: number | null) {
-  if (!used || !total) return null
+  if (used == null || total == null || total <= 0) return null
   return Number(((used / total) * 100).toFixed(2))
 }
 
@@ -337,7 +348,7 @@ function formatPercent(value?: number | null) {
 }
 
 function formatTime(value?: number | null) {
-  if (!value) return '-'
+  if (value == null) return '-'
   return new Date(value * 1000).toLocaleString()
 }
 

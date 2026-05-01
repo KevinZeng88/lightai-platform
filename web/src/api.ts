@@ -2,6 +2,7 @@ import type {
   GpuMetricSample,
   MetricSampleResponse,
   ModelDefinition,
+  ModelFile,
   ModelFileTrashItem,
   ModelInstance,
   NodeMetricSample,
@@ -103,7 +104,12 @@ export async function fetchModels(): Promise<ModelDefinition[]> {
   return payload.models
 }
 
-export async function createModel(payload: Partial<ModelDefinition>): Promise<ModelDefinition> {
+export async function createModel(payload: Partial<ModelDefinition> & {
+  initial_file?: {
+    node_id: string
+    path: string
+  }
+}): Promise<ModelDefinition> {
   return sendJson('/api/models', 'POST', payload)
 }
 
@@ -118,6 +124,39 @@ export async function deleteModel(id: string): Promise<void> {
   await sendEmpty(`/api/models/${id}`, 'DELETE')
 }
 
+export async function fetchModelFiles(modelId: string): Promise<ModelFile[]> {
+  const payload = await sendJson<{ files: ModelFile[] }>(`/api/models/${modelId}/files`, 'GET')
+  return payload.files
+}
+
+export async function createModelFile(
+  modelId: string,
+  payload: {
+    node_id: string
+    path: string
+  }
+): Promise<ModelFile> {
+  return sendJson(`/api/models/${modelId}/files`, 'POST', payload)
+}
+
+export async function updateModelFile(
+  id: string,
+  payload: {
+    node_id: string
+    path: string
+  }
+): Promise<ModelFile> {
+  return sendJson(`/api/model-files/${id}`, 'PUT', payload)
+}
+
+export async function deleteModelFile(id: string): Promise<void> {
+  await sendEmpty(`/api/model-files/${id}`, 'DELETE')
+}
+
+export async function verifyModelFile(id: string): Promise<ModelFile> {
+  return sendJson(`/api/model-files/${id}/verify`, 'POST')
+}
+
 export async function fetchModelInstances(): Promise<ModelInstance[]> {
   const payload = await sendJson<{ model_instances: ModelInstance[] }>(
     '/api/model-instances',
@@ -127,7 +166,7 @@ export async function fetchModelInstances(): Promise<ModelInstance[]> {
 }
 
 export async function createModelInstance(payload: {
-  model_id: string
+  model_id?: string | null
   node_id?: string | null
   runtime_environment_id?: string | null
   name: string
@@ -146,7 +185,18 @@ export async function createModelInstance(payload: {
 
 export async function updateModelInstance(
   id: string,
-  payload: Partial<ModelInstance>
+  payload: {
+    name?: string | null
+    backend?: string | null
+    base_url?: string | null
+    endpoint_url?: string | null
+    health_url?: string | null
+    runtime_version?: string | null
+    model_name?: string | null
+    description?: string | null
+    status?: string | null
+    params_json?: string | null
+  }
 ): Promise<ModelInstance> {
   return sendJson(`/api/model-instances/${id}`, 'PUT', payload)
 }
@@ -165,15 +215,13 @@ export async function fetchModelFileTrash(): Promise<ModelFileTrashItem[]> {
 }
 
 export async function addModelFileTrash(
-  modelId: string,
+  modelFileId: string,
   payload: {
-    node_id?: string | null
-    path: string
     reason?: string | null
     note?: string | null
   }
 ): Promise<ModelFileTrashItem> {
-  return sendJson(`/api/models/${modelId}/file-trash`, 'POST', payload)
+  return sendJson(`/api/model-files/${modelFileId}/trash`, 'POST', payload)
 }
 
 export async function fetchGpuMetrics(
@@ -194,5 +242,5 @@ export async function fetchGpuMetrics(
 }
 
 export function gpuMetricsUrl(nodeId: string, gpuKey: string, from: number, to: number) {
-  return `/api/nodes/${nodeId}/gpus/${encodeURIComponent(gpuKey)}/metrics?from=${from}&to=${to}`
+  return `/api/nodes/${nodeId}/gpu-metrics?gpu_key=${encodeURIComponent(gpuKey)}&from=${from}&to=${to}`
 }

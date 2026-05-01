@@ -2,7 +2,7 @@
   <section class="panel-header">
     <div>
       <h2>External 模型实例</h2>
-      <p>接入已有模型服务；Docker / Script 才是在节点上部署模型服务。</p>
+      <p>直接接入已有模型服务；模型定义、运行环境、节点和服务实现信息均可后续补充。</p>
     </div>
     <div class="toolbar compact">
       <el-button :loading="loading" @click="loadData">刷新</el-button>
@@ -19,21 +19,19 @@
         <el-tag :type="statusType(row.status)">{{ row.status }}</el-tag>
       </template>
     </el-table-column>
-    <el-table-column label="检查结果" min-width="220">
+    <el-table-column label="检查结果" min-width="280">
       <template #default="{ row }">
-        <span>{{ row.last_error ?? '-' }}</span>
-        <span v-if="row.last_checked_at" class="muted"> · {{ formatTime(row.last_checked_at) }}</span>
+        <div>{{ row.last_error ?? '暂无错误' }}</div>
+        <div v-if="row.last_checked_at" class="muted">{{ formatTime(row.last_checked_at) }}</div>
       </template>
     </el-table-column>
+    <el-table-column prop="model_name" label="服务模型名" min-width="150" />
+    <el-table-column prop="base_url" label="基础地址" min-width="220" show-overflow-tooltip />
     <el-table-column label="模型定义" min-width="150">
-      <template #default="{ row }">{{ row.model_definition_name ?? row.model_id }}</template>
+      <template #default="{ row }">{{ row.model_definition_name ?? row.model_id ?? '-' }}</template>
     </el-table-column>
-    <el-table-column prop="model_name" label="服务模型名" min-width="140" />
-    <el-table-column prop="backend" label="后端" width="120" />
-    <el-table-column prop="runtime_version" label="版本" width="120" />
-    <el-table-column prop="base_url" label="Base URL" min-width="220" show-overflow-tooltip />
-    <el-table-column prop="health_url" label="Health URL" min-width="240" show-overflow-tooltip />
-    <el-table-column prop="endpoint_url" label="Endpoint" min-width="220" show-overflow-tooltip />
+    <el-table-column prop="health_url" label="健康检查" min-width="220" show-overflow-tooltip />
+    <el-table-column prop="endpoint_url" label="非标准 Endpoint" min-width="220" show-overflow-tooltip />
     <el-table-column label="操作" width="230" fixed="right">
       <template #default="{ row }">
         <el-button size="small" @click="check(row)">检查状态</el-button>
@@ -45,43 +43,48 @@
 
   <el-dialog v-model="dialogVisible" :title="editingId ? '编辑 External 实例' : '新增 External 实例'" width="700px">
     <el-alert
-      title="External 用于接入已有模型服务，不需要先登记运行环境，也不要求绑定节点。"
+      title="只需填写实例名称、服务模型名和基础地址。高级配置可按外部服务实际情况补充。"
       type="info"
       show-icon
       class="alert"
     />
     <el-form label-width="120px">
-      <el-form-item label="模型定义">
-        <el-select v-model="form.model_id" filterable :disabled="Boolean(editingId)">
-          <el-option v-for="model in models" :key="model.id" :label="model.name" :value="model.id" />
-        </el-select>
-      </el-form-item>
       <el-form-item label="实例名称">
         <el-input v-model="form.name" />
-      </el-form-item>
-      <el-form-item label="后端">
-        <el-select v-model="form.backend">
-          <el-option v-for="backend in backends" :key="backend" :label="backend" :value="backend" />
-        </el-select>
       </el-form-item>
       <el-form-item label="服务模型名">
         <el-input v-model="form.model_name" placeholder="例如 local-gguf" />
       </el-form-item>
-      <el-form-item label="版本">
-        <el-input v-model="form.runtime_version" />
-      </el-form-item>
-      <el-form-item label="Base URL">
+      <el-form-item label="基础地址">
         <el-input v-model="form.base_url" placeholder="http://127.0.0.1:8088" />
       </el-form-item>
-      <el-form-item label="Health URL">
-        <el-input v-model="form.health_url" placeholder="http://127.0.0.1:8088/v1/models" />
-      </el-form-item>
-      <el-form-item label="Endpoint URL">
-        <el-input v-model="form.endpoint_url" placeholder="http://127.0.0.1:8088/v1" />
-      </el-form-item>
-      <el-form-item label="备注">
-        <el-input v-model="form.description" type="textarea" :rows="2" />
-      </el-form-item>
+
+      <el-collapse class="advanced-fields">
+        <el-collapse-item title="高级配置（可选）" name="advanced">
+          <el-form-item label="模型定义">
+            <el-select v-model="form.model_id" filterable clearable :disabled="Boolean(editingId)">
+          <el-option v-for="model in models" :key="model.id" :label="model.name" :value="model.id" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="服务实现">
+            <el-select v-model="form.backend" clearable placeholder="可选；默认由服务端兼容字段处理">
+          <el-option v-for="backend in backends" :key="backend" :label="backend" :value="backend" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="接口类型">
+            <el-input v-model="form.endpoint_url" placeholder="http://127.0.0.1:8088/v1" />
+          </el-form-item>
+          <el-form-item label="健康检查">
+            <el-input v-model="form.health_url" placeholder="http://127.0.0.1:8088/v1/models" />
+          </el-form-item>
+          <el-form-item label="版本">
+            <el-input v-model="form.runtime_version" />
+          </el-form-item>
+          <el-form-item label="备注">
+            <el-input v-model="form.description" type="textarea" :rows="2" />
+          </el-form-item>
+        </el-collapse-item>
+      </el-collapse>
     </el-form>
     <template #footer>
       <el-button @click="dialogVisible = false">取消</el-button>
@@ -116,7 +119,7 @@ function emptyForm() {
   return {
     model_id: '',
     name: '',
-    backend: 'llama_cpp',
+    backend: '',
     model_name: '',
     runtime_version: '',
     base_url: '',
@@ -142,16 +145,16 @@ async function loadData() {
 
 function openCreate() {
   editingId.value = ''
-  form.value = { ...emptyForm(), model_id: models.value[0]?.id ?? '' }
+  form.value = emptyForm()
   dialogVisible.value = true
 }
 
 function openEdit(row: ModelInstance) {
   editingId.value = row.id
   form.value = {
-    model_id: row.model_id,
+    model_id: row.model_id ?? '',
     name: row.name,
-    backend: row.backend,
+    backend: row.backend === 'custom' ? '' : row.backend,
     model_name: row.model_name ?? '',
     runtime_version: row.runtime_version ?? '',
     base_url: row.base_url ?? '',
@@ -163,15 +166,14 @@ function openEdit(row: ModelInstance) {
 }
 
 async function submit() {
-  if (!form.value.model_id || !form.value.name || !form.value.backend) return
-  if (!form.value.base_url && !form.value.endpoint_url && !form.value.health_url) {
-    error.value = '至少填写 Base URL、Endpoint URL 或 Health URL 中的一个'
+  if (!form.value.name || !form.value.model_name || !form.value.base_url) {
+    error.value = '请填写实例名称、服务模型名和基础地址'
     return
   }
   const payload = {
-    model_id: form.value.model_id,
+    model_id: emptyToNull(form.value.model_id),
     name: form.value.name,
-    backend: form.value.backend,
+    backend: emptyToNull(form.value.backend),
     base_url: emptyToNull(form.value.base_url),
     endpoint_url: emptyToNull(form.value.endpoint_url),
     health_url: emptyToNull(form.value.health_url),
@@ -200,7 +202,11 @@ async function check(row: ModelInstance) {
 }
 
 async function remove(row: ModelInstance) {
-  await ElMessageBox.confirm(`删除实例 ${row.name}？`, '确认删除', { type: 'warning' })
+  await ElMessageBox.confirm(`删除实例 ${row.name}？`, '确认删除', {
+    type: 'warning',
+    confirmButtonText: '确认',
+    cancelButtonText: '取消'
+  })
   await deleteModelInstance(row.id)
   ElMessage.success('已删除')
   await loadData()

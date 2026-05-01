@@ -2,13 +2,13 @@
   <section class="panel-header">
     <div>
       <h2>模型文件垃圾箱</h2>
-      <p>仅登记待清理模型文件路径；Stage 3A 不会物理删除磁盘文件。</p>
+      <p>垃圾箱记录对应具体节点上的具体模型文件路径；本阶段仅展示记录，不执行物理清理。</p>
     </div>
     <el-button :loading="loading" @click="loadData">刷新</el-button>
   </section>
 
   <el-alert
-    title="这里是待清理入口，不是删除执行器。未来物理删除必须由 Agent 在受控目录范围内完成。"
+    title="后续会区分“清理文件”和“删除记录”：清理文件由节点 Agent 物理删除文件；删除记录只移除垃圾箱记录，不删除任何文件。"
     type="warning"
     show-icon
     class="alert"
@@ -25,6 +25,10 @@
     </el-table-column>
     <el-table-column prop="reason" label="原因" min-width="180" show-overflow-tooltip />
     <el-table-column prop="status" label="状态" width="120" />
+    <el-table-column label="文件清理时间" width="190">
+      <template #default="{ row }">{{ formatTime(row.file_deleted_at) }}</template>
+    </el-table-column>
+    <el-table-column prop="last_error" label="失败原因" min-width="180" show-overflow-tooltip />
     <el-table-column prop="note" label="备注" min-width="180" show-overflow-tooltip />
     <el-table-column label="登记时间" width="190">
       <template #default="{ row }">{{ formatTime(row.created_at) }}</template>

@@ -1,5 +1,5 @@
 <template>
-  <el-config-provider>
+  <el-config-provider :locale="zhCn">
     <main class="page-shell">
       <el-tabs v-model="activeTab" class="main-tabs">
         <el-tab-pane label="节点监控" name="nodes">
@@ -24,6 +24,7 @@
 
 <script setup lang="ts">
 import { ref } from 'vue'
+import zhCn from 'element-plus/es/locale/lang/zh-cn'
 import InstancesPanel from './components/InstancesPanel.vue'
 import ModelsPanel from './components/ModelsPanel.vue'
 import NodesPanel from './components/NodesPanel.vue'

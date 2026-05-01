@@ -33,11 +33,11 @@ function renderChart() {
       trigger: 'axis'
     },
     legend: {
-      top: 24,
+      top: 36,
       left: 0
     },
     grid: {
-      top: 64,
+      top: 86,
       right: 16,
       bottom: 28,
       left: 44

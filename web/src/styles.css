@@ -117,6 +117,14 @@ h1 {
   margin-bottom: 16px;
 }
 
+.card-header-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
 .node-detail {
   display: grid;
   gap: 16px;
@@ -159,9 +167,20 @@ h1 {
   overflow-wrap: anywhere;
 }
 
+.model-files-block {
+  display: grid;
+  gap: 12px;
+  padding: 12px 0;
+}
+
 .muted {
   color: #6b7280;
   font-size: 13px;
+}
+
+.tiny-text {
+  font-size: 12px;
+  line-height: 1.4;
 }
 
 .trend-chart {

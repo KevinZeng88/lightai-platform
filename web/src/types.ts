@@ -107,11 +107,34 @@ export interface ModelDefinition {
   created_at: number
   updated_at: number
   deleted_at?: number | null
+  file_status: string
+  total_file_count: number
+  verified_file_count: number
+  available_node_count: number
+  last_file_verified_at?: number | null
+}
+
+export interface ModelFile {
+  id: string
+  model_id: string
+  model_name?: string | null
+  node_id: string
+  node_name?: string | null
+  node_status: string
+  path: string
+  status: string
+  size_bytes?: number | null
+  last_verified_at?: number | null
+  last_error?: string | null
+  verify_task_id?: string | null
+  verify_task_status?: string | null
+  created_at: number
+  updated_at: number
 }
 
 export interface ModelInstance {
   id: string
-  model_id: string
+  model_id?: string | null
   model_definition_name?: string | null
   model_name?: string | null
   node_id?: string | null
@@ -136,6 +159,7 @@ export interface ModelInstance {
 
 export interface ModelFileTrashItem {
   id: string
+  model_file_id?: string | null
   model_id?: string | null
   model_name?: string | null
   node_id?: string | null
@@ -143,6 +167,9 @@ export interface ModelFileTrashItem {
   path: string
   reason?: string | null
   status: string
+  file_deleted_at?: number | null
+  cleanup_task_id?: string | null
+  last_error?: string | null
   note?: string | null
   created_at: number
   updated_at: number

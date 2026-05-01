@@ -2,7 +2,7 @@
   <section class="panel-header">
     <div>
       <h2>运行环境</h2>
-      <p>高级配置：登记节点本地运行能力，主要服务于后续 Docker / Script 部署。</p>
+      <p>登记节点本地运行能力，主要服务后续 Docker / Script；External 接入不依赖运行环境。</p>
     </div>
     <div class="toolbar compact">
       <el-button :loading="loading" @click="loadData">刷新</el-button>
@@ -216,10 +216,18 @@ async function check(row: RuntimeEnvironment) {
 }
 
 async function remove(row: RuntimeEnvironment) {
-  await ElMessageBox.confirm(`删除运行环境 ${row.name}？`, '确认删除', { type: 'warning' })
-  await deleteRuntimeEnvironment(row.id)
-  ElMessage.success('已删除')
-  await loadData()
+  await ElMessageBox.confirm(`删除运行环境 ${row.name}？`, '确认删除', {
+    type: 'warning',
+    confirmButtonText: '确认',
+    cancelButtonText: '取消'
+  })
+  try {
+    await deleteRuntimeEnvironment(row.id)
+    ElMessage.success('已删除')
+    await loadData()
+  } catch (err) {
+    ElMessage.error(toBusinessMessage(err))
+  }
 }
 
 function nodeName(nodeId?: string | null) {
@@ -241,6 +249,14 @@ function checkType(status?: string | null) {
 function formatTime(value?: number | null) {
   if (!value) return '-'
   return new Date(value * 1000).toLocaleString()
+}
+
+function toBusinessMessage(err: unknown) {
+  const message = err instanceof Error ? err.message : '操作失败'
+  if (message.includes('runtime environment is used by model instances')) {
+    return '运行环境已被模型实例引用，不能删除'
+  }
+  return message
 }
 
 onMounted(loadData)
