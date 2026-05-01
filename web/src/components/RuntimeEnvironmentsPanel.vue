@@ -34,6 +34,9 @@
       <template #default="{ row }">{{ deployTypeLabel(row.deploy_type) }}</template>
     </el-table-column>
     <el-table-column prop="version" label="版本" width="120" />
+    <el-table-column label="日志目录" min-width="220" show-overflow-tooltip>
+      <template #default="{ row }">{{ row.log_dir ?? '未配置' }}</template>
+    </el-table-column>
     <el-table-column label="状态" width="120">
       <template #default="{ row }">
         <el-tag :type="row.enabled ? 'success' : 'info'">
@@ -98,8 +101,11 @@
       <el-form-item label="工作目录">
         <el-input v-model="form.working_dir" placeholder="/opt/lightai/apps/llama.cpp" />
       </el-form-item>
+      <el-form-item label="日志目录">
+        <el-input v-model="form.log_dir" placeholder="/var/log/lightai/instances" />
+      </el-form-item>
       <el-alert
-        title="工作目录用于设置程序或脚本的 current_dir。未配置时 Agent 使用自身启动目录；建议配置固定应用目录，不要依赖 /tmp 或用户家目录。"
+        title="工作目录用于设置程序或脚本的 current_dir。日志目录用于 Agent 保存本地实例 stdout/stderr，必须是受控绝对路径；未配置日志目录时只保留最近日志摘要。"
         type="info"
         show-icon
         class="alert"
@@ -146,6 +152,7 @@ const form = ref({
   binary_path: '',
   docker_image: '',
   working_dir: '',
+  log_dir: '',
   enabled: true
 })
 
@@ -177,6 +184,7 @@ function openCreate() {
     binary_path: '',
     docker_image: '',
     working_dir: '',
+    log_dir: '',
     enabled: true
   }
   dialogVisible.value = true
@@ -193,6 +201,7 @@ function openEdit(row: RuntimeEnvironment) {
     binary_path: row.binary_path ?? '',
     docker_image: row.docker_image ?? '',
     working_dir: row.working_dir ?? '',
+    log_dir: row.log_dir ?? '',
     enabled: row.enabled
   }
   dialogVisible.value = true
@@ -211,6 +220,7 @@ async function submit() {
     binary_path: emptyToNull(form.value.binary_path),
     docker_image: emptyToNull(form.value.docker_image),
     working_dir: emptyToNull(form.value.working_dir),
+    log_dir: emptyToNull(form.value.log_dir),
     enabled: form.value.enabled
   }
   if (editingId.value) {

@@ -1210,6 +1210,16 @@ pub async fn record_agent_task_result(
             .get("process_ref")
             .and_then(|value| value.as_str())
             .map(str::to_string);
+        let log_tail = request
+            .result
+            .get("log_tail")
+            .and_then(|value| value.as_str())
+            .map(|value| value.chars().take(8192).collect::<String>());
+        let command = request
+            .result
+            .get("command")
+            .and_then(|value| value.as_str())
+            .map(|value| value.chars().take(2048).collect::<String>());
         sqlx::query(
             r#"
             UPDATE model_instances
@@ -1218,6 +1228,8 @@ pub async fn record_agent_task_result(
                 endpoint_url = COALESCE(?, endpoint_url),
                 process_id = CASE WHEN ? = 'stop_model_instance' THEN NULL ELSE COALESCE(?, process_id) END,
                 process_ref = CASE WHEN ? = 'stop_model_instance' THEN NULL ELSE COALESCE(?, process_ref) END,
+                log_tail = COALESCE(?, log_tail),
+                command = COALESCE(?, command),
                 last_checked_at = ?, last_error = ?, updated_at = ?
             WHERE id = ?
             "#,
@@ -1229,6 +1241,8 @@ pub async fn record_agent_task_result(
         .bind(process_id)
         .bind(&kind)
         .bind(process_ref)
+        .bind(log_tail)
+        .bind(command)
         .bind(now)
         .bind(last_error)
         .bind(now)
@@ -1523,9 +1537,10 @@ pub async fn check_model_instance(
 ) -> Result<ModelInstanceView, Stage3Error> {
     let instance = model_instance(pool, id).await?;
     if instance.deploy_type != "external" {
-        return Err(Stage3Error::BadRequest(
-            "Stage 3A only checks external instances".to_string(),
-        ));
+        if instance.status != "running" {
+            return Ok(instance);
+        }
+        return run_local_instance_task(pool, id, "test_model_instance", "running").await;
     }
     let Some(url) = instance
         .health_url
@@ -1622,6 +1637,7 @@ async fn run_local_instance_task(
         "binary_path": env.binary_path,
         "docker_image": env.docker_image,
         "working_dir": env.working_dir,
+        "log_dir": env.log_dir,
         "model_file_id": model_file_id,
         "model_path": file.path,
         "model_path_type": file.path_type,
@@ -2199,6 +2215,8 @@ fn model_instance_from_row(row: sqlx::sqlite::SqliteRow) -> ModelInstanceView {
         params_json: row.get("params_json"),
         process_id: row.get("process_id"),
         process_ref: row.get("process_ref"),
+        log_tail: row.get("log_tail"),
+        command: row.get("command"),
         last_checked_at: row.get("last_checked_at"),
         last_error: row.get("last_error"),
         created_at: row.get("created_at"),

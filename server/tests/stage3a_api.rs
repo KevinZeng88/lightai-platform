@@ -1706,8 +1706,8 @@ async fn local_instance_uses_verified_model_file_and_agent_start_stop_tasks() {
     let registered = register_node_json(app.clone()).await;
     let node_id = registered["node_id"].as_str().unwrap();
     let token = registered["agent_token"].as_str().unwrap();
-    let environment = create_runtime_environment(app.clone(), node_id, token).await;
     let model = create_model_for_node(app.clone(), node_id, token).await;
+    let environment = create_runtime_environment(app.clone(), node_id, token).await;
     let model_id = model["id"].as_str().unwrap();
     let (status, files) = request(
         app.clone(),
@@ -1769,6 +1769,92 @@ async fn local_instance_uses_verified_model_file_and_agent_start_stop_tasks() {
     let ((status, stopped), _) = tokio::join!(stop_request, agent);
     assert_eq!(status, StatusCode::OK);
     assert_eq!(stopped["status"], "stopped");
+}
+
+#[tokio::test]
+async fn local_instance_failure_persists_log_tail_and_command_summary() {
+    let app = test_app().await;
+    let registered = register_node_json(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+    let token = registered["agent_token"].as_str().unwrap();
+    let environment = create_runtime_environment(app.clone(), node_id, token).await;
+    let model = create_model_for_node(app.clone(), node_id, token).await;
+    let model_id = model["id"].as_str().unwrap();
+    let (status, files) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/models/{model_id}/files"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let model_file_id = files["files"][0]["id"].as_str().unwrap();
+
+    let (status, instance) = request(
+        app.clone(),
+        "POST",
+        "/api/model-instances",
+        Some(json!({
+            "deploy_type": "local",
+            "name": "qwen local failure",
+            "node_id": node_id,
+            "runtime_environment_id": environment["id"],
+            "model_file_id": model_file_id,
+            "params_json": "{\"host\":\"127.0.0.1\",\"port\":18083}"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let instance_id = instance["id"].as_str().unwrap();
+
+    let start_uri = format!("/api/model-instances/{instance_id}/start");
+    let start_request = request(app.clone(), "POST", &start_uri, None);
+    let agent = async {
+        let task = poll_agent_task(app.clone(), node_id, token).await;
+        let task_id = task["task"]["id"].as_str().unwrap();
+        assert_eq!(task["task"]["kind"], "start_model_instance");
+        report_instance_task_result_with_details(
+            app.clone(),
+            node_id,
+            token,
+            task_id,
+            json!({
+                "instance_status": "failed",
+                "message": "启动进程已退出：main: exiting due to HTTP server error",
+                "log_tail": "stderr:\nmain: exiting due to HTTP server error",
+                "command": "[\"/usr/local/bin/llama-server\",\"-m\",\"/models/qwen2-7b/model.gguf\"]"
+            }),
+        )
+        .await;
+    };
+    let ((status, json), _) = tokio::join!(start_request, agent);
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert!(json["message"]
+        .as_str()
+        .unwrap()
+        .contains("HTTP server error"));
+
+    let (status, fetched) = request(
+        app,
+        "GET",
+        &format!("/api/model-instances/{instance_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["status"], "failed");
+    assert!(fetched["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("HTTP server error"));
+    assert!(fetched["log_tail"]
+        .as_str()
+        .unwrap()
+        .contains("HTTP server error"));
+    assert!(fetched["command"]
+        .as_str()
+        .unwrap()
+        .contains("llama-server"));
 }
 
 #[tokio::test]

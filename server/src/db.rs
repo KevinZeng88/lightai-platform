@@ -128,6 +128,8 @@ async fn ensure_stage3b_tables(pool: &SqlitePool) -> anyhow::Result<()> {
     add_model_instance_column_if_missing(pool, "model_file_id", "TEXT").await?;
     add_model_instance_column_if_missing(pool, "process_id", "INTEGER").await?;
     add_model_instance_column_if_missing(pool, "process_ref", "TEXT").await?;
+    add_model_instance_column_if_missing(pool, "log_tail", "TEXT").await?;
+    add_model_instance_column_if_missing(pool, "command", "TEXT").await?;
     Ok(())
 }
 
@@ -242,6 +244,10 @@ async fn rebuild_model_instances_table(pool: &SqlitePool) -> anyhow::Result<()> 
             model_name TEXT,
             description TEXT,
             params_json TEXT,
+            process_id INTEGER,
+            process_ref TEXT,
+            log_tail TEXT,
+            command TEXT,
             last_checked_at INTEGER,
             last_error TEXT,
             created_at INTEGER NOT NULL,

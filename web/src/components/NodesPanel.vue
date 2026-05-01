@@ -114,14 +114,32 @@
         <p>{{ selectedNode.effective_agent_config.command_timeout_secs }}s / {{ selectedNode.effective_agent_config.environment_check_timeout_secs }}s</p>
       </div>
       <div>
-        <span class="muted">采集器</span>
+        <span class="muted">NVIDIA 采集器</span>
         <p>{{ selectedNode.effective_agent_config.nvidia_collector_enabled ? 'NVIDIA 启用' : 'NVIDIA 禁用' }}</p>
+      </div>
+      <div>
+        <span class="muted">Custom 采集器</span>
+        <p>{{ selectedNode.effective_agent_config.custom_collector_script ? '启用' : '停用' }}</p>
+      </div>
+      <div>
+        <span class="muted">采集超时 / 输出上限</span>
+        <p>{{ selectedNode.effective_agent_config.collector_timeout_secs }}s / {{ formatBytes(selectedNode.effective_agent_config.collector_max_output_bytes) }}</p>
+      </div>
+      <div class="wide-detail">
+        <span class="muted">Custom collector 脚本</span>
+        <p>{{ selectedNode.effective_agent_config.custom_collector_script || '未配置；国产或其它 GPU 可通过受控自定义 collector 扩展' }}</p>
       </div>
       <div class="wide-detail">
         <span class="muted">Allowed dirs</span>
         <p>{{ selectedNode.effective_agent_config.allowed_model_dirs.join(', ') || '未配置，物理删除会被拒绝' }}</p>
       </div>
     </div>
+    <el-alert
+      title="GPU 由 Agent 自动发现并随心跳上报，Web 不手工添加 GPU。当前内置 NVIDIA nvidia-smi，也可配置受控 custom collector，为后续国产 GPU 适配预留入口。"
+      type="info"
+      show-icon
+      class="history-alert"
+    />
     <el-alert
       title="本页策略字段可在线生效；Agent bootstrap 字段（Server 地址、节点标识、state、health 监听）需要重启 Agent。"
       type="info"
@@ -390,6 +408,13 @@ function percent(used?: number | null, total?: number | null) {
 
 function formatPercent(value?: number | null) {
   return value == null ? '-' : `${value.toFixed(1)}%`
+}
+
+function formatBytes(value?: number | null) {
+  if (value == null) return '-'
+  if (value >= 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MiB`
+  if (value >= 1024) return `${(value / 1024).toFixed(1)} KiB`
+  return `${value} B`
 }
 
 function formatTime(value?: number | null) {

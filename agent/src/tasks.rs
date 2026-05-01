@@ -1,8 +1,10 @@
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
+use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 
 use serde::Serialize;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
@@ -49,6 +51,10 @@ pub struct ModelInstanceTaskResult {
     pub process_ref: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub response_summary: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub log_tail: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
 }
 
 pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
@@ -310,8 +316,10 @@ pub async fn start_model_instance(payload: &serde_json::Value) -> ModelInstanceT
         Ok(args) => args,
         Err(message) => return instance_failure(&message),
     };
+    let command_summary = command_summary(binary_path, &args);
     let mut command = Command::new(binary_path);
     command.args(&args);
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
     if let Some(working_dir) = payload.get("working_dir").and_then(|value| value.as_str()) {
         if !working_dir.trim().is_empty() {
             command.current_dir(working_dir);
@@ -319,22 +327,88 @@ pub async fn start_model_instance(payload: &serde_json::Value) -> ModelInstanceT
     }
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(error) => return instance_failure(&format!("启动进程失败：{error}")),
+        Err(error) => {
+            return instance_failure_with_details(
+                &format!("启动进程失败：{error}"),
+                None,
+                Some(command_summary),
+            )
+        }
     };
     let process_id = child.id().map(|pid| pid as i64);
-    sleep(Duration::from_millis(100)).await;
+    let log_buffer = Arc::new(Mutex::new(String::new()));
+    let log_path = match payload
+        .get("log_dir")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        Some(log_dir) => match controlled_log_path(log_dir, instance_id).await {
+            Ok(path) => Some(path),
+            Err(message) => {
+                return instance_failure_with_details(
+                    &format!("日志目录不可用：{message}"),
+                    None,
+                    Some(command_summary),
+                )
+            }
+        },
+        None => None,
+    };
+    attach_log_reader(
+        "stdout",
+        child.stdout.take(),
+        log_buffer.clone(),
+        log_path.clone(),
+    );
+    attach_log_reader(
+        "stderr",
+        child.stderr.take(),
+        log_buffer.clone(),
+        log_path.clone(),
+    );
+    sleep(Duration::from_millis(250)).await;
     match child.try_wait() {
         Ok(Some(status)) => {
-            return instance_failure(&format!("启动进程已退出：{status}"));
+            sleep(Duration::from_millis(50)).await;
+            let log_tail = log_tail(&log_buffer).await;
+            let detail = first_log_line(log_tail.as_deref()).unwrap_or_else(|| status.to_string());
+            return instance_failure_with_details(
+                &format!("启动进程已退出：{detail}"),
+                log_tail,
+                Some(command_summary),
+            );
         }
         Ok(None) => {}
-        Err(error) => return instance_failure(&format!("确认进程状态失败：{error}")),
+        Err(error) => {
+            return instance_failure_with_details(
+                &format!("确认进程状态失败：{error}"),
+                log_tail(&log_buffer).await,
+                Some(command_summary),
+            )
+        }
     }
-    process_registry()
-        .lock()
-        .await
-        .insert(instance_id.to_string(), child);
     let base_url = format!("http://{}:{}", params.host, params.port);
+    if !(backend == "custom" && deploy_type == "script") && !endpoint_ready(&base_url).await {
+        let _ = child.kill().await;
+        let log_tail = log_tail(&log_buffer).await;
+        let detail = first_log_line(log_tail.as_deref())
+            .unwrap_or_else(|| "端口或健康接口未就绪".to_string());
+        return instance_failure_with_details(
+            &format!("本地进程已启动但服务不可用：{detail}"),
+            log_tail,
+            Some(command_summary),
+        );
+    }
+    let initial_log_tail = log_tail(&log_buffer).await;
+    process_registry().lock().await.insert(
+        instance_id.to_string(),
+        ProcessHandle {
+            child,
+            log_buffer,
+            command: command_summary.clone(),
+        },
+    );
     ModelInstanceTaskResult {
         instance_status: "running".to_string(),
         message: format!("本地实例已启动，监听地址 {base_url}"),
@@ -343,6 +417,8 @@ pub async fn start_model_instance(payload: &serde_json::Value) -> ModelInstanceT
         process_id,
         process_ref: Some(instance_id.to_string()),
         response_summary: None,
+        log_tail: initial_log_tail,
+        command: Some(command_summary),
     }
 }
 
@@ -351,7 +427,10 @@ pub async fn stop_model_instance(payload: &serde_json::Value) -> ModelInstanceTa
         .get("instance_id")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    let Some(mut child) = process_registry().lock().await.remove(instance_id) else {
+    let Some(mut handle) = process_registry().lock().await.remove(instance_id) else {
+        if is_custom_script(payload) {
+            return run_controlled_script_action(payload, "stop", "stopped").await;
+        }
         return ModelInstanceTaskResult {
             instance_status: "stopped".to_string(),
             message: "未找到本地进程引用，实例状态已标记为停止".to_string(),
@@ -360,9 +439,11 @@ pub async fn stop_model_instance(payload: &serde_json::Value) -> ModelInstanceTa
             process_id: None,
             process_ref: None,
             response_summary: None,
+            log_tail: None,
+            command: None,
         };
     };
-    match child.kill().await {
+    match handle.child.kill().await {
         Ok(()) => ModelInstanceTaskResult {
             instance_status: "stopped".to_string(),
             message: "本地实例进程已停止".to_string(),
@@ -371,12 +452,17 @@ pub async fn stop_model_instance(payload: &serde_json::Value) -> ModelInstanceTa
             process_id: None,
             process_ref: None,
             response_summary: None,
+            log_tail: log_tail(&handle.log_buffer).await,
+            command: Some(handle.command),
         },
         Err(error) => instance_failure(&format!("停止进程失败：{error}")),
     }
 }
 
 pub async fn test_model_instance(payload: &serde_json::Value) -> ModelInstanceTaskResult {
+    if is_custom_script(payload) {
+        return run_controlled_script_action(payload, "test", "running").await;
+    }
     let Some(url) = payload
         .get("endpoint_url")
         .and_then(|value| value.as_str())
@@ -384,8 +470,14 @@ pub async fn test_model_instance(payload: &serde_json::Value) -> ModelInstanceTa
     else {
         return instance_failure("实例缺少测试地址");
     };
-    let url = match build_test_url(url) {
-        Ok(url) => url,
+    let urls = match build_test_urls(
+        payload
+            .get("backend")
+            .and_then(|value| value.as_str())
+            .unwrap_or_default(),
+        url,
+    ) {
+        Ok(urls) => urls,
         Err(message) => return instance_failure(&message),
     };
     let client = match reqwest::Client::builder()
@@ -395,27 +487,32 @@ pub async fn test_model_instance(payload: &serde_json::Value) -> ModelInstanceTa
         Ok(client) => client,
         Err(error) => return instance_failure(&format!("测试客户端初始化失败：{error}")),
     };
-    match client.get(&url).send().await {
-        Ok(response) => {
-            let status = response.status();
-            let text = response.text().await.unwrap_or_default();
-            let summary = text.chars().take(300).collect::<String>();
-            if status.is_success() || status.is_redirection() {
-                ModelInstanceTaskResult {
-                    instance_status: "running".to_string(),
-                    message: format!("测试成功：HTTP {status}"),
-                    base_url: None,
-                    endpoint_url: None,
-                    process_id: None,
-                    process_ref: None,
-                    response_summary: Some(summary),
+    let mut failures = Vec::new();
+    for url in &urls {
+        match client.get(url).send().await {
+            Ok(response) => {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                let summary = text.chars().take(300).collect::<String>();
+                if status.is_success() || status.is_redirection() {
+                    return ModelInstanceTaskResult {
+                        instance_status: "running".to_string(),
+                        message: format!("测试成功：HTTP {status} {url}"),
+                        base_url: None,
+                        endpoint_url: None,
+                        process_id: None,
+                        process_ref: None,
+                        response_summary: Some(summary),
+                        log_tail: None,
+                        command: None,
+                    };
                 }
-            } else {
-                instance_failure(&format!("测试失败：HTTP {status} {summary}"))
+                failures.push(format!("{url} -> HTTP {status} {summary}"));
             }
+            Err(error) => failures.push(format!("{url} -> 请求失败：{error}")),
         }
-        Err(error) => instance_failure(&format!("测试请求失败：{error}")),
     }
+    instance_failure(&summarize_test_failures(&urls, &failures))
 }
 
 async fn verify_controlled_entrypoint(path: &str) -> RuntimeEnvironmentCheckResult {
@@ -637,8 +734,14 @@ async fn allowed_canonical_dirs(allowed_model_dirs: &[String]) -> AllowedDirReso
     }
 }
 
-fn process_registry() -> &'static Mutex<HashMap<String, Child>> {
-    static REGISTRY: OnceLock<Mutex<HashMap<String, Child>>> = OnceLock::new();
+struct ProcessHandle {
+    child: Child,
+    log_buffer: Arc<Mutex<String>>,
+    command: String,
+}
+
+fn process_registry() -> &'static Mutex<HashMap<String, ProcessHandle>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, ProcessHandle>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -653,16 +756,15 @@ async fn detect_entrypoint_version(path: &str) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    let mut text = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    if text.is_empty() {
-        text = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    }
-    let version = text.lines().next().unwrap_or_default().trim();
-    if version.is_empty() {
-        None
-    } else {
-        Some(version.chars().take(120).collect())
-    }
+    let text = format!(
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    text.lines()
+        .filter_map(parse_version_line)
+        .next()
+        .map(|version| version.chars().take(120).collect())
 }
 
 #[cfg(unix)]
@@ -747,6 +849,7 @@ fn build_launch_args(
 ) -> Result<Vec<String>, String> {
     if deploy_type == "script" {
         let mut args = vec![
+            "start".to_string(),
             "--model".to_string(),
             model_path.to_string(),
             "--host".to_string(),
@@ -795,6 +898,69 @@ fn build_launch_args(
     }
 }
 
+fn is_custom_script(payload: &serde_json::Value) -> bool {
+    payload.get("backend").and_then(|value| value.as_str()) == Some("custom")
+        && payload.get("deploy_type").and_then(|value| value.as_str()) == Some("script")
+}
+
+async fn run_controlled_script_action(
+    payload: &serde_json::Value,
+    action: &str,
+    success_status: &str,
+) -> ModelInstanceTaskResult {
+    let Some(binary_path) = payload
+        .get("binary_path")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return instance_failure("custom 脚本路径未配置");
+    };
+    if verify_controlled_entrypoint(binary_path).await.check_status != "available" {
+        return instance_failure("custom 脚本入口不可用");
+    }
+    let args = vec![action.to_string()];
+    let command = command_summary(binary_path, &args);
+    let output = match timeout(
+        Duration::from_secs(10),
+        Command::new(binary_path).args(&args).output(),
+    )
+    .await
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
+            return instance_failure_with_details(
+                &format!("custom 脚本执行失败：{error}"),
+                None,
+                Some(command),
+            )
+        }
+        Err(_) => return instance_failure_with_details("custom 脚本执行超时", None, Some(command)),
+    };
+    let log_tail = combined_output_log(&output.stdout, &output.stderr);
+    if output.status.success() {
+        ModelInstanceTaskResult {
+            instance_status: success_status.to_string(),
+            message: format!("custom 脚本 {action} 执行成功"),
+            base_url: None,
+            endpoint_url: None,
+            process_id: None,
+            process_ref: None,
+            response_summary: log_tail.clone(),
+            log_tail,
+            command: Some(command),
+        }
+    } else {
+        let detail =
+            first_log_line(log_tail.as_deref()).unwrap_or_else(|| output.status.to_string());
+        instance_failure_with_details(
+            &format!("custom 脚本 {action} 执行失败：{detail}"),
+            log_tail,
+            Some(command),
+        )
+    }
+}
+
 fn validate_arg(arg: &str) -> Result<(), String> {
     if arg.trim().is_empty() {
         return Err("高级参数不能为空".to_string());
@@ -813,15 +979,67 @@ fn is_safe_host(host: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '.' | '-' | ':' | '_'))
 }
 
-fn build_test_url(base: &str) -> Result<String, String> {
+pub fn build_test_urls(backend: &str, base: &str) -> Result<Vec<String>, String> {
     let trimmed = base.trim().trim_end_matches('/');
     if !(trimmed.starts_with("http://") || trimmed.starts_with("https://")) {
         return Err("实例测试地址必须是 http:// 或 https://".to_string());
     }
-    Ok(format!("{trimmed}/v1/models"))
+    let parsed = reqwest::Url::parse(trimmed).map_err(|_| "实例测试地址格式非法".to_string())?;
+    let path = parsed.path().trim_end_matches('/');
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| "实例测试地址缺少主机".to_string())?;
+    let root = match parsed.port() {
+        Some(port) => format!("{}://{}:{}", parsed.scheme(), host, port),
+        None => format!("{}://{}", parsed.scheme(), host),
+    };
+    let mut urls = Vec::new();
+    if path.is_empty() {
+        match backend {
+            "llama_cpp" | "vllm" | "ollama" => {
+                urls.push(format!("{trimmed}/v1/models"));
+                urls.push(format!("{trimmed}/health"));
+                urls.push(trimmed.to_string());
+            }
+            _ => {
+                urls.push(format!("{trimmed}/health"));
+                urls.push(format!("{trimmed}/v1/models"));
+                urls.push(trimmed.to_string());
+            }
+        }
+    } else {
+        urls.push(trimmed.to_string());
+        if !path.ends_with("/v1/models") {
+            urls.push(format!("{root}/v1/models"));
+        }
+        if !path.ends_with("/health") {
+            urls.push(format!("{root}/health"));
+        }
+    }
+    urls.dedup();
+    Ok(urls)
+}
+
+pub fn summarize_test_failures(urls: &[String], failures: &[String]) -> String {
+    if failures.iter().all(|failure| failure.contains("HTTP 404")) {
+        format!(
+            "未找到可用测试接口；已尝试 {}。请确认后端是否启用 OpenAI 兼容接口，或在实例中配置正确 endpoint_url。",
+            urls.join(", ")
+        )
+    } else {
+        format!("测试失败：{}", failures.join("；"))
+    }
 }
 
 fn instance_failure(message: &str) -> ModelInstanceTaskResult {
+    instance_failure_with_details(message, None, None)
+}
+
+fn instance_failure_with_details(
+    message: &str,
+    log_tail: Option<String>,
+    command: Option<String>,
+) -> ModelInstanceTaskResult {
     ModelInstanceTaskResult {
         instance_status: "failed".to_string(),
         message: message.to_string(),
@@ -830,5 +1048,250 @@ fn instance_failure(message: &str) -> ModelInstanceTaskResult {
         process_id: None,
         process_ref: None,
         response_summary: None,
+        log_tail,
+        command,
+    }
+}
+
+fn attach_log_reader(
+    label: &'static str,
+    stream: Option<impl tokio::io::AsyncRead + Unpin + Send + 'static>,
+    log_buffer: Arc<Mutex<String>>,
+    log_path: Option<PathBuf>,
+) {
+    if let Some(mut stream) = stream {
+        tokio::spawn(async move {
+            let mut file = match log_path {
+                Some(path) => {
+                    match tokio::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(path)
+                        .await
+                    {
+                        Ok(file) => Some(file),
+                        Err(_) => None,
+                    }
+                }
+                None => None,
+            };
+            let mut header_written = false;
+            let mut bytes = [0_u8; 1024];
+            loop {
+                let read = match stream.read(&mut bytes).await {
+                    Ok(0) => break,
+                    Ok(read) => read,
+                    Err(_) => break,
+                };
+                let text = String::from_utf8_lossy(&bytes[..read]);
+                let sanitized = sanitize_log(&text);
+                if !header_written {
+                    let header = format!("{label}:\n");
+                    let mut buffer = log_buffer.lock().await;
+                    buffer.push_str(&header);
+                    if let Some(file) = file.as_mut() {
+                        let _ = file.write_all(header.as_bytes()).await;
+                    }
+                    header_written = true;
+                }
+                {
+                    let mut buffer = log_buffer.lock().await;
+                    buffer.push_str(&sanitized);
+                    buffer.push('\n');
+                    trim_log_buffer(&mut buffer);
+                }
+                if let Some(file) = file.as_mut() {
+                    let _ = file.write_all(sanitized.as_bytes()).await;
+                    let _ = file.write_all(b"\n").await;
+                    let _ = file.flush().await;
+                }
+            }
+        });
+    }
+}
+
+async fn controlled_log_path(log_dir: &str, instance_id: &str) -> Result<PathBuf, String> {
+    if log_dir.trim().is_empty() || has_parent_dir(log_dir) {
+        return Err("日志目录路径非法".to_string());
+    }
+    let dir = Path::new(log_dir);
+    if !dir.is_absolute() {
+        return Err("日志目录必须是绝对路径".to_string());
+    }
+    if let Ok(metadata) = tokio::fs::symlink_metadata(dir).await {
+        if metadata.file_type().is_symlink() {
+            return Err("日志目录不能是软链接".to_string());
+        }
+        if !metadata.is_dir() {
+            return Err("日志目录不是目录".to_string());
+        }
+    }
+    tokio::fs::create_dir_all(dir)
+        .await
+        .map_err(|error| format!("创建日志目录失败：{error}"))?;
+    let safe_id = instance_id
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    Ok(dir.join(format!("{safe_id}.log")))
+}
+
+async fn log_tail(log_buffer: &Arc<Mutex<String>>) -> Option<String> {
+    let value = log_buffer.lock().await.trim().to_string();
+    if value.is_empty() {
+        None
+    } else {
+        Some(value)
+    }
+}
+
+fn trim_log_buffer(buffer: &mut String) {
+    const MAX_LOG_BYTES: usize = 8192;
+    if buffer.len() > MAX_LOG_BYTES {
+        let start = buffer.len() - MAX_LOG_BYTES;
+        *buffer = buffer[start..].to_string();
+    }
+}
+
+fn sanitize_log(text: &str) -> String {
+    text.lines()
+        .map(|line| {
+            let lower = line.to_ascii_lowercase();
+            if [
+                "token",
+                "secret",
+                "password",
+                "api_key",
+                "apikey",
+                "authorization",
+            ]
+            .iter()
+            .any(|needle| lower.contains(needle))
+            {
+                "[已隐藏敏感日志行]".to_string()
+            } else {
+                line.chars().take(500).collect()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn combined_output_log(stdout: &[u8], stderr: &[u8]) -> Option<String> {
+    let mut parts = Vec::new();
+    if !stdout.is_empty() {
+        parts.push(format!(
+            "stdout:\n{}",
+            sanitize_log(&String::from_utf8_lossy(stdout))
+        ));
+    }
+    if !stderr.is_empty() {
+        parts.push(format!(
+            "stderr:\n{}",
+            sanitize_log(&String::from_utf8_lossy(stderr))
+        ));
+    }
+    let text = parts.join("\n");
+    if text.trim().is_empty() {
+        None
+    } else {
+        Some(
+            text.chars()
+                .rev()
+                .take(8192)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect(),
+        )
+    }
+}
+
+fn command_summary(program: &str, args: &[String]) -> String {
+    let mut parts = Vec::with_capacity(args.len() + 1);
+    parts.push(program.to_string());
+    parts.extend(args.iter().map(|arg| sanitize_arg_for_display(arg)));
+    serde_json::to_string(&parts).unwrap_or_else(|_| "[\"<command>\"]".to_string())
+}
+
+fn sanitize_arg_for_display(arg: &str) -> String {
+    let lower = arg.to_ascii_lowercase();
+    if [
+        "token",
+        "secret",
+        "password",
+        "api-key",
+        "api_key",
+        "authorization",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
+    {
+        "[已隐藏]".to_string()
+    } else {
+        arg.to_string()
+    }
+}
+
+fn first_log_line(log_tail: Option<&str>) -> Option<String> {
+    log_tail?
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty() && *line != "stdout:" && *line != "stderr:")
+        .map(|line| line.chars().take(220).collect())
+}
+
+async fn endpoint_ready(base_url: &str) -> bool {
+    let client = match reqwest::Client::builder()
+        .timeout(Duration::from_millis(600))
+        .build()
+    {
+        Ok(client) => client,
+        Err(_) => return false,
+    };
+    for _ in 0..10 {
+        for path in ["/health", "/v1/models", "/"] {
+            let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+            if let Ok(response) = client.get(&url).send().await {
+                if response.status().is_success() || response.status().is_redirection() {
+                    return true;
+                }
+            }
+        }
+        sleep(Duration::from_millis(400)).await;
+    }
+    false
+}
+
+fn parse_version_line(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.contains("cuda")
+        || lower.contains("ggml")
+        || lower.starts_with("main:")
+        || lower.starts_with("warning")
+        || lower.starts_with("error")
+    {
+        return None;
+    }
+    let has_digit = trimmed.chars().any(|ch| ch.is_ascii_digit());
+    if has_digit
+        && (lower.contains("version")
+            || lower.starts_with("ollama ")
+            || lower.starts_with("vllm ")
+            || lower.starts_with("llama.cpp "))
+    {
+        Some(trimmed.to_string())
+    } else {
+        None
     }
 }

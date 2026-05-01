@@ -119,6 +119,141 @@ async fn script_instance_starts_with_argv_and_can_be_stopped() {
 }
 
 #[tokio::test]
+async fn failed_instance_start_returns_stderr_and_command_summary() {
+    let script = unique_temp_path("failing-llama-server");
+    fs::write(
+        &script,
+        b"#!/bin/sh\necho 'main: exiting due to HTTP server error' >&2\nexit 1\n",
+    )
+    .unwrap();
+    make_executable(&script);
+    let model = unique_temp_path("failing-model.gguf");
+    fs::write(&model, b"model").unwrap();
+
+    let result = tasks::start_model_instance(&serde_json::json!({
+        "instance_id": "instance-fail",
+        "backend": "llama_cpp",
+        "deploy_type": "binary",
+        "binary_path": script.to_str().unwrap(),
+        "model_path": model.to_str().unwrap(),
+        "params": {
+            "host": "127.0.0.1",
+            "port": 19092
+        }
+    }))
+    .await;
+
+    assert_eq!(result.instance_status, "failed");
+    assert!(result
+        .message
+        .contains("main: exiting due to HTTP server error"));
+    assert!(result
+        .log_tail
+        .as_deref()
+        .unwrap()
+        .contains("main: exiting due to HTTP server error"));
+    assert!(result
+        .command
+        .as_deref()
+        .unwrap()
+        .contains("failing-llama-server"));
+    assert!(!result.command.as_deref().unwrap().contains("sh -c"));
+
+    let _ = fs::remove_file(model);
+    let _ = fs::remove_file(script);
+}
+
+#[tokio::test]
+async fn failed_instance_start_writes_stderr_to_controlled_log_dir() {
+    let script = unique_temp_path("failing-with-log-dir");
+    fs::write(
+        &script,
+        b"#!/bin/sh\necho 'HTTP server error: port already in use' >&2\nexit 1\n",
+    )
+    .unwrap();
+    make_executable(&script);
+    let model = unique_temp_path("logged-model.gguf");
+    fs::write(&model, b"model").unwrap();
+    let log_dir = unique_temp_path("instance-logs");
+
+    let result = tasks::start_model_instance(&serde_json::json!({
+        "instance_id": "instance-log-file",
+        "backend": "llama_cpp",
+        "deploy_type": "binary",
+        "binary_path": script.to_str().unwrap(),
+        "model_path": model.to_str().unwrap(),
+        "log_dir": log_dir.to_str().unwrap(),
+        "params": {
+            "host": "127.0.0.1",
+            "port": 19093
+        }
+    }))
+    .await;
+
+    assert_eq!(result.instance_status, "failed");
+    assert!(result
+        .log_tail
+        .as_deref()
+        .unwrap()
+        .contains("port already in use"));
+    let log_file = log_dir.join("instance-log-file.log");
+    let content = fs::read_to_string(&log_file).unwrap();
+    assert!(content.contains("stderr:"));
+    assert!(content.contains("port already in use"));
+
+    let _ = fs::remove_file(log_file);
+    let _ = fs::remove_dir(log_dir);
+    let _ = fs::remove_file(model);
+    let _ = fs::remove_file(script);
+}
+
+#[test]
+fn llama_cpp_test_probe_urls_prioritize_openai_models_endpoint() {
+    let urls = tasks::build_test_urls("llama_cpp", "http://127.0.0.1:8080").unwrap();
+
+    assert_eq!(urls[0], "http://127.0.0.1:8080/v1/models");
+    assert!(urls.contains(&"http://127.0.0.1:8080/health".to_string()));
+}
+
+#[test]
+fn model_test_404_summary_explains_missing_compatible_endpoint() {
+    let urls = tasks::build_test_urls("llama_cpp", "http://127.0.0.1:8080").unwrap();
+    let failures = urls
+        .iter()
+        .map(|url| format!("{url} -> HTTP 404 Not Found"))
+        .collect::<Vec<_>>();
+
+    let message = tasks::summarize_test_failures(&urls, &failures);
+
+    assert!(message.contains("未找到可用测试接口"));
+    assert!(message.contains("/v1/models"));
+    assert!(message.contains("endpoint_url"));
+}
+
+#[tokio::test]
+async fn llama_cpp_version_detection_ignores_cuda_initialization_noise() {
+    let script = unique_temp_path("noisy-llama-server");
+    fs::write(
+        &script,
+        b"#!/bin/sh\necho 'ggml_cuda_init: found 1 CUDA devices'\necho 'main: build = 4000'\n",
+    )
+    .unwrap();
+    make_executable(&script);
+
+    let result = tasks::check_runtime_environment(&serde_json::json!({
+        "backend": "llama_cpp",
+        "deploy_type": "binary",
+        "binary_path": script.to_str().unwrap()
+    }))
+    .await;
+
+    assert_eq!(result.check_status, "version_unavailable");
+    assert!(result.message.contains("版本无法自动获取"));
+
+    let _ = fs::remove_file(script);
+}
+
+#[tokio::test]
 async fn rejects_path_traversal_marker() {
     let result = tasks::verify_model_file("/models/../secret.gguf").await;
 

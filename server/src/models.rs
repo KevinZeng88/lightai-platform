@@ -452,6 +452,8 @@ pub struct ModelInstanceView {
     pub params_json: Option<String>,
     pub process_id: Option<i64>,
     pub process_ref: Option<String>,
+    pub log_tail: Option<String>,
+    pub command: Option<String>,
     pub last_checked_at: Option<i64>,
     pub last_error: Option<String>,
     pub created_at: i64,
