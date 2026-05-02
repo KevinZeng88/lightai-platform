@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::platform_log::LogPolicy;
+
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     pub name: String,
@@ -28,6 +30,21 @@ pub struct HeartbeatRequest {
     #[serde(default)]
     pub collector_errors: Vec<String>,
     pub agent_config: Option<AgentConfig>,
+    #[serde(default)]
+    pub managed_instances: Vec<ManagedInstanceReport>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ManagedInstanceReport {
+    pub instance_id: String,
+    pub status: String,
+    pub message: String,
+    pub process_id: Option<i64>,
+    pub process_ref: Option<String>,
+    pub base_url: Option<String>,
+    pub endpoint_url: Option<String>,
+    pub command: Option<String>,
+    pub log_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -51,6 +68,8 @@ pub struct AgentConfig {
     pub collector_timeout_secs: u64,
     #[serde(default = "default_collector_max_output_bytes")]
     pub collector_max_output_bytes: usize,
+    #[serde(default, flatten)]
+    pub log_policy: LogPolicy,
     pub last_config_updated_at: Option<i64>,
 }
 
@@ -69,6 +88,7 @@ impl Default for AgentConfig {
             custom_collector_script: None,
             collector_timeout_secs: default_collector_timeout_secs(),
             collector_max_output_bytes: default_collector_max_output_bytes(),
+            log_policy: LogPolicy::default(),
             last_config_updated_at: None,
         }
     }
@@ -97,6 +117,11 @@ pub struct AgentConfigPolicy {
     pub custom_collector_script: Option<Option<String>>,
     pub collector_timeout_secs: Option<u64>,
     pub collector_max_output_bytes: Option<usize>,
+    pub log_dir: Option<String>,
+    pub log_level: Option<String>,
+    pub log_max_file_bytes: Option<u64>,
+    pub log_retention_files: Option<usize>,
+    pub log_retention_days: Option<u64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -493,4 +518,56 @@ pub struct ModelFileTrashView {
 #[derive(Debug, Serialize)]
 pub struct ModelFileTrashListResponse {
     pub items: Vec<ModelFileTrashView>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LogQuery {
+    pub source_type: Option<String>,
+    pub node_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub max_bytes: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LogResponse {
+    pub source_type: String,
+    pub node_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub content: String,
+    pub message: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct AuditQuery {
+    pub operation_type: Option<String>,
+    pub target_type: Option<String>,
+    pub target_id: Option<String>,
+    pub node_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub result: Option<String>,
+    pub from: Option<i64>,
+    pub to: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditEventView {
+    pub id: String,
+    pub occurred_at: i64,
+    pub actor_type: String,
+    pub actor_id: Option<String>,
+    pub actor_group_id: Option<String>,
+    pub operation_type: String,
+    pub target_type: String,
+    pub target_id: Option<String>,
+    pub node_id: Option<String>,
+    pub instance_id: Option<String>,
+    pub result: String,
+    pub error_message: Option<String>,
+    pub source: String,
+    pub detail_json: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuditListResponse {
+    pub events: Vec<AuditEventView>,
 }

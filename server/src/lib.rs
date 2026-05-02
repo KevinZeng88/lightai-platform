@@ -3,6 +3,7 @@ pub mod config;
 pub mod db;
 pub mod http_check;
 pub mod models;
+pub mod platform_log;
 pub mod repository;
 pub mod routes;
 pub mod stage3a;

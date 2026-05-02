@@ -1,17 +1,156 @@
+use std::collections::HashSet;
+
 use sqlx::{Row, SqlitePool};
 use uuid::Uuid;
 
 use crate::auth;
 use crate::models::{
     AgentConfig, AgentConfigPoliciesResponse, AgentConfigPolicy, AgentConfigPolicyView,
-    GpuMetricSample, GpuMetricSamplesResponse, GpuMetrics, GpuView, HeartbeatRequest,
-    NodeListResponse, NodeMetricSample, NodeMetricSamplesResponse, NodeMetrics, NodeView,
-    RegisterRequest, RegisterResponse,
+    AuditEventView, AuditListResponse, AuditQuery, GpuMetricSample, GpuMetricSamplesResponse,
+    GpuMetrics, GpuView, HeartbeatRequest, NodeListResponse, NodeMetricSample,
+    NodeMetricSamplesResponse, NodeMetrics, NodeView, RegisterRequest, RegisterResponse,
 };
+use crate::platform_log::LogPolicy;
 
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 pub const ONLINE_THRESHOLD_SECS: i64 = 60;
 const AGENT_CONFIG_VERSION: i64 = 1;
+
+pub struct AuditRecord<'a> {
+    pub operation_type: &'a str,
+    pub target_type: &'a str,
+    pub target_id: Option<&'a str>,
+    pub node_id: Option<&'a str>,
+    pub instance_id: Option<&'a str>,
+    pub result: &'a str,
+    pub error_message: Option<&'a str>,
+    pub detail_json: Option<String>,
+}
+
+pub async fn record_audit(pool: &SqlitePool, record: AuditRecord<'_>) -> anyhow::Result<()> {
+    let now = now_unix_secs();
+    sqlx::query(
+        r#"
+        INSERT INTO audit_events (
+            id, occurred_at, actor_type, actor_id, actor_group_id, operation_type,
+            target_type, target_id, node_id, instance_id, result, error_message, source, detail_json
+        )
+        VALUES (?, ?, 'system', 'local', NULL, ?, ?, ?, ?, ?, ?, ?, 'local', ?)
+        "#,
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(now)
+    .bind(record.operation_type)
+    .bind(record.target_type)
+    .bind(record.target_id)
+    .bind(record.node_id)
+    .bind(record.instance_id)
+    .bind(record.result)
+    .bind(record.error_message.map(crate::platform_log::sanitize))
+    .bind(
+        record
+            .detail_json
+            .map(|value| crate::platform_log::sanitize(&value)),
+    )
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn list_audit_events(
+    pool: &SqlitePool,
+    query: AuditQuery,
+) -> anyhow::Result<AuditListResponse> {
+    let from = query.from.unwrap_or(0);
+    let to = query.to.unwrap_or_else(now_unix_secs);
+    let rows = sqlx::query(
+        r#"
+        SELECT *
+        FROM audit_events
+        WHERE occurred_at >= ? AND occurred_at <= ?
+          AND (? IS NULL OR operation_type = ?)
+          AND (? IS NULL OR target_type = ?)
+          AND (? IS NULL OR target_id = ?)
+          AND (? IS NULL OR node_id = ?)
+          AND (? IS NULL OR instance_id = ?)
+          AND (? IS NULL OR result = ?)
+        ORDER BY occurred_at DESC
+        LIMIT 500
+        "#,
+    )
+    .bind(from)
+    .bind(to)
+    .bind(query.operation_type.as_deref())
+    .bind(query.operation_type.as_deref())
+    .bind(query.target_type.as_deref())
+    .bind(query.target_type.as_deref())
+    .bind(query.target_id.as_deref())
+    .bind(query.target_id.as_deref())
+    .bind(query.node_id.as_deref())
+    .bind(query.node_id.as_deref())
+    .bind(query.instance_id.as_deref())
+    .bind(query.instance_id.as_deref())
+    .bind(query.result.as_deref())
+    .bind(query.result.as_deref())
+    .fetch_all(pool)
+    .await?;
+    Ok(AuditListResponse {
+        events: rows
+            .into_iter()
+            .map(|row| AuditEventView {
+                id: row.get("id"),
+                occurred_at: row.get("occurred_at"),
+                actor_type: row.get("actor_type"),
+                actor_id: row.get("actor_id"),
+                actor_group_id: row.get("actor_group_id"),
+                operation_type: row.get("operation_type"),
+                target_type: row.get("target_type"),
+                target_id: row.get("target_id"),
+                node_id: row.get("node_id"),
+                instance_id: row.get("instance_id"),
+                result: row.get("result"),
+                error_message: row.get("error_message"),
+                source: row.get("source"),
+                detail_json: row.get("detail_json"),
+            })
+            .collect(),
+    })
+}
+
+pub async fn server_log_policy(pool: &SqlitePool) -> anyhow::Result<LogPolicy> {
+    let value: Option<String> = sqlx::query_scalar(
+        "SELECT value_json FROM platform_settings WHERE key = 'server_log_policy'",
+    )
+    .fetch_optional(pool)
+    .await?;
+    Ok(value
+        .as_deref()
+        .and_then(|json| serde_json::from_str::<LogPolicy>(json).ok())
+        .unwrap_or_else(crate::platform_log::global))
+}
+
+pub async fn update_server_log_policy(
+    pool: &SqlitePool,
+    policy: LogPolicy,
+) -> anyhow::Result<LogPolicy> {
+    crate::platform_log::validate_policy(&policy)?;
+    let now = now_unix_secs();
+    sqlx::query(
+        r#"
+        INSERT INTO platform_settings (key, value_json, updated_at)
+        VALUES ('server_log_policy', ?, ?)
+        ON CONFLICT(key) DO UPDATE SET
+            value_json = excluded.value_json,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(serde_json::to_string(&policy)?)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    crate::platform_log::set_global(policy.clone());
+    Ok(policy)
+}
 
 pub async fn register_node(
     pool: &SqlitePool,
@@ -72,6 +211,7 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
     let now = now_unix_secs();
     let errors_json = serde_json::to_string(&request.collector_errors)?;
     let agent_config = request.agent_config.clone();
+    let managed_instances = request.managed_instances.clone();
     let mut tx = pool.begin().await?;
 
     sqlx::query(
@@ -214,8 +354,92 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
         upsert_gpu_status(&mut tx, &request.node_id, request.sampled_at, &gpu).await?;
         insert_gpu_sample(&mut tx, &request.node_id, request.sampled_at, &gpu).await?;
     }
+    reconcile_managed_instances(&mut tx, &request.node_id, &managed_instances, now).await?;
 
     tx.commit().await?;
+    Ok(())
+}
+
+async fn reconcile_managed_instances(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    node_id: &str,
+    reports: &[crate::models::ManagedInstanceReport],
+    now: i64,
+) -> anyhow::Result<()> {
+    let mut reported_ids = HashSet::new();
+    for report in reports {
+        reported_ids.insert(report.instance_id.clone());
+        let status = match report.status.as_str() {
+            "running" => "running",
+            "stopped" => "stopped",
+            "failed" => "failed",
+            _ => "failed",
+        };
+        let log_tail = report
+            .log_path
+            .as_deref()
+            .map(|path| format!("日志文件：{path}"));
+        sqlx::query(
+            r#"
+            UPDATE model_instances
+            SET status = ?, process_id = ?, process_ref = ?, base_url = COALESCE(?, base_url),
+                endpoint_url = COALESCE(?, endpoint_url), command = COALESCE(?, command),
+                log_tail = COALESCE(?, log_tail), last_checked_at = ?, last_error = ?, updated_at = ?
+            WHERE id = ? AND node_id = ? AND deploy_type = 'local'
+            "#,
+        )
+        .bind(status)
+        .bind(if status == "running" { report.process_id } else { None })
+        .bind(if status == "running" {
+            report.process_ref.as_deref()
+        } else {
+            None
+        })
+        .bind(report.base_url.as_deref())
+        .bind(report.endpoint_url.as_deref())
+        .bind(report.command.as_deref())
+        .bind(log_tail.as_deref())
+        .bind(now)
+        .bind(&report.message)
+        .bind(now)
+        .bind(&report.instance_id)
+        .bind(node_id)
+        .execute(&mut **tx)
+        .await?;
+    }
+
+    let rows = sqlx::query(
+        r#"
+        SELECT id
+        FROM model_instances
+        WHERE node_id = ? AND deploy_type = 'local'
+          AND status IN ('starting', 'running', 'stopping')
+        "#,
+    )
+    .bind(node_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for row in rows {
+        let id: String = row.get("id");
+        if reported_ids.contains(&id) {
+            continue;
+        }
+        sqlx::query(
+            r#"
+            UPDATE model_instances
+            SET status = 'failed', process_id = NULL, process_ref = NULL, last_checked_at = ?,
+                last_error = 'Agent 重启后未找到受管进程记录，无法确认该实例仍由平台管理，已标记为异常退出',
+                updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(now)
+        .bind(now)
+        .bind(id)
+        .execute(&mut **tx)
+        .await?;
+    }
+
     Ok(())
 }
 
@@ -379,6 +603,7 @@ pub async fn list_nodes(pool: &SqlitePool) -> anyhow::Result<NodeListResponse> {
                 collector_max_output_bytes: row
                     .get::<Option<i64>, _>("collector_max_output_bytes")
                     .unwrap_or(1024 * 1024) as usize,
+                log_policy: LogPolicy::default(),
                 last_config_updated_at: row.get("last_config_updated_at"),
             });
         let effective_agent_config = effective_agent_config(pool, &node_id).await?;
@@ -710,6 +935,11 @@ async fn agent_config_policy_view(
             "custom_collector_script",
             "collector_timeout_secs",
             "collector_max_output_bytes",
+            "log_dir",
+            "log_level",
+            "log_max_file_bytes",
+            "log_retention_files",
+            "log_retention_days",
         ],
     })
 }
@@ -808,6 +1038,21 @@ fn apply_policy_layer(config: &mut AgentConfig, policy: AgentConfigPolicy) {
     if let Some(value) = policy.collector_max_output_bytes {
         config.collector_max_output_bytes = value;
     }
+    if let Some(value) = policy.log_dir {
+        config.log_policy.log_dir = value;
+    }
+    if let Some(value) = policy.log_level {
+        config.log_policy.log_level = value;
+    }
+    if let Some(value) = policy.log_max_file_bytes {
+        config.log_policy.log_max_file_bytes = value;
+    }
+    if let Some(value) = policy.log_retention_files {
+        config.log_policy.log_retention_files = value;
+    }
+    if let Some(value) = policy.log_retention_days {
+        config.log_policy.log_retention_days = value;
+    }
 }
 
 fn validate_policy(policy: &AgentConfigPolicy) -> anyhow::Result<()> {
@@ -841,6 +1086,23 @@ fn validate_policy(policy: &AgentConfigPolicy) -> anyhow::Result<()> {
             }
         }
     }
+    let mut log_policy = LogPolicy::default();
+    if let Some(value) = &policy.log_dir {
+        log_policy.log_dir = value.clone();
+    }
+    if let Some(value) = &policy.log_level {
+        log_policy.log_level = value.clone();
+    }
+    if let Some(value) = policy.log_max_file_bytes {
+        log_policy.log_max_file_bytes = value;
+    }
+    if let Some(value) = policy.log_retention_files {
+        log_policy.log_retention_files = value;
+    }
+    if let Some(value) = policy.log_retention_days {
+        log_policy.log_retention_days = value;
+    }
+    crate::platform_log::validate_policy(&log_policy)?;
     Ok(())
 }
 

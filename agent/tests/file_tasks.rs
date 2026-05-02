@@ -1,5 +1,6 @@
 use std::fs;
 
+use lightai_agent::platform_log::{self, LogPolicy};
 use lightai_agent::tasks;
 
 #[tokio::test]
@@ -116,6 +117,113 @@ async fn script_instance_starts_with_argv_and_can_be_stopped() {
 
     let _ = fs::remove_file(model);
     let _ = fs::remove_file(script);
+}
+
+#[tokio::test]
+async fn managed_instance_start_persists_process_reference_for_restart_recovery() {
+    let script = unique_temp_path("managed-run-script");
+    fs::write(&script, b"#!/bin/sh\nsleep 30\n").unwrap();
+    make_executable(&script);
+    let model = unique_temp_path("managed-model.gguf");
+    fs::write(&model, b"model").unwrap();
+    let store_path = unique_temp_path("managed-processes.json");
+
+    let payload = serde_json::json!({
+        "instance_id": "instance-managed",
+        "backend": "custom",
+        "deploy_type": "script",
+        "binary_path": script.to_str().unwrap(),
+        "model_path": model.to_str().unwrap(),
+        "params": {
+            "host": "127.0.0.1",
+            "port": 19094
+        }
+    });
+    let started = tasks::start_model_instance_with_store(&payload, Some(&store_path)).await;
+
+    assert_eq!(started.instance_status, "running");
+    assert_eq!(started.process_ref.as_deref(), Some("instance-managed"));
+    assert!(store_path.exists());
+
+    let reports = tasks::collect_managed_instance_reports(Some(&store_path)).await;
+    assert_eq!(reports.len(), 1);
+    assert_eq!(reports[0].instance_id, "instance-managed");
+    assert_eq!(reports[0].status, "running");
+    assert_eq!(
+        reports[0].base_url.as_deref(),
+        Some("http://127.0.0.1:19094")
+    );
+    assert!(reports[0].message.contains("受管进程仍在运行"));
+
+    let stopped = tasks::stop_model_instance_with_store(
+        &serde_json::json!({
+            "instance_id": "instance-managed"
+        }),
+        Some(&store_path),
+    )
+    .await;
+    assert_eq!(stopped.instance_status, "stopped");
+
+    let _ = fs::remove_file(store_path);
+    let _ = fs::remove_file(model);
+    let _ = fs::remove_file(script);
+}
+
+#[tokio::test]
+async fn stop_refuses_unknown_instance_after_agent_restart() {
+    let store_path = unique_temp_path("empty-managed-processes.json");
+
+    let stopped = tasks::stop_model_instance_with_store(
+        &serde_json::json!({
+            "instance_id": "unknown-instance"
+        }),
+        Some(&store_path),
+    )
+    .await;
+
+    assert_eq!(stopped.instance_status, "failed");
+    assert!(stopped.message.contains("未找到平台受管进程记录"));
+    assert!(stopped.message.contains("拒绝停止"));
+
+    let _ = fs::remove_file(store_path);
+}
+
+#[tokio::test]
+async fn platform_log_rotates_and_sanitizes_sensitive_lines() {
+    let log_dir = unique_temp_path("agent-platform-logs");
+    let policy = LogPolicy {
+        log_dir: log_dir.to_string_lossy().to_string(),
+        log_level: "debug".to_string(),
+        log_max_file_bytes: 80,
+        log_retention_files: 2,
+        log_retention_days: 7,
+    };
+
+    platform_log::append(&policy, "agent.log", "info", "first line")
+        .await
+        .unwrap();
+    platform_log::append(&policy, "agent.log", "info", "password=secret")
+        .await
+        .unwrap();
+    platform_log::append(
+        &policy,
+        "agent.log",
+        "info",
+        "third line that forces rotation",
+    )
+    .await
+    .unwrap();
+
+    let content = platform_log::read_tail(&policy, "agent.log", 4096)
+        .await
+        .unwrap();
+    assert!(!content.contains("password=secret"));
+    assert!(content.contains("third line"));
+    assert!(log_dir.join("agent.log.1").exists());
+
+    let _ = fs::remove_file(log_dir.join("agent.log"));
+    let _ = fs::remove_file(log_dir.join("agent.log.1"));
+    let _ = fs::remove_dir(log_dir);
 }
 
 #[tokio::test]

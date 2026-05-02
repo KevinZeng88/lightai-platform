@@ -115,6 +115,7 @@ fn runtime_config_applies_server_config_and_reports_effective_values() {
         custom_collector_script: Some("/opt/lightai/gpu".to_string()),
         collector_timeout_secs: 9,
         collector_max_output_bytes: 4096,
+        log_policy: Default::default(),
         last_config_updated_at: Some(1_700_000_000),
     }));
 

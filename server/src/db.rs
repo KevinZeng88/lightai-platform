@@ -91,7 +91,52 @@ async fn migrate_stage3a_corrections(pool: &SqlitePool) -> anyhow::Result<()> {
     }
     ensure_stage3b_tables(pool).await?;
     ensure_agent_config_tables(pool).await?;
+    ensure_audit_tables(pool).await?;
+    ensure_platform_settings(pool).await?;
 
+    Ok(())
+}
+
+async fn ensure_platform_settings(pool: &SqlitePool) -> anyhow::Result<()> {
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS platform_settings (
+            key TEXT PRIMARY KEY,
+            value_json TEXT NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        "#,
+    )
+    .await?;
+    Ok(())
+}
+
+async fn ensure_audit_tables(pool: &SqlitePool) -> anyhow::Result<()> {
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS audit_events (
+            id TEXT PRIMARY KEY,
+            occurred_at INTEGER NOT NULL,
+            actor_type TEXT NOT NULL,
+            actor_id TEXT,
+            actor_group_id TEXT,
+            operation_type TEXT NOT NULL,
+            target_type TEXT NOT NULL,
+            target_id TEXT,
+            node_id TEXT,
+            instance_id TEXT,
+            result TEXT NOT NULL,
+            error_message TEXT,
+            source TEXT NOT NULL,
+            detail_json TEXT
+        )
+        "#,
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_audit_events_filters ON audit_events(occurred_at, operation_type, target_type, result)",
+    )
+    .await?;
     Ok(())
 }
 

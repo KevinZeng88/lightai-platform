@@ -6,8 +6,10 @@ use tokio::time::{sleep, Duration};
 use crate::client::ServerClient;
 use crate::config::Config;
 use crate::gpu;
+use crate::managed_process;
 use crate::metrics::MetricsCollector;
 use crate::models::{AgentConfig, HeartbeatRequest, RegisterRequest};
+use crate::platform_log::{self, LogPolicy};
 use crate::state::{self, AgentState};
 
 pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
@@ -15,6 +17,13 @@ pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
 
     loop {
         let snapshot = runtime_config.read().await.clone();
+        let _ = platform_log::append(
+            &snapshot.log_policy,
+            "agent.log",
+            "debug",
+            "Agent heartbeat cycle started",
+        )
+        .await;
         let sleep_secs = match run_once(&config, &snapshot, &mut metrics_collector).await {
             Ok(next_config) => {
                 let mut runtime = runtime_config.write().await;
@@ -47,6 +56,8 @@ async fn run_once(
     };
 
     let (gpus, collector_errors) = gpu::collect_gpus(&runtime_config.to_collector_config()).await;
+    let managed_store_path = managed_process::store_path_from_state_path(&config.state_path);
+    let managed_instances = managed_process::reports(Some(&managed_store_path)).await;
     let request = HeartbeatRequest {
         node_id: agent_state.node_id.clone(),
         sampled_at: now_unix_secs(),
@@ -54,6 +65,7 @@ async fn run_once(
         gpus,
         collector_errors,
         agent_config: runtime_config.to_agent_config(),
+        managed_instances,
     };
 
     match client.heartbeat(&agent_state.agent_token, &request).await {
@@ -123,6 +135,7 @@ pub struct RuntimeConfig {
     pub custom_collector_script: Option<String>,
     pub collector_timeout_secs: u64,
     pub collector_max_output_bytes: usize,
+    pub log_policy: LogPolicy,
     pub last_config_updated_at: Option<i64>,
 }
 
@@ -139,6 +152,7 @@ impl RuntimeConfig {
             custom_collector_script: None,
             collector_timeout_secs: 5,
             collector_max_output_bytes: 1024 * 1024,
+            log_policy: LogPolicy::default(),
             last_config_updated_at: None,
         }
     }
@@ -162,6 +176,7 @@ impl RuntimeConfig {
             self.custom_collector_script = config.custom_collector_script;
             self.collector_timeout_secs = config.collector_timeout_secs;
             self.collector_max_output_bytes = config.collector_max_output_bytes;
+            self.log_policy = config.log_policy;
             self.last_config_updated_at = config.last_config_updated_at;
         }
     }
@@ -180,6 +195,7 @@ impl RuntimeConfig {
             custom_collector_script: self.custom_collector_script.clone(),
             collector_timeout_secs: self.collector_timeout_secs,
             collector_max_output_bytes: self.collector_max_output_bytes,
+            log_policy: self.log_policy.clone(),
             last_config_updated_at: self.last_config_updated_at,
         }
     }

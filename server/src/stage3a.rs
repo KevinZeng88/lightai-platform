@@ -22,6 +22,7 @@ const MODEL_FILE_VERIFY_TIMEOUT_SECS: u64 = 5;
 const MODEL_FILE_CLEANUP_TIMEOUT_SECS: u64 = 10;
 const RUNTIME_ENVIRONMENT_CHECK_TIMEOUT_SECS: u64 = 5;
 const MODEL_INSTANCE_TASK_TIMEOUT_SECS: u64 = 10;
+const LOG_READ_TIMEOUT_SECS: u64 = 5;
 static TASK_NOTIFY: OnceLock<Arc<Notify>> = OnceLock::new();
 
 pub fn task_notify() -> Arc<Notify> {
@@ -1174,6 +1175,20 @@ pub async fn record_agent_task_result(
                 .clone()
                 .or(Some("实例任务执行失败".to_string()))
         };
+        if kind == "stop_model_instance" && request.status == "succeeded" {
+            last_error = request
+                .result
+                .get("message")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+        }
+        if kind == "start_model_instance" && request.status == "succeeded" {
+            last_error = request
+                .result
+                .get("message")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
+        }
         if kind == "test_model_instance" && request.status == "succeeded" {
             let message = request
                 .result
@@ -1587,6 +1602,111 @@ pub async fn test_model_instance(
         ));
     }
     run_local_instance_task(pool, id, "test_model_instance", "running").await
+}
+
+pub async fn read_agent_log(
+    pool: &SqlitePool,
+    node_id: &str,
+    max_bytes: usize,
+) -> Result<String, Stage3Error> {
+    if !node_online(pool, node_id).await? {
+        return Err(Stage3Error::Conflict(
+            "节点 Agent 离线，无法查看 Agent 日志".to_string(),
+        ));
+    }
+    let task_id = Uuid::new_v4().to_string();
+    let now = now_unix_secs();
+    let payload = serde_json::json!({ "max_bytes": max_bytes.min(512 * 1024) });
+    sqlx::query(
+        r#"
+        INSERT INTO agent_tasks (
+            id, node_id, kind, status, payload_json, attempt_count, created_at, updated_at
+        )
+        VALUES (?, ?, 'read_agent_log', 'queued', ?, 0, ?, ?)
+        "#,
+    )
+    .bind(&task_id)
+    .bind(node_id)
+    .bind(payload.to_string())
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    notify_agent_tasks();
+
+    let deadline = Instant::now() + Duration::from_secs(LOG_READ_TIMEOUT_SECS);
+    loop {
+        let row =
+            sqlx::query("SELECT status, result_json, error_message FROM agent_tasks WHERE id = ?")
+                .bind(&task_id)
+                .fetch_one(pool)
+                .await?;
+        let status: String = row.get("status");
+        match status.as_str() {
+            "succeeded" => {
+                let result_json: Option<String> = row.get("result_json");
+                let result = result_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                    .unwrap_or_default();
+                return Ok(result
+                    .get("content")
+                    .and_then(|value| value.as_str())
+                    .unwrap_or("")
+                    .to_string());
+            }
+            "failed" => {
+                return Err(Stage3Error::Conflict(
+                    row.get::<Option<String>, _>("error_message")
+                        .unwrap_or_else(|| "Agent 日志读取失败".to_string()),
+                ));
+            }
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            mark_task_timed_out(pool, &task_id).await?;
+            return Err(Stage3Error::Conflict("Agent 日志读取超时".to_string()));
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+pub async fn recent_error_summary(pool: &SqlitePool) -> Result<String, Stage3Error> {
+    let rows = sqlx::query(
+        r#"
+        SELECT '实例' AS source, name AS target, last_error AS message, updated_at AS ts
+        FROM model_instances
+        WHERE last_error IS NOT NULL AND TRIM(last_error) != ''
+        UNION ALL
+        SELECT '模型文件' AS source, path AS target, last_error AS message, updated_at AS ts
+        FROM model_files
+        WHERE last_error IS NOT NULL AND TRIM(last_error) != ''
+        UNION ALL
+        SELECT '垃圾箱' AS source, path AS target, last_error AS message, updated_at AS ts
+        FROM model_file_trash
+        WHERE last_error IS NOT NULL AND TRIM(last_error) != ''
+        ORDER BY ts DESC
+        LIMIT 50
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    if rows.is_empty() {
+        return Ok("暂无错误摘要".to_string());
+    }
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            format!(
+                "{} [{}] {}: {}",
+                row.get::<i64, _>("ts"),
+                row.get::<String, _>("source"),
+                row.get::<String, _>("target"),
+                crate::platform_log::sanitize(&row.get::<String, _>("message"))
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n"))
 }
 
 async fn run_local_instance_task(

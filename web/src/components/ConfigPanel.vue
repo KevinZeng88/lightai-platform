@@ -63,6 +63,9 @@
       <div class="wide-detail"><span class="muted">Allowed dirs</span><p>{{ selectedNode.effective_agent_config.allowed_model_dirs.join(', ') || '未配置' }}</p></div>
       <div><span class="muted">NVIDIA 采集</span><p>{{ selectedNode.effective_agent_config.nvidia_collector_enabled ? '启用' : '停用' }}</p></div>
       <div class="wide-detail"><span class="muted">自定义 GPU 采集脚本</span><p>{{ selectedNode.effective_agent_config.custom_collector_script || '未配置' }}</p></div>
+      <div><span class="muted">日志级别</span><p>{{ selectedNode.effective_agent_config.log_level }}</p></div>
+      <div class="wide-detail"><span class="muted">日志目录</span><p>{{ selectedNode.effective_agent_config.log_dir }}</p></div>
+      <div><span class="muted">日志轮转</span><p>{{ selectedNode.effective_agent_config.log_max_file_bytes }} bytes / {{ selectedNode.effective_agent_config.log_retention_files }} 个 / {{ selectedNode.effective_agent_config.log_retention_days }} 天</p></div>
     </div>
   </el-card>
 </template>
@@ -91,7 +94,12 @@ const emptyPolicy = (): AgentConfigPolicy => ({
   nvidia_collector_enabled: null,
   custom_collector_script: null,
   collector_timeout_secs: null,
-  collector_max_output_bytes: null
+  collector_max_output_bytes: null,
+  log_dir: null,
+  log_level: null,
+  log_max_file_bytes: null,
+  log_retention_files: null,
+  log_retention_days: null
 })
 
 const PolicyFields = defineComponent({
@@ -150,7 +158,24 @@ const PolicyFields = defineComponent({
         })
       ),
       numberField('采集器超时（秒）', 'collector_timeout_secs'),
-      numberField('采集器输出上限', 'collector_max_output_bytes')
+      numberField('采集器输出上限', 'collector_max_output_bytes'),
+      h(ElFormItem, { label: '日志目录' }, () =>
+        h(ElInput, {
+          modelValue: (props.modelValue as AgentConfigPolicy).log_dir ?? '',
+          placeholder: props.allowInherit ? '默认 logs；留空继承' : '默认 logs',
+          onInput: (value: string) => update('log_dir', value.trim() || null)
+        })
+      ),
+      h(ElFormItem, { label: '日志级别' }, () =>
+        h(ElInput, {
+          modelValue: (props.modelValue as AgentConfigPolicy).log_level ?? '',
+          placeholder: 'error / warn / info / debug / trace',
+          onInput: (value: string) => update('log_level', value.trim() || null)
+        })
+      ),
+      numberField('日志文件上限（字节）', 'log_max_file_bytes'),
+      numberField('日志保留文件数', 'log_retention_files'),
+      numberField('日志保留天数', 'log_retention_days')
     ]
   }
 })
@@ -212,7 +237,12 @@ function policyFromConfig(config: NodeStatus['effective_agent_config']): AgentCo
     nvidia_collector_enabled: config.nvidia_collector_enabled,
     custom_collector_script: config.custom_collector_script ?? null,
     collector_timeout_secs: config.collector_timeout_secs,
-    collector_max_output_bytes: config.collector_max_output_bytes
+    collector_max_output_bytes: config.collector_max_output_bytes,
+    log_dir: config.log_dir,
+    log_level: config.log_level,
+    log_max_file_bytes: config.log_max_file_bytes,
+    log_retention_files: config.log_retention_files,
+    log_retention_days: config.log_retention_days
   }
 }
 

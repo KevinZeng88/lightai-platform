@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use lightai_server::{config::Config, db, routes};
+use lightai_server::{config::Config, db, platform_log, routes};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -9,6 +9,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::load()?;
+    platform_log::set_global(config.log_policy.clone());
+    platform_log::append(&config.log_policy, "server.log", "info", "Server 启动").await?;
     let listen_addr: SocketAddr = config.listen_addr.parse()?;
     let pool = db::connect(&config.database_url).await?;
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;

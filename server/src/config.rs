@@ -5,6 +5,7 @@ pub struct Config {
     pub listen_addr: String,
     pub database_url: String,
     pub metrics_retention_days: u32,
+    pub log_policy: crate::platform_log::LogPolicy,
 }
 
 impl Default for Config {
@@ -13,6 +14,7 @@ impl Default for Config {
             listen_addr: "127.0.0.1:8080".to_string(),
             database_url: "sqlite://data/lightai.db".to_string(),
             metrics_retention_days: 7,
+            log_policy: crate::platform_log::LogPolicy::default(),
         }
     }
 }
@@ -47,6 +49,24 @@ impl Config {
                 config.metrics_retention_days = value;
             }
         }
+        if let Some(logs) = file_config.logs {
+            if let Some(value) = logs.dir {
+                config.log_policy.log_dir = value;
+            }
+            if let Some(value) = logs.level {
+                config.log_policy.log_level = value;
+            }
+            if let Some(value) = logs.max_file_bytes {
+                config.log_policy.log_max_file_bytes = value;
+            }
+            if let Some(value) = logs.retention_files {
+                config.log_policy.log_retention_files = value;
+            }
+            if let Some(value) = logs.retention_days {
+                config.log_policy.log_retention_days = value;
+            }
+            crate::platform_log::validate_policy(&config.log_policy)?;
+        }
 
         Ok(config)
     }
@@ -57,6 +77,7 @@ struct FileConfig {
     server: Option<ServerSection>,
     database: Option<DatabaseSection>,
     metrics: Option<MetricsSection>,
+    logs: Option<LogsSection>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -72,4 +93,13 @@ struct DatabaseSection {
 #[derive(Debug, Deserialize)]
 struct MetricsSection {
     retention_days: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LogsSection {
+    dir: Option<String>,
+    level: Option<String>,
+    max_file_bytes: Option<u64>,
+    retention_files: Option<usize>,
+    retention_days: Option<u64>,
 }

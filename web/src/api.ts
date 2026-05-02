@@ -2,12 +2,15 @@ import type {
   AgentConfigPoliciesResponse,
   AgentConfigPolicy,
   AgentConfigPolicyView,
+  AuditEvent,
   GpuMetricSample,
   MetricSampleResponse,
   ModelDefinition,
   ModelFile,
   ModelFileTrashItem,
   ModelInstance,
+  LogResponse,
+  LogPolicy,
   NodeMetricSample,
   NodeStatus,
   RuntimeEnvironment
@@ -289,4 +292,44 @@ export async function fetchGpuMetrics(
 
 export function gpuMetricsUrl(nodeId: string, gpuKey: string, from: number, to: number) {
   return `/api/nodes/${nodeId}/gpu-metrics?gpu_key=${encodeURIComponent(gpuKey)}&from=${from}&to=${to}`
+}
+
+export async function fetchLogs(params: {
+  source_type: string
+  node_id?: string | null
+  instance_id?: string | null
+  max_bytes?: number
+}): Promise<LogResponse> {
+  const search = new URLSearchParams()
+  search.set('source_type', params.source_type)
+  if (params.node_id) search.set('node_id', params.node_id)
+  if (params.instance_id) search.set('instance_id', params.instance_id)
+  if (params.max_bytes) search.set('max_bytes', String(params.max_bytes))
+  return sendJson(`/api/logs?${search.toString()}`, 'GET')
+}
+
+export async function fetchAuditEvents(params: {
+  operation_type?: string
+  target_type?: string
+  node_id?: string
+  instance_id?: string
+  result?: string
+}): Promise<AuditEvent[]> {
+  const search = new URLSearchParams()
+  Object.entries(params).forEach(([key, value]) => {
+    if (value) search.set(key, value)
+  })
+  const payload = await sendJson<{ events: AuditEvent[] }>(
+    `/api/audit-events?${search.toString()}`,
+    'GET'
+  )
+  return payload.events
+}
+
+export async function fetchServerLogPolicy(): Promise<LogPolicy> {
+  return sendJson('/api/config/server-logs', 'GET')
+}
+
+export async function updateServerLogPolicy(payload: LogPolicy): Promise<LogPolicy> {
+  return sendJson('/api/config/server-logs', 'PUT', payload)
 }

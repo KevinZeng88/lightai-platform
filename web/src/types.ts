@@ -53,6 +53,11 @@ export interface AgentConfig {
   custom_collector_script?: string | null
   collector_timeout_secs: number
   collector_max_output_bytes: number
+  log_dir: string
+  log_level: string
+  log_max_file_bytes: number
+  log_retention_files: number
+  log_retention_days: number
   last_config_updated_at?: number | null
 }
 
@@ -66,6 +71,11 @@ export interface AgentConfigPolicy {
   custom_collector_script?: string | null
   collector_timeout_secs?: number | null
   collector_max_output_bytes?: number | null
+  log_dir?: string | null
+  log_level?: string | null
+  log_max_file_bytes?: number | null
+  log_retention_files?: number | null
+  log_retention_days?: number | null
 }
 
 export interface AgentConfigPolicyView {
@@ -216,4 +226,37 @@ export interface ModelFileTrashItem {
   note?: string | null
   created_at: number
   updated_at: number
+}
+
+export interface LogResponse {
+  source_type: string
+  node_id?: string | null
+  instance_id?: string | null
+  content: string
+  message?: string | null
+}
+
+export interface LogPolicy {
+  log_dir: string
+  log_level: string
+  log_max_file_bytes: number
+  log_retention_files: number
+  log_retention_days: number
+}
+
+export interface AuditEvent {
+  id: string
+  occurred_at: number
+  actor_type: string
+  actor_id?: string | null
+  actor_group_id?: string | null
+  operation_type: string
+  target_type: string
+  target_id?: string | null
+  node_id?: string | null
+  instance_id?: string | null
+  result: string
+  error_message?: string | null
+  source: string
+  detail_json?: string | null
 }

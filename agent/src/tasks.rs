@@ -13,7 +13,9 @@ use tokio::time::{sleep, timeout, Duration};
 use crate::client::ServerClient;
 use crate::config::Config;
 use crate::heartbeat::RuntimeConfig;
+use crate::managed_process::{self, ManagedProcessRecord};
 use crate::models::{AgentConfig, AgentTaskPollRequest, AgentTaskResultRequest};
+use crate::platform_log::{self, LogPolicy};
 use crate::state::{self, AgentState};
 
 #[derive(Debug, Clone, Serialize)]
@@ -63,13 +65,19 @@ pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
         let sleep_secs = match state::load(&config.state_path).await {
             Ok(Some(agent_state)) => {
                 let allowed_model_dirs = runtime_config.read().await.allowed_model_dirs.clone();
-                let current_config_version = runtime_config.read().await.config_version;
+                let snapshot = runtime_config.read().await.clone();
+                let current_config_version = snapshot.config_version;
+                let log_policy = snapshot.log_policy;
+                let managed_store_path =
+                    managed_process::store_path_from_state_path(&config.state_path);
                 match run_once(
                     &client,
                     &agent_state.agent_token,
                     &agent_state,
                     &allowed_model_dirs,
                     current_config_version,
+                    Some(&managed_store_path),
+                    &log_policy,
                 )
                 .await
                 {
@@ -106,6 +114,8 @@ pub async fn run_once(
     state: &AgentState,
     allowed_model_dirs: &[String],
     current_config_version: i64,
+    managed_store_path: Option<&Path>,
+    log_policy: &LogPolicy,
 ) -> anyhow::Result<Option<AgentConfig>> {
     let response = client
         .poll_task(
@@ -150,6 +160,33 @@ pub async fn run_once(
             };
             (status.to_string(), serde_json::to_value(result)?)
         }
+        "read_agent_log" => {
+            let max_bytes = task
+                .payload
+                .get("max_bytes")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(64 * 1024)
+                .min(512 * 1024) as usize;
+            let content = platform_log::read_tail(log_policy, "agent.log", max_bytes).await;
+            match content {
+                Ok(content) => (
+                    "succeeded".to_string(),
+                    serde_json::json!({
+                        "log_status": "available",
+                        "content": content,
+                        "message": "Agent 日志读取成功"
+                    }),
+                ),
+                Err(error) => (
+                    "failed".to_string(),
+                    serde_json::json!({
+                        "log_status": "failed",
+                        "content": "",
+                        "message": format!("Agent 日志读取失败：{error}")
+                    }),
+                ),
+            }
+        }
         "check_runtime_environment" => {
             let result = check_runtime_environment(&task.payload).await;
             let status = if matches!(
@@ -163,7 +200,7 @@ pub async fn run_once(
             (status.to_string(), serde_json::to_value(result)?)
         }
         "start_model_instance" => {
-            let result = start_model_instance(&task.payload).await;
+            let result = start_model_instance_with_store(&task.payload, managed_store_path).await;
             let status = if result.instance_status == "running" {
                 "succeeded"
             } else {
@@ -172,7 +209,7 @@ pub async fn run_once(
             (status.to_string(), serde_json::to_value(result)?)
         }
         "stop_model_instance" => {
-            let result = stop_model_instance(&task.payload).await;
+            let result = stop_model_instance_with_store(&task.payload, managed_store_path).await;
             let status = if result.instance_status == "stopped" {
                 "succeeded"
             } else {
@@ -278,6 +315,13 @@ pub async fn check_runtime_environment(
 }
 
 pub async fn start_model_instance(payload: &serde_json::Value) -> ModelInstanceTaskResult {
+    start_model_instance_with_store(payload, None).await
+}
+
+pub async fn start_model_instance_with_store(
+    payload: &serde_json::Value,
+    managed_store_path: Option<&Path>,
+) -> ModelInstanceTaskResult {
     let instance_id = payload
         .get("instance_id")
         .and_then(|value| value.as_str())
@@ -336,6 +380,10 @@ pub async fn start_model_instance(payload: &serde_json::Value) -> ModelInstanceT
         }
     };
     let process_id = child.id().map(|pid| pid as i64);
+    let process_start_time = match process_id {
+        Some(pid) => managed_process::process_start_time(pid).await,
+        None => None,
+    };
     let log_buffer = Arc::new(Mutex::new(String::new()));
     let log_path = match payload
         .get("log_dir")
@@ -400,7 +448,35 @@ pub async fn start_model_instance(payload: &serde_json::Value) -> ModelInstanceT
             Some(command_summary),
         );
     }
-    let initial_log_tail = log_tail(&log_buffer).await;
+    let log_path_text = log_path
+        .as_ref()
+        .and_then(|path| path.to_str())
+        .map(str::to_string);
+    let initial_log_tail = log_tail_with_path(&log_buffer, log_path_text.as_deref()).await;
+    if let (Some(path), Some(pid)) = (managed_store_path, process_id) {
+        if let Err(error) = managed_process::upsert(
+            path,
+            ManagedProcessRecord {
+                instance_id: instance_id.to_string(),
+                process_id: pid,
+                process_start_time,
+                base_url: Some(base_url.clone()),
+                endpoint_url: Some(base_url.clone()),
+                command: Some(command_summary.clone()),
+                log_path: log_path_text.clone(),
+                started_at: now_unix_secs(),
+            },
+        )
+        .await
+        {
+            let _ = child.kill().await;
+            return instance_failure_with_details(
+                &format!("受管进程记录写入失败，实例已停止：{error}"),
+                log_tail(&log_buffer).await,
+                Some(command_summary),
+            );
+        }
+    }
     process_registry().lock().await.insert(
         instance_id.to_string(),
         ProcessHandle {
@@ -423,38 +499,84 @@ pub async fn start_model_instance(payload: &serde_json::Value) -> ModelInstanceT
 }
 
 pub async fn stop_model_instance(payload: &serde_json::Value) -> ModelInstanceTaskResult {
+    stop_model_instance_with_store(payload, None).await
+}
+
+pub async fn stop_model_instance_with_store(
+    payload: &serde_json::Value,
+    managed_store_path: Option<&Path>,
+) -> ModelInstanceTaskResult {
     let instance_id = payload
         .get("instance_id")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     let Some(mut handle) = process_registry().lock().await.remove(instance_id) else {
-        if is_custom_script(payload) {
-            return run_controlled_script_action(payload, "stop", "stopped").await;
-        }
-        return ModelInstanceTaskResult {
-            instance_status: "stopped".to_string(),
-            message: "未找到本地进程引用，实例状态已标记为停止".to_string(),
-            base_url: None,
-            endpoint_url: None,
-            process_id: None,
-            process_ref: None,
-            response_summary: None,
-            log_tail: None,
-            command: None,
+        let Some(store_path) = managed_store_path else {
+            return instance_failure("未找到本地进程引用，且未配置受管进程记录，拒绝停止");
         };
+        let record = match managed_process::find(store_path, instance_id).await {
+            Ok(Some(record)) => record,
+            Ok(None) => return instance_failure("未找到平台受管进程记录，拒绝停止该实例"),
+            Err(error) => {
+                return instance_failure(&format!("读取受管进程记录失败，拒绝停止：{error}"));
+            }
+        };
+        match managed_process::kill_managed(&record).await {
+            Ok(()) => {
+                if let Err(error) = managed_process::remove(store_path, instance_id).await {
+                    return instance_failure(&format!(
+                        "实例进程已停止，但清理受管记录失败：{error}"
+                    ));
+                }
+                return ModelInstanceTaskResult {
+                    instance_status: "stopped".to_string(),
+                    message: "已根据平台受管进程记录停止实例".to_string(),
+                    base_url: None,
+                    endpoint_url: None,
+                    process_id: None,
+                    process_ref: None,
+                    response_summary: None,
+                    log_tail: None,
+                    command: record.command,
+                };
+            }
+            Err(message) => {
+                let _ = managed_process::remove(store_path, instance_id).await;
+                return ModelInstanceTaskResult {
+                    instance_status: "stopped".to_string(),
+                    message,
+                    base_url: None,
+                    endpoint_url: None,
+                    process_id: None,
+                    process_ref: None,
+                    response_summary: None,
+                    log_tail: None,
+                    command: record.command,
+                };
+            }
+        }
     };
     match handle.child.kill().await {
-        Ok(()) => ModelInstanceTaskResult {
-            instance_status: "stopped".to_string(),
-            message: "本地实例进程已停止".to_string(),
-            base_url: None,
-            endpoint_url: None,
-            process_id: None,
-            process_ref: None,
-            response_summary: None,
-            log_tail: log_tail(&handle.log_buffer).await,
-            command: Some(handle.command),
-        },
+        Ok(()) => {
+            if let Some(store_path) = managed_store_path {
+                if let Err(error) = managed_process::remove(store_path, instance_id).await {
+                    return instance_failure(&format!(
+                        "本地实例进程已停止，但清理受管记录失败：{error}"
+                    ));
+                }
+            }
+            ModelInstanceTaskResult {
+                instance_status: "stopped".to_string(),
+                message: "本地实例进程已停止".to_string(),
+                base_url: None,
+                endpoint_url: None,
+                process_id: None,
+                process_ref: None,
+                response_summary: None,
+                log_tail: log_tail(&handle.log_buffer).await,
+                command: Some(handle.command),
+            }
+        }
         Err(error) => instance_failure(&format!("停止进程失败：{error}")),
     }
 }
@@ -513,6 +635,12 @@ pub async fn test_model_instance(payload: &serde_json::Value) -> ModelInstanceTa
         }
     }
     instance_failure(&summarize_test_failures(&urls, &failures))
+}
+
+pub async fn collect_managed_instance_reports(
+    managed_store_path: Option<&Path>,
+) -> Vec<crate::models::ManagedInstanceReport> {
+    managed_process::reports(managed_store_path).await
 }
 
 async fn verify_controlled_entrypoint(path: &str) -> RuntimeEnvironmentCheckResult {
@@ -1151,6 +1279,17 @@ async fn log_tail(log_buffer: &Arc<Mutex<String>>) -> Option<String> {
     }
 }
 
+async fn log_tail_with_path(
+    log_buffer: &Arc<Mutex<String>>,
+    log_path: Option<&str>,
+) -> Option<String> {
+    match (log_path, log_tail(log_buffer).await) {
+        (Some(path), Some(tail)) => Some(format!("日志文件：{path}\n{tail}")),
+        (Some(path), None) => Some(format!("日志文件：{path}")),
+        (None, tail) => tail,
+    }
+}
+
 fn trim_log_buffer(buffer: &mut String) {
     const MAX_LOG_BYTES: usize = 8192;
     if buffer.len() > MAX_LOG_BYTES {
@@ -1245,6 +1384,13 @@ fn first_log_line(log_tail: Option<&str>) -> Option<String> {
         .map(str::trim)
         .find(|line| !line.is_empty() && *line != "stdout:" && *line != "stderr:")
         .map(|line| line.chars().take(220).collect())
+}
+
+fn now_unix_secs() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs() as i64
 }
 
 async fn endpoint_ready(base_url: &str) -> bool {

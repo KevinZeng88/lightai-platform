@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::platform_log::LogPolicy;
+
 #[derive(Debug, Serialize)]
 pub struct RegisterRequest {
     pub name: String,
@@ -43,6 +45,8 @@ pub struct AgentConfig {
     pub collector_timeout_secs: u64,
     #[serde(default = "default_collector_max_output_bytes")]
     pub collector_max_output_bytes: usize,
+    #[serde(default, flatten)]
+    pub log_policy: LogPolicy,
     pub last_config_updated_at: Option<i64>,
 }
 
@@ -61,6 +65,7 @@ impl Default for AgentConfig {
             custom_collector_script: None,
             collector_timeout_secs: default_collector_timeout_secs(),
             collector_max_output_bytes: default_collector_max_output_bytes(),
+            log_policy: LogPolicy::default(),
             last_config_updated_at: None,
         }
     }
@@ -86,6 +91,20 @@ pub struct HeartbeatRequest {
     pub gpus: Vec<GpuMetrics>,
     pub collector_errors: Vec<String>,
     pub agent_config: AgentConfig,
+    pub managed_instances: Vec<ManagedInstanceReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ManagedInstanceReport {
+    pub instance_id: String,
+    pub status: String,
+    pub message: String,
+    pub process_id: Option<i64>,
+    pub process_ref: Option<String>,
+    pub base_url: Option<String>,
+    pub endpoint_url: Option<String>,
+    pub command: Option<String>,
+    pub log_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize)]

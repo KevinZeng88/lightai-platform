@@ -98,6 +98,15 @@ async fn register_node_json(app: axum::Router) -> Value {
 }
 
 async fn heartbeat_node(app: axum::Router, node_id: &str, token: &str) {
+    heartbeat_node_with_managed_instances(app, node_id, token, json!([])).await;
+}
+
+async fn heartbeat_node_with_managed_instances(
+    app: axum::Router,
+    node_id: &str,
+    token: &str,
+    managed_instances: Value,
+) {
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
@@ -125,7 +134,8 @@ async fn heartbeat_node(app: axum::Router, node_id: &str, token: &str) {
                             "command_timeout_secs": 5,
                             "environment_check_timeout_secs": 5,
                             "last_config_updated_at": 1_700_000_000i64
-                        }
+                        },
+                        "managed_instances": managed_instances
                     })
                     .to_string(),
                 ))
@@ -620,6 +630,27 @@ async fn model_create_also_creates_first_node_file_path() {
     assert_eq!(files[0]["path"], "/models/qwen2-7b/model.gguf");
     assert_eq!(files[0]["status"], "verified");
     assert_eq!(files[0]["size_bytes"], 1234);
+}
+
+#[tokio::test]
+async fn key_operations_create_audit_events() {
+    let app = test_app().await;
+    let registered = register_node_json(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+    let token = registered["agent_token"].as_str().unwrap();
+
+    let model = create_model_for_node(app.clone(), node_id, token).await;
+
+    let (status, audit) = request(app, "GET", "/api/audit-events?target_type=model", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let events = audit["events"].as_array().unwrap();
+    assert!(events.iter().any(|event| {
+        event["operation_type"] == "model.create"
+            && event["target_id"] == model["id"]
+            && event["actor_type"] == "system"
+            && event["actor_id"] == "local"
+            && event["result"] == "success"
+    }));
 }
 
 #[tokio::test]
@@ -2029,6 +2060,148 @@ async fn local_instance_test_uses_agent_task_and_preserves_external_check() {
     .await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(external["deploy_type"], "external");
+}
+
+#[tokio::test]
+async fn heartbeat_reconciles_running_local_instance_missing_from_agent_store() {
+    let (app, pool) = test_app_with_pool().await;
+    let registered = register_node_json(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+    let token = registered["agent_token"].as_str().unwrap();
+    let environment = create_runtime_environment(app.clone(), node_id, token).await;
+    let model = create_model_for_node(app.clone(), node_id, token).await;
+    let model_id = model["id"].as_str().unwrap();
+    let (status, files) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/models/{model_id}/files"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let model_file_id = files["files"][0]["id"].as_str().unwrap();
+    let (status, instance) = request(
+        app.clone(),
+        "POST",
+        "/api/model-instances",
+        Some(json!({
+            "deploy_type": "local",
+            "name": "qwen local restart recovery",
+            "node_id": node_id,
+            "runtime_environment_id": environment["id"],
+            "model_file_id": model_file_id
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let instance_id = instance["id"].as_str().unwrap();
+    sqlx::query(
+        r#"
+        UPDATE model_instances
+        SET status = 'running', process_id = 12345, process_ref = ?, base_url = 'http://127.0.0.1:18084'
+        WHERE id = ?
+        "#,
+    )
+    .bind(instance_id)
+    .bind(instance_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    heartbeat_node_with_managed_instances(app.clone(), node_id, token, json!([])).await;
+
+    let (status, fetched) = request(
+        app,
+        "GET",
+        &format!("/api/model-instances/{instance_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["status"], "failed");
+    assert!(fetched["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("Agent 重启后未找到受管进程记录"));
+    assert_eq!(fetched["process_id"], Value::Null);
+    assert_eq!(fetched["process_ref"], Value::Null);
+}
+
+#[tokio::test]
+async fn heartbeat_updates_running_local_instance_from_agent_managed_report() {
+    let (app, pool) = test_app_with_pool().await;
+    let registered = register_node_json(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+    let token = registered["agent_token"].as_str().unwrap();
+    let environment = create_runtime_environment(app.clone(), node_id, token).await;
+    let model = create_model_for_node(app.clone(), node_id, token).await;
+    let model_id = model["id"].as_str().unwrap();
+    let (status, files) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/models/{model_id}/files"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let model_file_id = files["files"][0]["id"].as_str().unwrap();
+    let (status, instance) = request(
+        app.clone(),
+        "POST",
+        "/api/model-instances",
+        Some(json!({
+            "deploy_type": "local",
+            "name": "qwen local restart restored",
+            "node_id": node_id,
+            "runtime_environment_id": environment["id"],
+            "model_file_id": model_file_id
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let instance_id = instance["id"].as_str().unwrap();
+    sqlx::query("UPDATE model_instances SET status = 'running' WHERE id = ?")
+        .bind(instance_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    heartbeat_node_with_managed_instances(
+        app.clone(),
+        node_id,
+        token,
+        json!([{
+            "instance_id": instance_id,
+            "status": "running",
+            "message": "Agent 重启后已恢复受管进程状态：受管进程仍在运行",
+            "process_id": 23456,
+            "process_ref": instance_id,
+            "base_url": "http://127.0.0.1:18085",
+            "endpoint_url": "http://127.0.0.1:18085",
+            "command": "[\"/usr/local/bin/ollama\",\"--model\",\"/models/qwen2-7b/model.gguf\"]",
+            "log_path": "/tmp/lightai/instance.log"
+        }]),
+    )
+    .await;
+
+    let (status, fetched) = request(
+        app,
+        "GET",
+        &format!("/api/model-instances/{instance_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["status"], "running");
+    assert_eq!(fetched["process_id"], 23456);
+    assert!(fetched["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("Agent 重启后已恢复受管进程状态"));
+    assert!(fetched["log_tail"]
+        .as_str()
+        .unwrap()
+        .contains("/tmp/lightai/instance.log"));
 }
 
 #[tokio::test]

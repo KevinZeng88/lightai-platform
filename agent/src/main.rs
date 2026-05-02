@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use lightai_agent::{config::Config, heartbeat, routes, tasks};
+use lightai_agent::{config::Config, heartbeat, platform_log, routes, tasks};
 use tokio::sync::RwLock;
 
 #[tokio::main]
@@ -11,6 +11,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::load()?;
+    let default_log_policy = platform_log::LogPolicy::default();
+    platform_log::append(&default_log_policy, "agent.log", "info", "Agent 启动").await?;
     let listen_addr: SocketAddr = config.listen_addr.parse()?;
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
     let heartbeat_config = config.clone();

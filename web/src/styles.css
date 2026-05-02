@@ -196,6 +196,14 @@ h1 {
   width: min(420px, 100%);
 }
 
+.filter-select {
+  width: 180px;
+}
+
+.wide-select {
+  width: 320px;
+}
+
 .model-files-block {
   display: grid;
   gap: 12px;
