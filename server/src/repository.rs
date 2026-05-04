@@ -213,7 +213,9 @@ pub async fn register_node(
             Err(error) => return Err(error),
         }
     }
-    unreachable!()
+    // 正常情况下不会到达此处：loop 内所有分支均 return。
+    // 保留为 Err 而非 unreachable!() 以避免生产环境 panic。
+    anyhow::bail!("register_node: unexpected retry exhaustion")
 }
 
 async fn try_register(

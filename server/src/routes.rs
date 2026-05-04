@@ -950,7 +950,8 @@ impl IntoResponse for ApiError {
                 .into_response(),
             Self::Internal(error) => {
                 tracing::error!(%error, "api request failed");
-                let _ = tokio::spawn(async move {
+                // fire-and-forget: into_response 不是 async，无法 await
+                std::mem::drop(tokio::spawn(async move {
                     let _ = crate::platform_log::append(
                         &crate::platform_log::global(),
                         "server.log",
@@ -958,7 +959,7 @@ impl IntoResponse for ApiError {
                         &format!("API 内部错误：{error}"),
                     )
                     .await;
-                });
+                }));
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {

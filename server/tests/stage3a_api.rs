@@ -504,6 +504,7 @@ async fn create_model_file(
     json
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_model_file_with_agent_result(
     app: axum::Router,
     model_id: &str,
@@ -2195,7 +2196,7 @@ async fn heartbeat_updates_running_local_instance_from_agent_managed_report() {
     assert_eq!(fetched["status"], "running");
     assert_eq!(fetched["process_id"], 23456);
     // running 实例不应有 last_error（恢复信息写入 Agent 日志，不入库）
-    assert!(fetched["last_error"].as_str().map_or(true, str::is_empty));
+    assert!(fetched["last_error"].as_str().is_none_or(str::is_empty));
     assert!(fetched["log_tail"]
         .as_str()
         .unwrap()
@@ -2791,7 +2792,7 @@ async fn disk_sqlite_persistence_survives_restart_and_reconciles() {
     .await;
     assert_eq!(status2, StatusCode::OK);
     assert_eq!(fetched2["status"], "running");
-    assert!(fetched2["last_error"].as_str().map_or(true, str::is_empty));
+    assert!(fetched2["last_error"].as_str().is_none_or(str::is_empty));
 
     let _ = std::fs::remove_dir_all(&dir);
 }

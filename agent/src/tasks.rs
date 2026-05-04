@@ -1057,17 +1057,17 @@ impl ProbeConfig {
             max_attempts: parsed
                 .get("probe_max_attempts")
                 .and_then(|v| v.as_u64())
-                .map(|v| v.min(60).max(1) as u32)
+                .map(|v| v.clamp(1, 60) as u32)
                 .unwrap_or(ENDPOINT_READY_MAX_ATTEMPTS),
             interval_ms: parsed
                 .get("probe_interval_ms")
                 .and_then(|v| v.as_u64())
-                .map(|v| v.min(60_000).max(100))
+                .map(|v| v.clamp(100, 60_000))
                 .unwrap_or(ENDPOINT_READY_INTERVAL_MS),
             timeout_ms: parsed
                 .get("probe_timeout_ms")
                 .and_then(|v| v.as_u64())
-                .map(|v| v.min(60_000).max(50))
+                .map(|v| v.clamp(50, 60_000))
                 .unwrap_or(ENDPOINT_READY_REQUEST_TIMEOUT_MS),
         }
     }
@@ -1363,17 +1363,12 @@ fn attach_log_reader(
     if let Some(mut stream) = stream {
         tokio::spawn(async move {
             let mut file = match log_path {
-                Some(path) => {
-                    match tokio::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(path)
-                        .await
-                    {
-                        Ok(file) => Some(file),
-                        Err(_) => None,
-                    }
-                }
+                Some(path) => tokio::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                    .await
+                    .ok(),
                 None => None,
             };
             let mut header_written = false;
