@@ -69,8 +69,35 @@ async fn run_once(
     };
 
     match client.heartbeat(&agent_state.agent_token, &request).await {
-        Ok(response) => Ok(response.agent_config.or(next_config)),
+        Ok(response) => {
+            if let Some(ref agent_config) = response.agent_config {
+                if agent_config.config_version
+                    > runtime_config
+                        .last_config_updated_at
+                        .map_or(0, |_| runtime_config.config_version)
+                {
+                    let _ = platform_log::append(
+                        &runtime_config.log_policy,
+                        "agent.log",
+                        "info",
+                        &format!(
+                            "Agent 配置已更新 config_version={}",
+                            agent_config.config_version
+                        ),
+                    )
+                    .await;
+                }
+            }
+            Ok(response.agent_config.or(next_config))
+        }
         Err(error) if is_unauthorized(&error) => {
+            let _ = platform_log::append(
+                &runtime_config.log_policy,
+                "agent.log",
+                "warn",
+                "Agent token 过期，重新注册",
+            )
+            .await;
             let registered = register(&client, config).await?;
             next_config = Some(registered.agent_config.clone());
             agent_state = registered.state;
@@ -81,7 +108,16 @@ async fn run_once(
             let response = client.heartbeat(&agent_state.agent_token, &request).await?;
             Ok(response.agent_config.or(next_config))
         }
-        Err(error) => Err(error),
+        Err(error) => {
+            let _ = platform_log::append(
+                &runtime_config.log_policy,
+                "agent.log",
+                "error",
+                &format!("心跳失败：{error}"),
+            )
+            .await;
+            Err(error)
+        }
     }
 }
 
@@ -102,10 +138,17 @@ async fn register(client: &ServerClient, config: &Config) -> anyhow::Result<Regi
         .await?;
 
     let state = AgentState {
-        node_id: response.node_id,
-        agent_token: response.agent_token,
+        node_id: response.node_id.clone(),
+        agent_token: response.agent_token.clone(),
     };
     state::save(&config.state_path, &state).await?;
+    let _ = platform_log::append(
+        &LogPolicy::default(),
+        "agent.log",
+        "info",
+        &format!("Agent 注册成功 node_id={}", response.node_id),
+    )
+    .await;
     Ok(RegisteredAgent {
         state,
         agent_config: response.agent_config.unwrap_or_else(|| AgentConfig {

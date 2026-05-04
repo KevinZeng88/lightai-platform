@@ -178,6 +178,10 @@
         <div><span class="muted">状态</span><p>{{ statusLabel(selectedLogInstance.status) }}</p></div>
         <div class="wide-detail"><span class="muted">启动命令</span><p>{{ selectedLogInstance.command ?? '暂无命令摘要' }}</p></div>
       </div>
+      <div class="log-toolbar">
+        <el-button size="small" :loading="logRefreshing" @click="refreshLogs">刷新日志</el-button>
+        <span v-if="logMessage" class="muted">{{ logMessage }}</span>
+      </div>
       <pre class="log-box">{{ selectedLogInstance.log_tail ?? selectedLogInstance.last_error ?? '暂无日志' }}</pre>
     </div>
   </el-dialog>
@@ -197,6 +201,7 @@ import {
   fetchModels,
   fetchNodes,
   fetchRuntimeEnvironments,
+  refreshInstanceLogs,
   startModelInstance,
   stopModelInstance,
   testModelInstance,
@@ -216,6 +221,8 @@ const dialogVisible = ref(false)
 const logDialogVisible = ref(false)
 const editingId = ref('')
 const selectedLogInstance = ref<ModelInstance | null>(null)
+const logRefreshing = ref(false)
+const logMessage = ref('')
 const form = ref(emptyForm())
 const instanceTypeOptions = [
   { label: '外部服务', value: 'external' },
@@ -303,7 +310,25 @@ function openEdit(row: ModelInstance) {
 
 function openLogs(row: ModelInstance) {
   selectedLogInstance.value = row
+  logMessage.value = ''
   logDialogVisible.value = true
+}
+
+async function refreshLogs() {
+  if (!selectedLogInstance.value) return
+  logRefreshing.value = true
+  logMessage.value = ''
+  try {
+    const response = await refreshInstanceLogs(selectedLogInstance.value.id)
+    if (selectedLogInstance.value) {
+      selectedLogInstance.value.log_tail = response.content || null
+    }
+    logMessage.value = response.message ?? '日志已刷新'
+  } catch (err) {
+    logMessage.value = err instanceof Error ? err.message : '刷新失败'
+  } finally {
+    logRefreshing.value = false
+  }
 }
 
 async function submit() {

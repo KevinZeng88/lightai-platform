@@ -544,9 +544,21 @@ pub struct AuditQuery {
     pub target_id: Option<String>,
     pub node_id: Option<String>,
     pub instance_id: Option<String>,
+    pub actor_type: Option<String>,
     pub result: Option<String>,
     pub from: Option<i64>,
     pub to: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct FrontendErrorReport {
+    pub message: String,
+    #[serde(default)]
+    pub stack: Option<String>,
+    #[serde(default)]
+    pub url: Option<String>,
+    #[serde(default)]
+    pub occurred_at: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]

@@ -16,6 +16,8 @@ import type {
   RuntimeEnvironment
 } from './types'
 
+const isFrontendErrorUrl = (url: string) => url.includes('/api/frontend-errors')
+
 async function readJson<T>(response: Response, fallback: string): Promise<T> {
   if (!response.ok) {
     let message = fallback
@@ -25,7 +27,19 @@ async function readJson<T>(response: Response, fallback: string): Promise<T> {
     } catch {
       message = `${fallback}: ${response.status}`
     }
-    throw new Error(message)
+    const apiError = new Error(message)
+    if (!isFrontendErrorUrl(response.url)) {
+      fetch('/api/frontend-errors', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: `API 请求失败：${message}`,
+          url: response.url,
+          occurred_at: Math.floor(Date.now() / 1000)
+        })
+      }).catch(() => {})
+    }
+    throw apiError
   }
   return response.json()
 }
@@ -49,7 +63,19 @@ async function sendEmpty(url: string, method: string): Promise<void> {
     } catch {
       // Keep status-only message.
     }
-    throw new Error(message)
+    const apiError = new Error(message)
+    if (!isFrontendErrorUrl(response.url)) {
+      fetch('/api/frontend-errors', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: `API 请求失败：${message}`,
+          url: response.url,
+          occurred_at: Math.floor(Date.now() / 1000)
+        })
+      }).catch(() => {})
+    }
+    throw apiError
   }
 }
 
@@ -248,6 +274,31 @@ export async function stopModelInstance(id: string): Promise<ModelInstance> {
 
 export async function testModelInstance(id: string): Promise<ModelInstance> {
   return sendJson(`/api/model-instances/${id}/test`, 'POST')
+}
+
+export async function refreshInstanceLogs(id: string): Promise<LogResponse> {
+  return sendJson(`/api/model-instances/${id}/logs`, 'POST')
+}
+
+export function reportFrontendError(payload: {
+  message: string
+  stack?: string
+  url?: string
+  occurred_at?: number
+}): void {
+  const body = JSON.stringify(payload)
+  const maxLen = 4096
+  if (body.length > maxLen) {
+    payload.stack = payload.stack?.slice(0, 1024)
+    payload.message = payload.message.slice(0, 1024)
+  }
+  fetch('/api/frontend-errors', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  }).catch(() => {
+    // fire and forget; don't throw if reporting fails
+  })
 }
 
 export async function fetchModelFileTrash(): Promise<ModelFileTrashItem[]> {

@@ -61,6 +61,7 @@
             <el-option label="Server 系统日志" value="server" />
             <el-option label="Agent 系统日志" value="agent" />
             <el-option label="本地模型实例日志" value="instance" />
+            <el-option label="前端错误日志" value="frontend" />
             <el-option label="最近错误摘要" value="errors" />
           </el-select>
         </el-form-item>

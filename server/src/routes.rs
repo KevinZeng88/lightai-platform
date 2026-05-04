@@ -6,10 +6,10 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 
 use crate::models::{
-    AgentConfigPolicy, AgentTaskPollRequest, AgentTaskResultRequest, AuditQuery, GpuMetricsQuery,
-    HeartbeatRequest, HeartbeatResponse, LogQuery, MetricsQuery, ModelFileRequest,
-    ModelFileTrashRequest, ModelInstanceCreateRequest, ModelInstanceUpdateRequest, ModelRequest,
-    RegisterRequest, RuntimeEnvironmentRequest,
+    AgentConfigPolicy, AgentTaskPollRequest, AgentTaskResultRequest, AuditQuery,
+    FrontendErrorReport, GpuMetricsQuery, HeartbeatRequest, HeartbeatResponse, LogQuery,
+    MetricsQuery, ModelFileRequest, ModelFileTrashRequest, ModelInstanceCreateRequest,
+    ModelInstanceUpdateRequest, ModelRequest, RegisterRequest, RuntimeEnvironmentRequest,
 };
 use crate::platform_log::LogPolicy;
 use crate::repository;
@@ -97,8 +97,13 @@ pub fn app(pool: SqlitePool) -> Router {
         )
         .route("/api/model-instances/{id}/stop", post(stop_model_instance))
         .route("/api/model-instances/{id}/test", post(test_model_instance))
+        .route(
+            "/api/model-instances/{id}/logs",
+            post(refresh_instance_logs),
+        )
         .route("/api/model-file-trash", get(list_model_file_trash))
         .route("/api/logs", get(read_logs))
+        .route("/api/frontend-errors", post(report_frontend_error))
         .route("/api/audit-events", get(list_audit_events))
         .route(
             "/api/config/server-logs",
@@ -128,7 +133,17 @@ async fn register_agent(
     State(pool): State<SqlitePool>,
     Json(request): Json<RegisterRequest>,
 ) -> Result<Json<crate::models::RegisterResponse>, ApiError> {
-    Ok(Json(repository::register_node(&pool, request).await?))
+    let response = repository::register_node(&pool, request).await?;
+    let _ = crate::platform_log::append(
+        &repository::server_log_policy(&pool)
+            .await
+            .unwrap_or_default(),
+        "server.log",
+        "info",
+        &format!("Agent 注册成功 node_id={}", response.node_id),
+    )
+    .await;
+    Ok(Json(response))
 }
 
 async fn agent_heartbeat(
@@ -210,6 +225,13 @@ async fn read_logs(
             instance_id: None,
             content: stage3a::recent_error_summary(&pool).await?,
             message: Some("最近错误摘要读取成功".to_string()),
+        })),
+        "frontend" => Ok(Json(crate::models::LogResponse {
+            source_type: "frontend".to_string(),
+            node_id: None,
+            instance_id: None,
+            content: stage3a::frontend_error_summary(&pool).await?,
+            message: Some("前端错误日志读取成功".to_string()),
         })),
         _ => Err(ApiError::BadRequest("日志类型不受支持".to_string())),
     }
@@ -448,7 +470,9 @@ async fn update_model(
     Path(id): Path<String>,
     Json(request): Json<ModelRequest>,
 ) -> Result<Json<crate::models::ModelView>, ApiError> {
-    Ok(Json(stage3a::update_model(&pool, &id, request).await?))
+    let view = stage3a::update_model(&pool, &id, request).await?;
+    audit_success(&pool, "model.update", "model", Some(&id), None, None).await;
+    Ok(Json(view))
 }
 
 async fn delete_model(
@@ -497,7 +521,17 @@ async fn update_model_file(
     Path(id): Path<String>,
     Json(request): Json<ModelFileRequest>,
 ) -> Result<Json<crate::models::ModelFileView>, ApiError> {
-    Ok(Json(stage3a::update_model_file(&pool, &id, request).await?))
+    let view = stage3a::update_model_file(&pool, &id, request).await?;
+    audit_success(
+        &pool,
+        "model_file.update",
+        "model_file",
+        Some(&id),
+        Some(&view.node_id),
+        None,
+    )
+    .await;
+    Ok(Json(view))
 }
 
 async fn delete_model_file(
@@ -521,9 +555,17 @@ async fn verify_model_file(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelFileView>, ApiError> {
-    Ok(Json(
-        stage3a::queue_model_file_verification(&pool, &id).await?,
-    ))
+    let view = stage3a::queue_model_file_verification(&pool, &id).await?;
+    audit_success(
+        &pool,
+        "model_file.verify",
+        "model_file",
+        Some(&id),
+        Some(&view.node_id),
+        None,
+    )
+    .await;
+    Ok(Json(view))
 }
 
 async fn list_model_instances(
@@ -659,6 +701,49 @@ async fn test_model_instance(
     Ok(Json(view))
 }
 
+async fn refresh_instance_logs(
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+) -> Result<Json<crate::models::LogResponse>, ApiError> {
+    let content = stage3a::refresh_instance_logs(&pool, &id).await?;
+    let instance = stage3a::model_instance(&pool, &id).await?;
+    Ok(Json(crate::models::LogResponse {
+        source_type: "instance".to_string(),
+        node_id: instance.node_id.clone(),
+        instance_id: Some(id),
+        content,
+        message: Some("实例日志已刷新".to_string()),
+    }))
+}
+
+async fn report_frontend_error(
+    State(pool): State<SqlitePool>,
+    Json(report): Json<FrontendErrorReport>,
+) -> Result<StatusCode, ApiError> {
+    let message = report.message.chars().take(1024).collect::<String>();
+    let stack: Option<String> = report.stack.map(|s| s.chars().take(2048).collect());
+    let url = report.url.map(|u| u.chars().take(512).collect::<String>());
+    let occurred_at = report.occurred_at.unwrap_or_else(current_unix_secs);
+    repository::record_frontend_error(
+        &pool,
+        &message,
+        stack.as_deref(),
+        url.as_deref(),
+        occurred_at,
+    )
+    .await?;
+    let _ = crate::platform_log::append(
+        &repository::server_log_policy(&pool)
+            .await
+            .unwrap_or_default(),
+        "server.log",
+        "warn",
+        &format!("前端错误：{message}"),
+    )
+    .await;
+    Ok(StatusCode::OK)
+}
+
 async fn list_model_file_trash(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<crate::models::ModelFileTrashListResponse>, ApiError> {
@@ -786,6 +871,8 @@ async fn audit_success(
             result: "success",
             error_message: None,
             detail_json: None,
+            actor_type: None,
+            source: None,
         },
     )
     .await;
@@ -854,6 +941,15 @@ impl IntoResponse for ApiError {
                 .into_response(),
             Self::Internal(error) => {
                 tracing::error!(%error, "api request failed");
+                let _ = tokio::spawn(async move {
+                    let _ = crate::platform_log::append(
+                        &crate::platform_log::global(),
+                        "server.log",
+                        "error",
+                        &format!("API 内部错误：{error}"),
+                    )
+                    .await;
+                });
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(ErrorResponse {

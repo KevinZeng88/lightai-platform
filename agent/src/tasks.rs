@@ -132,6 +132,14 @@ pub async fn run_once(
         return Ok(next_config);
     };
 
+    let _ = platform_log::append(
+        log_policy,
+        "agent.log",
+        "info",
+        &format!("Agent 开始执行任务 task_id={} kind={}", task.id, task.kind),
+    )
+    .await;
+
     let (status, result) = match task.kind.as_str() {
         "verify_model_file" => {
             let path = task

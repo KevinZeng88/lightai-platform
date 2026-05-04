@@ -25,21 +25,26 @@ pub struct AuditRecord<'a> {
     pub result: &'a str,
     pub error_message: Option<&'a str>,
     pub detail_json: Option<String>,
+    pub actor_type: Option<&'a str>,
+    pub source: Option<&'a str>,
 }
 
 pub async fn record_audit(pool: &SqlitePool, record: AuditRecord<'_>) -> anyhow::Result<()> {
     let now = now_unix_secs();
+    let actor_type = record.actor_type.unwrap_or("system");
+    let source = record.source.unwrap_or("local");
     sqlx::query(
         r#"
         INSERT INTO audit_events (
             id, occurred_at, actor_type, actor_id, actor_group_id, operation_type,
             target_type, target_id, node_id, instance_id, result, error_message, source, detail_json
         )
-        VALUES (?, ?, 'system', 'local', NULL, ?, ?, ?, ?, ?, ?, ?, 'local', ?)
+        VALUES (?, ?, ?, 'local', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(Uuid::new_v4().to_string())
     .bind(now)
+    .bind(actor_type)
     .bind(record.operation_type)
     .bind(record.target_type)
     .bind(record.target_id)
@@ -47,6 +52,7 @@ pub async fn record_audit(pool: &SqlitePool, record: AuditRecord<'_>) -> anyhow:
     .bind(record.instance_id)
     .bind(record.result)
     .bind(record.error_message.map(crate::platform_log::sanitize))
+    .bind(source)
     .bind(
         record
             .detail_json
@@ -55,6 +61,37 @@ pub async fn record_audit(pool: &SqlitePool, record: AuditRecord<'_>) -> anyhow:
     .execute(pool)
     .await?;
     Ok(())
+}
+
+pub async fn record_frontend_error(
+    pool: &SqlitePool,
+    message: &str,
+    stack: Option<&str>,
+    url: Option<&str>,
+    occurred_at: i64,
+) -> anyhow::Result<()> {
+    let detail = serde_json::json!({
+        "message": crate::platform_log::sanitize(message),
+        "stack": stack.map(|s| s.chars().take(1024).collect::<String>()),
+        "url": url.map(|u| u.chars().take(512).collect::<String>()),
+        "client_ts": occurred_at,
+    });
+    record_audit(
+        pool,
+        AuditRecord {
+            operation_type: "frontend_error",
+            target_type: "frontend",
+            target_id: None,
+            node_id: None,
+            instance_id: None,
+            result: "failed",
+            error_message: Some(message),
+            detail_json: Some(detail.to_string()),
+            actor_type: Some("frontend"),
+            source: Some("frontend"),
+        },
+    )
+    .await
 }
 
 pub async fn list_audit_events(
@@ -73,6 +110,7 @@ pub async fn list_audit_events(
           AND (? IS NULL OR target_id = ?)
           AND (? IS NULL OR node_id = ?)
           AND (? IS NULL OR instance_id = ?)
+          AND (? IS NULL OR actor_type = ?)
           AND (? IS NULL OR result = ?)
         ORDER BY occurred_at DESC
         LIMIT 500
@@ -90,6 +128,8 @@ pub async fn list_audit_events(
     .bind(query.node_id.as_deref())
     .bind(query.instance_id.as_deref())
     .bind(query.instance_id.as_deref())
+    .bind(query.actor_type.as_deref())
+    .bind(query.actor_type.as_deref())
     .bind(query.result.as_deref())
     .bind(query.result.as_deref())
     .fetch_all(pool)

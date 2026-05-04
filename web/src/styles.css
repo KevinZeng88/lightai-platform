@@ -188,6 +188,13 @@ h1 {
   word-break: break-word;
 }
 
+.log-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+
 .config-form {
   max-width: 720px;
 }
