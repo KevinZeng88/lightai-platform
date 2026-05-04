@@ -40,7 +40,7 @@
 
 ```bash
 python3 -m http.server 18088
-
+```
 
 然后在 Web 中尝试用 18088 启动本地实例。
 
@@ -49,7 +49,94 @@ python3 -m http.server 18088
 启动应失败；
 Web 应显示明确的端口冲突原因；
 不应错误显示为运行中。
-安全提醒
+
+## 状态检查与异常恢复验证
+
+以下端到端场景需在真实环境中逐项验证。所有代码路径已由 92 项自动化测试覆盖。
+
+### 1. Agent 离线状态检查
+
+```bash
+# 启动 Server、Agent、Web，创建并启动一个本地实例
+# 确认 Web 显示 running（绿色标签）
+
+# 停止 Agent（Ctrl+C 或 kill）
+# 在 Web 中点击该实例的"检查状态"
+
+# 预期：
+# - 弹出红色错误通知，提示"Agent 离线，无法检查实例状态"
+# - 实例状态标签变为黄色 warning（不是绿色 success）
+# - 检查结果列显示"Agent 离线，无法检查实例状态"和最后检查时间
+# - last_error 字段内容可见
+```
+
+### 2. Agent 重启 — 存活实例恢复
+
+```bash
+# 启动 Agent、启动一个本地实例（确认 running）
+# 重启 Agent
+
+# 预期：
+# - Agent 日志显示"Agent 重启后恢复受管进程记录 N 条"
+# - Agent 日志显示"Agent 上报受管实例：运行中 X，已退出 Y"
+# - Web 周期刷新后实例保持 running，last_error 为空
+# - 不需要人工干预
+```
+
+### 3. Agent 重启 — 已退出实例纠正
+
+```bash
+# 启动 Agent、启动一个本地实例
+# 手工 kill 受管进程（kill <pid>）
+# 重启 Agent
+
+# 预期：
+# - Agent 日志显示"受管实例进程已退出"
+# - 实例状态变为 failed（红色标签）
+# - 检查结果列显示失败原因"受管进程不存在，可能已异常退出"
+```
+
+### 4. 手工 kill 受管进程
+
+```bash
+# 启动 Agent、启动一个本地实例（确认 running）
+# 手工 kill 受管进程（kill <pid>）
+# 等待约 30 秒（monitor 3s + heartbeat 15s + Web refresh 15s）
+
+# 预期：
+# - 实例状态自动变为 failed
+# - 不需要人工刷新页面
+# - 失败原因包含"受管进程不存在"或"进程已退出"
+```
+
+### 5. Server 重启 — SQLite 状态恢复
+
+```bash
+# 确认 data/lightai.db 存在且包含节点和实例数据
+# 停止 Server（Ctrl+C）
+# 重新启动 Server
+
+# 预期：
+# - Server 启动成功，从 SQLite 恢复状态
+# - Web 刷新后节点列表和实例列表与重启前一致
+# - Agent 下一次心跳后实例状态被 reconcile 同步
+```
+
+### 6. Agent token 重注册 — node_id 不变
+
+```bash
+# 确认 Agent 已注册并获得 node_id
+# 在 Server 端手动使 token 失效（或重启 Server 并删除 agent state 中的 token）
+# Agent 检测到心跳 401 后自动重新注册
+
+# 预期：
+# - Agent 日志显示"Agent token 过期，重新注册"
+# - 新注册返回的 node_id 与旧 node_id 一致
+# - 已有实例状态不受影响
+```
+
+## 安全提醒
+
 不要用真实模型文件测试删除功能。
 删除测试请使用临时文件。
 模型文件物理删除必须走模型垃圾箱和 Agent 受控清理流程。

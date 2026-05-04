@@ -214,6 +214,10 @@ export async function fetchModelInstances(): Promise<ModelInstance[]> {
   return payload.model_instances
 }
 
+export async function fetchModelInstance(id: string): Promise<ModelInstance> {
+  return sendJson<ModelInstance>(`/api/model-instances/${id}`, 'GET')
+}
+
 export async function createModelInstance(payload: {
   model_id?: string | null
   model_file_id?: string | null

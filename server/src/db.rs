@@ -20,6 +20,13 @@ pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
 pub async fn migrate(pool: &SqlitePool) -> anyhow::Result<()> {
     execute_migration(pool, include_str!("../../migrations/0001_init.sql")).await?;
     execute_migration(pool, include_str!("../../migrations/0002_stage2_nodes.sql")).await?;
+    // Agent 身份规则：name 全局唯一、hostname 全局唯一。
+    // 应用层 register_node 在事务中先检查冲突再写入，此处唯一索引作为并发兜底。
+    // 若已有库存在违反约束的重复记录，需先手动合并后再升级。
+    pool.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_name ON nodes(name)")
+        .await?;
+    pool.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_nodes_hostname ON nodes(hostname)")
+        .await?;
     execute_migration(
         pool,
         include_str!("../../migrations/0003_stage3a_models.sql"),

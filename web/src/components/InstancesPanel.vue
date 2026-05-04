@@ -16,7 +16,7 @@
     <el-table-column prop="name" label="实例" min-width="150" fixed="left" />
     <el-table-column label="状态" width="120">
       <template #default="{ row }">
-        <el-tag :type="statusType(row.status)">{{ statusLabel(row.status) }}</el-tag>
+        <el-tag :type="statusType(row)">{{ statusLabel(row.status) }}</el-tag>
       </template>
     </el-table-column>
     <el-table-column label="检查结果" min-width="280">
@@ -157,6 +157,33 @@
             placeholder="一行一个参数，例如：&#10;--verbose&#10;--batch-size&#10;512"
           />
         </el-form-item>
+        <el-collapse class="advanced-fields">
+          <el-collapse-item title="高级探测配置（可选，留空使用后端默认值）" name="probe">
+            <el-alert
+              title="以下参数用于实例启动后的服务就绪探测：Agent 以指定间隔轮询探测路径，直到成功或达到重试上限。留空使用默认值（5 次 × 5 秒间隔）。运行期间 Agent 另有独立进程监控。"
+              type="info"
+              show-icon
+              class="alert"
+            />
+            <el-form-item label="探测路径">
+              <el-input
+                v-model="form.probe_paths_text"
+                type="textarea"
+                :rows="2"
+                placeholder="一行一个路径，留空使用后端默认：&#10;llama.cpp/ollama/vllm: /v1/models, /health, /&#10;custom/其他: /health, /v1/models, /"
+              />
+            </el-form-item>
+            <el-form-item label="失败重试次数">
+              <el-input-number v-model="form.probe_max_attempts" :min="1" :max="60" />
+            </el-form-item>
+            <el-form-item label="重试间隔(ms)">
+              <el-input-number v-model="form.probe_interval_ms" :min="50" :max="60000" :step="500" />
+            </el-form-item>
+            <el-form-item label="请求超时(ms)">
+              <el-input-number v-model="form.probe_timeout_ms" :min="50" :max="60000" :step="100" />
+            </el-form-item>
+          </el-collapse-item>
+        </el-collapse>
         <el-alert
           title="工作目录来自运行环境配置。未配置时 Agent 使用自身启动目录；建议为程序或脚本配置固定应用目录，避免依赖 /tmp、用户家目录等不稳定位置。"
           type="info"
@@ -191,12 +218,13 @@
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { ElNotification } from 'element-plus/es/components/notification/index'
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import {
   checkModelInstance,
   createModelInstance,
   deleteModelInstance,
   fetchModelFiles,
+  fetchModelInstance,
   fetchModelInstances,
   fetchModels,
   fetchNodes,
@@ -249,7 +277,11 @@ function emptyForm() {
     ctx_size: 4096,
     gpu_layers: 0,
     threads: 0,
-    extra_args_text: ''
+    extra_args_text: '',
+    probe_paths_text: '',
+    probe_max_attempts: 5,
+    probe_interval_ms: 5000,
+    probe_timeout_ms: 400
   }
 }
 
@@ -303,13 +335,17 @@ function openEdit(row: ModelInstance) {
     ctx_size: params.ctx_size,
     gpu_layers: params.gpu_layers,
     threads: params.threads,
-    extra_args_text: params.extra_args.join('\n')
+    extra_args_text: params.extra_args.join('\n'),
+    probe_paths_text: params.probe_paths_text,
+    probe_max_attempts: params.probe_max_attempts,
+    probe_interval_ms: params.probe_interval_ms,
+    probe_timeout_ms: params.probe_timeout_ms
   }
   dialogVisible.value = true
 }
 
 function openLogs(row: ModelInstance) {
-  selectedLogInstance.value = row
+  selectedLogInstance.value = instances.value.find((inst) => inst.id === row.id) ?? row
   logMessage.value = ''
   logDialogVisible.value = true
 }
@@ -320,9 +356,9 @@ async function refreshLogs() {
   logMessage.value = ''
   try {
     const response = await refreshInstanceLogs(selectedLogInstance.value.id)
-    if (selectedLogInstance.value) {
-      selectedLogInstance.value.log_tail = response.content || null
-    }
+    const updated = await fetchModelInstance(selectedLogInstance.value.id)
+    replaceInstance(updated)
+    selectedLogInstance.value = updated
     logMessage.value = response.message ?? '日志已刷新'
   } catch (err) {
     logMessage.value = err instanceof Error ? err.message : '刷新失败'
@@ -366,50 +402,108 @@ async function submit() {
   await loadData()
 }
 
+function replaceInstance(updated: ModelInstance) {
+  const idx = instances.value.findIndex((inst) => inst.id === updated.id)
+  if (idx !== -1) instances.value[idx] = updated
+}
+
+async function pollInstanceUntilStable(id: string, initialStatus: string) {
+  const transitional = ['starting', 'stopping']
+  if (!transitional.includes(initialStatus)) return
+  for (let i = 0; i < 24; i++) {
+    await new Promise((resolve) => setTimeout(resolve, 1500))
+    try {
+      const updated = await fetchModelInstance(id)
+      replaceInstance(updated)
+      if (!transitional.includes(updated.status)) {
+        ElNotification({
+          title: `操作完成：${statusLabel(updated.status)}`,
+          message: updated.last_error ?? '实例状态已更新',
+          type: updated.status === 'running' ? 'success' : updated.status === 'failed' ? 'error' : 'warning'
+        })
+        return
+      }
+    } catch {
+      // keep polling on transient errors
+    }
+  }
+  ElMessage.warning('等待实例状态超时（36 秒），请手动刷新查看结果')
+}
+
+/// 基于 last_error 文案关键词判断检查是否实际失败。
+/// 当前为轻量实现，后续建议 Server 返回结构化字段（agent_reachable / check_ok / check_failed_reason）
+/// 替代前端依赖错误文案关键词的方案。
+function checkFailedReason(error?: string | null): boolean {
+  if (!error) return false
+  return ['离线', '无法检查', '不可用', '超时', '失败'].some((kw) => error.includes(kw))
+}
+
 async function check(row: ModelInstance) {
-  const checked = await checkModelInstance(row.id)
-  ElNotification({
-    title: `检查结果：${statusLabel(checked.status)}`,
-    message: checked.last_error ?? formatTime(checked.last_checked_at),
-    type: checked.status === 'running' ? 'success' : checked.status === 'failed' ? 'error' : 'warning'
-  })
-  await loadData()
+  try {
+    const checked = await checkModelInstance(row.id)
+    replaceInstance(checked)
+    const isFailed = checkFailedReason(checked.last_error)
+    ElNotification({
+      title: `检查结果：${statusLabel(checked.status)}`,
+      message: checked.last_error ?? formatTime(checked.last_checked_at),
+      type: isFailed ? 'error' : checked.status === 'running' ? 'success' : checked.status === 'failed' ? 'error' : 'warning'
+    })
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '状态检查失败')
+    await refreshSingleInstance(row.id)
+  }
 }
 
 async function start(row: ModelInstance) {
   try {
     const started = await startModelInstance(row.id)
-    ElNotification({ title: `启动结果：${statusLabel(started.status)}`, message: started.last_error ?? '实例状态已更新', type: started.status === 'running' ? 'success' : 'warning' })
-    await loadData()
+    replaceInstance(started)
+    if (started.status === 'running' || started.status === 'failed') {
+      ElNotification({ title: `启动结果：${statusLabel(started.status)}`, message: started.last_error ?? '实例状态已更新', type: started.status === 'running' ? 'success' : started.status === 'failed' ? 'error' : 'warning' })
+    }
+    await pollInstanceUntilStable(started.id, started.status)
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '启动失败')
-    await loadData()
+    await refreshSingleInstance(row.id)
   }
 }
 
 async function stop(row: ModelInstance) {
   try {
     const stopped = await stopModelInstance(row.id)
-    ElNotification({ title: `停止结果：${statusLabel(stopped.status)}`, message: stopped.last_error ?? '实例状态已更新', type: stopped.status === 'stopped' ? 'success' : 'warning' })
-    await loadData()
+    replaceInstance(stopped)
+    if (stopped.status === 'stopped' || stopped.status === 'failed') {
+      ElNotification({ title: `停止结果：${statusLabel(stopped.status)}`, message: stopped.last_error ?? '实例状态已更新', type: stopped.status === 'stopped' ? 'success' : 'warning' })
+    }
+    await pollInstanceUntilStable(stopped.id, stopped.status)
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '停止失败')
-    await loadData()
+    await refreshSingleInstance(row.id)
   }
 }
 
 async function testLocal(row: ModelInstance) {
   try {
     const tested = await testModelInstance(row.id)
+    replaceInstance(tested)
     ElNotification({
       title: '测试完成',
       message: tested.last_error ?? '测试成功',
       type: tested.status === 'running' ? 'success' : 'warning'
     })
-    await loadData()
+    await pollInstanceUntilStable(tested.id, tested.status)
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '测试失败')
-    await loadData()
+    await refreshSingleInstance(row.id)
+  }
+}
+
+async function refreshSingleInstance(id: string) {
+  try {
+    const updated = await fetchModelInstance(id)
+    replaceInstance(updated)
+  } catch {
+    // keep current state on transient errors
   }
 }
 
@@ -438,10 +532,13 @@ async function remove(row: ModelInstance) {
   await loadData()
 }
 
-function statusType(status: string) {
-  if (status === 'running') return 'success'
-  if (status === 'failed') return 'danger'
-  if (status === 'pending' || status === 'starting') return 'warning'
+function statusType(row: ModelInstance) {
+  if (row.status === 'running') {
+    if (checkFailedReason(row.last_error)) return 'warning'
+    return 'success'
+  }
+  if (row.status === 'failed') return 'danger'
+  if (row.status === 'pending' || row.status === 'starting') return 'warning'
   return 'info'
 }
 
@@ -486,6 +583,10 @@ function emptyToNull(value: string) {
 }
 
 function localParams() {
+  const probePaths = form.value.probe_paths_text
+    .split('\n')
+    .map((line) => line.trim())
+    .filter(Boolean)
   return {
     host: form.value.host.trim() || '127.0.0.1',
     port: form.value.port,
@@ -495,7 +596,11 @@ function localParams() {
     extra_args: form.value.extra_args_text
       .split('\n')
       .map((line) => line.trim())
-      .filter(Boolean)
+      .filter(Boolean),
+    ...(probePaths.length > 0 ? { probe_paths: probePaths } : {}),
+    ...(form.value.probe_max_attempts !== 5 ? { probe_max_attempts: form.value.probe_max_attempts } : {}),
+    ...(form.value.probe_interval_ms !== 5000 ? { probe_interval_ms: form.value.probe_interval_ms } : {}),
+    ...(form.value.probe_timeout_ms !== 400 ? { probe_timeout_ms: form.value.probe_timeout_ms } : {})
   }
 }
 
@@ -508,7 +613,11 @@ function parseParams(value?: string | null) {
       ctx_size: typeof parsed.ctx_size === 'number' ? parsed.ctx_size : 4096,
       gpu_layers: typeof parsed.gpu_layers === 'number' ? parsed.gpu_layers : 0,
       threads: typeof parsed.threads === 'number' ? parsed.threads : 0,
-      extra_args: Array.isArray(parsed.extra_args) ? parsed.extra_args.filter((item: unknown) => typeof item === 'string') : []
+      extra_args: Array.isArray(parsed.extra_args) ? parsed.extra_args.filter((item: unknown) => typeof item === 'string') : [],
+      probe_paths_text: Array.isArray(parsed.probe_paths) ? parsed.probe_paths.filter((p: unknown) => typeof p === 'string').join('\n') : '',
+      probe_max_attempts: typeof parsed.probe_max_attempts === 'number' ? parsed.probe_max_attempts : 5,
+      probe_interval_ms: typeof parsed.probe_interval_ms === 'number' ? parsed.probe_interval_ms : 5000,
+      probe_timeout_ms: typeof parsed.probe_timeout_ms === 'number' ? parsed.probe_timeout_ms : 400
     }
   } catch {
     return {
@@ -517,7 +626,11 @@ function parseParams(value?: string | null) {
       ctx_size: 4096,
       gpu_layers: 0,
       threads: 0,
-      extra_args: [] as string[]
+      extra_args: [] as string[],
+      probe_paths_text: '',
+      probe_max_attempts: 5,
+      probe_interval_ms: 5000,
+      probe_timeout_ms: 400
     }
   }
 }
@@ -527,6 +640,39 @@ function formatTime(value?: number | null) {
   return new Date(value * 1000).toLocaleString()
 }
 
-onMounted(loadData)
+let periodicTimer: ReturnType<typeof setInterval> | null = null
+
+function startPeriodicRefresh() {
+  if (periodicTimer) return
+  periodicTimer = setInterval(async () => {
+    const active = instances.value.filter((inst) =>
+      ['starting', 'stopping', 'running'].includes(inst.status)
+    )
+    if (active.length === 0) return
+    try {
+      const list = await fetchModelInstances()
+      for (const updated of list) {
+        replaceInstance(updated)
+      }
+    } catch {
+      // silent on transient errors
+    }
+  }, 15_000)
+}
+
+function stopPeriodicRefresh() {
+  if (periodicTimer) {
+    clearInterval(periodicTimer)
+    periodicTimer = null
+  }
+}
+
+onMounted(async () => {
+  await loadData()
+  startPeriodicRefresh()
+})
+
+onUnmounted(stopPeriodicRefresh)
+
 defineExpose({ refresh: loadData })
 </script>

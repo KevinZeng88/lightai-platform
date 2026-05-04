@@ -197,10 +197,80 @@ pub async fn register_node(
     request: RegisterRequest,
 ) -> anyhow::Result<RegisterResponse> {
     let now = now_unix_secs();
-    let node_id = Uuid::new_v4().to_string();
     let token = auth::generate_agent_token();
     let token_hash = auth::hash_token(&token);
     let token_prefix = auth::token_prefix(&token);
+
+    // 最多重试一次：处理 same name + same hostname 并发注册导致的 UNIQUE 冲突。
+    // 第一次尝试命中 UNIQUE(name) 或 UNIQUE(hostname) 时，重试会通过 SELECT
+    // 发现已有记录，走复用 node_id 路径。
+    for attempt in 0..2 {
+        match try_register(pool, &request, now, &token, &token_hash, &token_prefix).await {
+            Ok(response) => return Ok(response),
+            Err(error) if attempt == 0 && is_unique_violation(&error) => {
+                continue; // 并发冲突 → 重试一次
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
+}
+
+async fn try_register(
+    pool: &SqlitePool,
+    request: &RegisterRequest,
+    now: i64,
+    token: &str,
+    token_hash: &str,
+    token_prefix: &str,
+) -> anyhow::Result<RegisterResponse> {
+    // Agent 身份识别规则（当前阶段）：
+    // 1. 不同 Agent 不允许使用相同 name — UNIQUE(name) 保障
+    // 2. 不同 Agent 不允许使用相同 hostname — UNIQUE(hostname) 保障
+    // 3. same name + same hostname → 复用 node_id，更新 token
+    // 4. same name + different hostname → 拒绝
+    // 5. different name + same hostname → 拒绝
+    // 6. different name + different hostname → 创建新节点
+    //
+    // 事务保证检查与写入原子性；UNIQUE(name)、UNIQUE(hostname) 作为并发兜底。
+    // ON CONFLICT(id) 仅用于"同节点重注册"场景（id 不变，更新 token）。
+    let mut tx = pool.begin().await?;
+
+    let name_conflict: Option<String> =
+        sqlx::query_scalar("SELECT hostname FROM nodes WHERE name = ? AND hostname != ? LIMIT 1")
+            .bind(&request.name)
+            .bind(&request.hostname)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if let Some(conflict_host) = name_conflict {
+        anyhow::bail!(
+            "节点名称 '{}' 已被主机 '{}' 使用；相同名称不允许用于不同主机。请修改 Agent 配置中的 node_name",
+            request.name,
+            conflict_host
+        );
+    }
+
+    let hostname_conflict: Option<String> =
+        sqlx::query_scalar("SELECT name FROM nodes WHERE hostname = ? AND name != ? LIMIT 1")
+            .bind(&request.hostname)
+            .bind(&request.name)
+            .fetch_optional(&mut *tx)
+            .await?;
+    if let Some(conflict_name) = hostname_conflict {
+        anyhow::bail!(
+            "主机 '{}' 已被节点 '{}' 使用；相同主机不允许用于不同名称。请修改 Agent 配置中的 hostname 或 node_name",
+            request.hostname,
+            conflict_name
+        );
+    }
+
+    let node_id: String =
+        sqlx::query_scalar("SELECT id FROM nodes WHERE name = ? AND hostname = ? LIMIT 1")
+            .bind(&request.name)
+            .bind(&request.hostname)
+            .fetch_optional(&mut *tx)
+            .await?
+            .unwrap_or_else(|| Uuid::new_v4().to_string());
 
     sqlx::query(
         r#"
@@ -209,27 +279,45 @@ pub async fn register_node(
             token_hash, token_prefix, registered_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET
+            name = excluded.name,
+            hostname = excluded.hostname,
+            agent_version = excluded.agent_version,
+            os = excluded.os,
+            arch = excluded.arch,
+            token_hash = excluded.token_hash,
+            token_prefix = excluded.token_prefix,
+            updated_at = excluded.updated_at
         "#,
     )
     .bind(&node_id)
-    .bind(request.name)
-    .bind(request.hostname)
-    .bind(request.agent_version)
-    .bind(request.os)
-    .bind(request.arch)
+    .bind(request.name.as_str())
+    .bind(request.hostname.as_str())
+    .bind(request.agent_version.as_deref())
+    .bind(request.os.as_deref())
+    .bind(request.arch.as_deref())
     .bind(token_hash)
     .bind(token_prefix)
     .bind(now)
     .bind(now)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+
+    tx.commit().await?;
 
     Ok(RegisterResponse {
         node_id: node_id.clone(),
-        agent_token: token,
+        agent_token: token.to_string(),
         heartbeat_interval_secs: HEARTBEAT_INTERVAL_SECS,
         agent_config: effective_agent_config(pool, &node_id).await?,
     })
+}
+
+/// 判断是否为 SQLite UNIQUE 约束冲突错误。
+/// 用于 register_node 并发重试：same name + same hostname 并发注册时，
+/// 第一个 INSERT 成功，第二个触发 UNIQUE 冲突，重试后可复用已有记录。
+fn is_unique_violation(error: &anyhow::Error) -> bool {
+    error.to_string().contains("UNIQUE constraint failed")
 }
 
 pub async fn authenticate_node(
@@ -419,6 +507,12 @@ async fn reconcile_managed_instances(
             .log_path
             .as_deref()
             .map(|path| format!("日志文件：{path}"));
+        // last_error 仅写入失败/异常原因；running 实例不写任何信息（清空旧错误）
+        let last_error: Option<&str> = if status == "running" {
+            None
+        } else {
+            Some(&report.message)
+        };
         sqlx::query(
             r#"
             UPDATE model_instances
@@ -440,7 +534,7 @@ async fn reconcile_managed_instances(
         .bind(report.command.as_deref())
         .bind(log_tail.as_deref())
         .bind(now)
-        .bind(&report.message)
+        .bind(last_error)
         .bind(now)
         .bind(&report.instance_id)
         .bind(node_id)
@@ -468,7 +562,7 @@ async fn reconcile_managed_instances(
             r#"
             UPDATE model_instances
             SET status = 'failed', process_id = NULL, process_ref = NULL, last_checked_at = ?,
-                last_error = 'Agent 重启后未找到受管进程记录，无法确认该实例仍由平台管理，已标记为异常退出',
+                last_error = 'Agent 未上报该实例受管进程状态，进程可能已退出或被外部终止',
                 updated_at = ?
             WHERE id = ?
             "#,

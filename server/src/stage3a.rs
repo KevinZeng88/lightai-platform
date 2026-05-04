@@ -1558,6 +1558,19 @@ pub async fn check_model_instance(
         if instance.status != "running" {
             return Ok(instance);
         }
+        let node_id = instance
+            .node_id
+            .as_deref()
+            .ok_or_else(|| Stage3Error::BadRequest("本地实例缺少节点".to_string()))?;
+        if !node_online(pool, node_id).await? {
+            return update_instance_check(
+                pool,
+                id,
+                instance.status.as_str(),
+                Some("Agent 离线，无法检查实例状态"),
+            )
+            .await;
+        }
         return run_local_instance_task(pool, id, "test_model_instance", "running").await;
     }
     let Some(url) = instance

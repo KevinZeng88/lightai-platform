@@ -458,7 +458,8 @@ pub async fn start_model_instance_with_store(
         }
     }
     let base_url = format!("http://{}:{}", params.host, params.port);
-    let service_ready = if backend == "custom" && deploy_type == "script" {
+    let probe = ProbeConfig::from_payload(payload);
+    let service_ready = if backend == "custom" && deploy_type == "script" && probe.paths.is_none() {
         sleep(Duration::from_millis(CUSTOM_SCRIPT_STARTUP_WAIT_MS)).await;
         match child.try_wait() {
             Ok(Some(_status)) => false,
@@ -466,7 +467,7 @@ pub async fn start_model_instance_with_store(
             Err(_) => false,
         }
     } else {
-        endpoint_ready(backend, &base_url).await
+        endpoint_ready(backend, &base_url, &probe).await
     };
     if !service_ready {
         let _ = child.kill().await;
@@ -930,7 +931,7 @@ fn process_registry() -> &'static Mutex<HashMap<String, ProcessHandle>> {
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
-fn spawn_process_monitor(instance_id: String, managed_store_path: Option<PathBuf>) {
+fn spawn_process_monitor(instance_id: String, _managed_store_path: Option<PathBuf>) {
     tokio::spawn(async move {
         loop {
             sleep(Duration::from_secs(PROCESS_MONITOR_INTERVAL_SECS)).await;
@@ -947,16 +948,12 @@ fn spawn_process_monitor(instance_id: String, managed_store_path: Option<PathBuf
                     tracing::warn!(
                         instance_id = %instance_id,
                         exit_status = %status,
-                        "managed process exited; removing from registry"
+                        "managed process exited; removing from registry, keeping store record for heartbeat"
                     );
                     guard.remove(&instance_id);
                     drop(guard);
-                    if let Some(ref store_path) = managed_store_path {
-                        if let Err(error) = managed_process::remove(store_path, &instance_id).await
-                        {
-                            tracing::warn!(%error, instance_id = %instance_id, "failed to remove managed record for exited process");
-                        }
-                    }
+                    // 不移除 managed store 记录：下次心跳 reports() 会检查到进程不存在，
+                    // 报告 status="failed" 并附带具体原因，Server 据此更新实例状态。
                     let _ = platform_log::append(
                         &LogPolicy::default(),
                         "agent.log",
@@ -1013,6 +1010,74 @@ fn is_executable(metadata: &std::fs::Metadata) -> bool {
 #[cfg(not(unix))]
 fn is_executable(_metadata: &std::fs::Metadata) -> bool {
     true
+}
+
+/// 实例就绪探测配置。可通过 instance params_json 覆盖，未配置时使用内置默认值。
+#[derive(Debug, Clone)]
+struct ProbeConfig {
+    /// 探测路径列表；None 表示使用 probe_paths(backend) 的默认路径。
+    paths: Option<Vec<String>>,
+    max_attempts: u32,
+    interval_ms: u64,
+    timeout_ms: u64,
+}
+
+impl Default for ProbeConfig {
+    fn default() -> Self {
+        Self {
+            paths: None,
+            max_attempts: ENDPOINT_READY_MAX_ATTEMPTS,
+            interval_ms: ENDPOINT_READY_INTERVAL_MS,
+            timeout_ms: ENDPOINT_READY_REQUEST_TIMEOUT_MS,
+        }
+    }
+}
+
+impl ProbeConfig {
+    fn from_payload(payload: &serde_json::Value) -> Self {
+        let params = payload
+            .get("params")
+            .or_else(|| payload.get("params_json"))
+            .unwrap_or(&serde_json::Value::Null);
+        let parsed = if let Some(value) = params.as_str() {
+            serde_json::from_str::<serde_json::Value>(value).unwrap_or(serde_json::Value::Null)
+        } else {
+            params.clone()
+        };
+        Self {
+            paths: parsed
+                .get("probe_paths")
+                .and_then(|v| v.as_array())
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|v| v.as_str().map(str::to_string))
+                        .filter(|s| !s.trim().is_empty())
+                        .collect()
+                }),
+            max_attempts: parsed
+                .get("probe_max_attempts")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.min(60).max(1) as u32)
+                .unwrap_or(ENDPOINT_READY_MAX_ATTEMPTS),
+            interval_ms: parsed
+                .get("probe_interval_ms")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.min(60_000).max(100))
+                .unwrap_or(ENDPOINT_READY_INTERVAL_MS),
+            timeout_ms: parsed
+                .get("probe_timeout_ms")
+                .and_then(|v| v.as_u64())
+                .map(|v| v.min(60_000).max(50))
+                .unwrap_or(ENDPOINT_READY_REQUEST_TIMEOUT_MS),
+        }
+    }
+
+    fn effective_paths(&self, backend: &str) -> Vec<String> {
+        match &self.paths {
+            Some(paths) if !paths.is_empty() => paths.clone(),
+            _ => probe_paths(backend).iter().map(|s| s.to_string()).collect(),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -1518,20 +1583,21 @@ async fn check_port_available(host: &str, port: u16) -> Result<(), String> {
     }
 }
 
-/// 就绪探测：每轮请求次数上限。
-/// 后续可进入 Agent 配置策略。
-const ENDPOINT_READY_MAX_ATTEMPTS: u32 = 20;
+/// 启动就绪探测：最大重试次数。
+/// 实例启动后 Agent 按此上限轮询服务端点；每次重试之间间隔 ENDPOINT_READY_INTERVAL_MS。
+/// 可由实例 params_json.probe_max_attempts 覆盖。
+const ENDPOINT_READY_MAX_ATTEMPTS: u32 = 5;
 
-/// 就绪探测：轮次间隔（毫秒）。
-/// 后续可进入 Agent 配置策略。
-const ENDPOINT_READY_INTERVAL_MS: u64 = 300;
+/// 启动就绪探测：重试间隔（毫秒），默认 5 秒。
+/// 可由实例 params_json.probe_interval_ms 覆盖。
+const ENDPOINT_READY_INTERVAL_MS: u64 = 5000;
 
-/// 就绪探测：单次 HTTP 请求超时（毫秒）。
-/// 后续可进入 Agent 配置策略。
+/// 启动就绪探测：单次 HTTP 请求超时（毫秒）。
+/// 可由实例 params_json.probe_timeout_ms 覆盖。
 const ENDPOINT_READY_REQUEST_TIMEOUT_MS: u64 = 400;
 
-/// 后台进程监控：检查周期（秒）。
-/// 后续可进入 Agent 配置策略。
+/// 运行状态监控：检查周期（秒）。Agent 后台持续检查受管进程是否存活，
+/// 与启动就绪探测无关。本轮不进入配置。
 const PROCESS_MONITOR_INTERVAL_SECS: u64 = 3;
 
 /// 启动后等待 custom+script 后端进程初始化的时间（毫秒）。
@@ -1552,18 +1618,18 @@ fn probe_paths(backend: &str) -> &'static [&'static str] {
     }
 }
 
-async fn endpoint_ready(backend: &str, base_url: &str) -> bool {
+async fn endpoint_ready(backend: &str, base_url: &str, probe: &ProbeConfig) -> bool {
     let client = match reqwest::Client::builder()
-        .timeout(Duration::from_millis(ENDPOINT_READY_REQUEST_TIMEOUT_MS))
+        .timeout(Duration::from_millis(probe.timeout_ms))
         .build()
     {
         Ok(client) => client,
         Err(_) => return false,
     };
     let root = base_url.trim_end_matches('/');
-    let paths = probe_paths(backend);
-    for _ in 0..ENDPOINT_READY_MAX_ATTEMPTS {
-        for path in paths {
+    let paths = probe.effective_paths(backend);
+    for _ in 0..probe.max_attempts {
+        for path in &paths {
             let url = format!("{root}{path}");
             if let Ok(response) = client.get(&url).send().await {
                 if response.status().is_success() || response.status().is_redirection() {
@@ -1571,7 +1637,7 @@ async fn endpoint_ready(backend: &str, base_url: &str) -> bool {
                 }
             }
         }
-        sleep(Duration::from_millis(ENDPOINT_READY_INTERVAL_MS)).await;
+        sleep(Duration::from_millis(probe.interval_ms)).await;
     }
     false
 }

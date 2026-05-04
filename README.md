@@ -323,6 +323,63 @@ Agent 本地配置作为启动默认值；Server 下发配置优先。Agent hear
 
 运行环境检查、本地实例启动/停止/测试、模型路径验证和垃圾箱物理删除都通过 Agent 主动拉取任务实现。检查和启动/停止/测试动作必须是平台定义的受控动作；不接受前端传入任意命令，不通过 shell 拼接命令，检查超时必须可控。
 
+## 当前平台能力
+
+除上述 Stage 1/2/3A 范围外，以下能力已实现：
+
+### 本地实例可靠性
+
+- 启动前端口占用检查，被占用时返回明确中文原因。
+- 启动后按后端区分服务就绪探测路径，支持通过实例参数自定义探测次数、间隔和超时。
+- 就绪后额外验证进程存活，防止"进程存在但服务不可用"的假就绪。
+- 后台进程存活监控（3 秒周期），异常退出后通过心跳上报 `failed`。
+- 实例日志刷新：Web 点击刷新按钮通过 Agent 任务实时读取日志文件或内存缓冲区。
+- 实例操作（启动/停止/测试/检查）后原地更新状态，过渡态轮询直至终态。
+
+### 平台日志与审计
+
+- Server 和 Agent 各自写入受控日志文件，支持级别（error/warn/info/debug/trace）、轮转（按大小）和保留（按文件数/天数）策略。
+- 日志目录自动创建，路径白名单管控（仅 `server.log` / `agent.log` / `instance.log`）。
+- Web 前端未捕获异常和 API 请求失败自动上报 Server，统一查看。
+- 配置、模型、模型文件、运行环境、实例、垃圾箱等关键操作均记录审计事件，支持多维度筛选。
+
+### 状态检查与异常恢复
+
+- Agent 离线时，Web 状态检查返回明确提示（"Agent 离线，无法检查实例状态"），页面显示黄色 warning 标签和红色错误通知。
+- running 实例的 `last_error` 为空；仅 `failed`/`stopped` 状态保留失败原因。
+- Agent 重启后恢复 managed store 中持久化的受管进程记录（不扫描外部进程），逐条通过 `/proc/{pid}/stat` 的 start_time 校验后上报 Server。
+- Server 重启后状态从 SQLite 恢复；下一次 Agent 心跳触发 reconcile 同步实例状态。
+
+### Agent / Node 身份规则
+
+- name 全局唯一，hostname 全局唯一（数据库 UNIQUE 约束）。
+- same name + same hostname → 视为同节点重注册，复用 node_id，更新 token（幂等）。
+- same name + different hostname → 拒绝（400）。
+- different name + same hostname → 拒绝（400）。
+- 事务保证检查与写入原子性；并发冲突时自动重试复用已有记录。
+
+## 状态一致性设计要点
+
+- **Agent 主动连接**：Server 不直连 Agent；Agent 通过心跳上报状态，Server 不主动修改运行中实例。
+- **reconcile 而非直接判定**：Server 根据 Agent 上报的受管实例列表与 DB 对比，缺失的过渡态实例标记为 failed。
+- **last_error 语义**：仅表示错误或警告；running 状态下 `last_error` 为空，不写入成功/恢复类信息。
+- **Web 刷新策略**：操作后原地更新 + 过渡态轮询 + 组件挂载期间 15 秒轻量周期刷新（仅刷新存在活跃实例时）。
+- **恢复边界**：Agent 重启仅恢复 managed store 持久化的受管进程。外部手工启动/停止的进程不自动纳管或恢复。
+- **磁盘持久化**：SQLite WAL 模式，Server 重启后状态完整恢复。
+
+## 需真实环境手工验证
+
+以下场景的代码路径已由 92 项自动化测试覆盖，但完整端到端流程仍需在具备 GPU + llama-server + GGUF 模型的机器上验证：
+
+- 启动 Agent 和本地实例 → Web 显示 running。
+- 停止 Agent → 状态检查 → 红色错误 + yellow warning 标签 + 错误原因和检查时间。
+- 重启 Agent → 存活实例自动同步 running（last_error 清空），已退出实例纠正为 failed 并保留原因。
+- 手工 kill 受管进程 → Web 自动显示 failed。
+- 重启 Server → SQLite 状态恢复 → 下一次 Agent 心跳 reconcile 成功。
+- Agent token 过期重注册 → node_id 不变，实例 reconcile 正常。
+
+详见 `docs/LOCAL_TEST_ENV.md`。
+
 ## 当前未实现，未来可扩展
 
 - 真实 Docker 推理进程启动模板、进程守护和日志采集

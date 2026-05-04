@@ -133,7 +133,16 @@ async fn register_agent(
     State(pool): State<SqlitePool>,
     Json(request): Json<RegisterRequest>,
 ) -> Result<Json<crate::models::RegisterResponse>, ApiError> {
-    let response = repository::register_node(&pool, request).await?;
+    let response = match repository::register_node(&pool, request).await {
+        Ok(response) => response,
+        Err(error) => {
+            let msg = error.to_string();
+            if msg.contains("相同名称不允许") || msg.contains("相同主机不允许") {
+                return Err(ApiError::BadRequest(msg));
+            }
+            return Err(ApiError::Internal(error));
+        }
+    };
     let _ = crate::platform_log::append(
         &repository::server_log_policy(&pool)
             .await

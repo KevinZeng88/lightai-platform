@@ -46,8 +46,28 @@ async fn run_once(
 ) -> anyhow::Result<Option<AgentConfig>> {
     let client = ServerClient::new(config.server_url.clone());
     let mut next_config = None;
+    // 重启恢复边界：仅恢复 managed store 中持久化的受管进程记录。
+    // 不会扫描外部手工启动的进程，也不会恢复未持久化的内存注册表。
+    // 每条记录通过 /proc/{pid}/stat 的 start_time 校验，防止 PID 复用误判。
     let mut agent_state = match state::load(&config.state_path).await? {
-        Some(state) => state,
+        Some(state) => {
+            let store_path = managed_process::store_path_from_state_path(&config.state_path);
+            if let Ok(records) = managed_process::load(&store_path).await {
+                if !records.is_empty() {
+                    let _ = platform_log::append(
+                        &runtime_config.log_policy,
+                        "agent.log",
+                        "info",
+                        &format!(
+                            "Agent 重启后恢复受管进程记录 {} 条，将在心跳中上报状态",
+                            records.len()
+                        ),
+                    )
+                    .await;
+                }
+            }
+            state
+        }
         None => {
             let registered = register(&client, config).await?;
             next_config = Some(registered.agent_config.clone());
@@ -58,6 +78,38 @@ async fn run_once(
     let (gpus, collector_errors) = gpu::collect_gpus(&runtime_config.to_collector_config()).await;
     let managed_store_path = managed_process::store_path_from_state_path(&config.state_path);
     let managed_instances = managed_process::reports(Some(&managed_store_path)).await;
+    let running_count = managed_instances
+        .iter()
+        .filter(|r| r.status == "running")
+        .count();
+    let failed_count = managed_instances
+        .iter()
+        .filter(|r| r.status == "failed")
+        .count();
+    if running_count > 0 || failed_count > 0 {
+        let _ = platform_log::append(
+            &runtime_config.log_policy,
+            "agent.log",
+            "info",
+            &format!("Agent 上报受管实例：运行中 {running_count}，已退出 {failed_count}",),
+        )
+        .await;
+        if failed_count > 0 {
+            let failed_ids = managed_instances
+                .iter()
+                .filter(|r| r.status == "failed")
+                .map(|r| format!("{}（{}）", r.instance_id, r.message))
+                .collect::<Vec<_>>()
+                .join("，");
+            let _ = platform_log::append(
+                &runtime_config.log_policy,
+                "agent.log",
+                "warn",
+                &format!("受管实例进程已退出：{failed_ids}"),
+            )
+            .await;
+        }
+    }
     let request = HeartbeatRequest {
         node_id: agent_state.node_id.clone(),
         sampled_at: now_unix_secs(),
