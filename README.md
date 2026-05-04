@@ -75,8 +75,16 @@ Agent (GPU 节点) ──主动连接──> Server (中央控制面) <── We
 ```
 lightai-platform/
   server/src/
+    domain.rs          # 轻量 facade（43 行），re-export 业务模块
+    domain/
+      runtimes.rs        # 运行环境 CRUD + 检查
+      instances.rs       # 实例 CRUD + start/stop/test/check
+      model_catalog.rs   # 模型 CRUD
+      model_files.rs     # 模型文件 CRUD + 验证
+      model_trash.rs     # 模型文件垃圾箱 + 清理
+      instance_logs.rs   # 日志读取 + 错误摘要
+      support.rs         # 共享类型、验证函数、常量
     agent_tasks.rs     # Agent 任务生命周期（poll / record / timeout / notify）
-    domain.rs          # 业务逻辑聚合模块（约 2444 行，待继续拆分）
     repository.rs      # 数据库访问、节点注册、心跳、reconcile
     routes.rs          # HTTP API 路由
     models.rs          # 请求/响应类型
@@ -98,7 +106,7 @@ lightai-platform/
   docs/               # 文档
 ```
 
-> **当前重构状态**：`stage3a.rs` 已删除。`agent_tasks.rs` 已提取为独立模块。`domain.rs` 仍约 2444 行，聚合了运行环境、模型、模型文件、实例、垃圾箱、日志、验证等业务逻辑，后续需按业务域继续拆分。详见 `docs/REFACTOR_PLAN.md`。
+> **当前重构状态**：`stage3a.rs` 已删除。`agent_tasks.rs` 已提取为独立模块。`domain.rs` 已变为 43 行轻量 facade；业务逻辑已拆入 `domain/` 下 7 个业务域模块。后续计划拆 `agent/src/tasks.rs` 和整理 Web 组件。详见 `docs/REFACTOR_PLAN.md`。
 
 ## 启动
 

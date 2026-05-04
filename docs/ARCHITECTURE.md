@@ -18,7 +18,15 @@ lightai-platform/
     main.rs            # 启动入口
     lib.rs             # 模块声明
     routes.rs          # HTTP API 路由（~990 行）
-    domain.rs          # 业务逻辑聚合（~2444 行，待继续拆分）
+    domain.rs          # 轻量 facade（43 行），re-export 业务模块
+    domain/
+      runtimes.rs        # 运行环境 CRUD + 检查（402 行）
+      instances.rs       # 实例 CRUD + start/stop/test/check（682 行）
+      model_catalog.rs   # 模型 CRUD（246 行）
+      model_files.rs     # 模型文件 CRUD + 验证（426 行）
+      model_trash.rs     # 模型文件垃圾箱 + 清理（264 行）
+      instance_logs.rs   # 日志读取 + 错误摘要（253 行）
+      support.rs         # 共享类型（Stage3Error）、验证函数、常量（238 行）
     agent_tasks.rs     # Agent 任务生命周期（494 行）
     repository.rs      # 数据库访问、节点注册、心跳、reconcile（~1260 行）
     models.rs          # 请求/响应/视图类型
@@ -63,14 +71,21 @@ Agent 任务生命周期的**唯一实现**。包含：
 - `mark_timed_out_tasks` / `mark_task_timed_out` — 超时标记
 - `notify_agent_tasks` — 唤醒等待中的 Agent 长连接
 
-### server/src/domain.rs
+### server/src/domain.rs + server/src/domain/
 
-**临时聚合模块**，承载运行环境、模型、模型文件、实例、垃圾箱、日志、验证等全部业务逻辑。约 2444 行。后续需按业务域拆分（详见 `docs/REFACTOR_PLAN.md`）。
+`domain.rs` 已变为 43 行轻量 facade，仅含 `mod` 声明和 `pub use` re-export。业务逻辑已拆入 7 个子模块：
 
-当前 domain.rs 通过 re-export 保持与 routes.rs 的兼容：
-```rust
-pub use crate::agent_tasks::{notify_agent_tasks, poll_agent_task, record_agent_task_result};
-```
+| 模块 | 职责 | 行数 |
+|------|------|------|
+| `runtimes.rs` | 运行环境 CRUD、Agent 检查 | 402 |
+| `instances.rs` | 实例 CRUD、start/stop/test/check、任务创建 | 682 |
+| `model_catalog.rs` | 模型 CRUD | 246 |
+| `model_files.rs` | 模型文件 CRUD、验证、路径检查 | 426 |
+| `model_trash.rs` | 模型文件垃圾箱、清理 | 264 |
+| `instance_logs.rs` | 实例日志读取、刷新、错误摘要 | 253 |
+| `support.rs` | Stage3Error、验证函数、常量、guard helpers | 238 |
+
+routes.rs 继续通过 `domain::function()` 调用（由 facade re-export 透明转发）。
 
 ### server/src/repository.rs
 
