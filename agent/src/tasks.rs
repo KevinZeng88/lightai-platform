@@ -5,6 +5,7 @@ use std::sync::{Arc, OnceLock};
 
 use serde::Serialize;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
@@ -226,6 +227,15 @@ pub async fn run_once(
             };
             (status.to_string(), serde_json::to_value(result)?)
         }
+        "read_instance_log" => {
+            let result = read_instance_log(&task.payload, managed_store_path).await;
+            let status = if result.log_status == "available" {
+                "succeeded"
+            } else {
+                "failed"
+            };
+            (status.to_string(), serde_json::to_value(result)?)
+        }
         _ => (
             "failed".to_string(),
             serde_json::json!({
@@ -360,6 +370,9 @@ pub async fn start_model_instance_with_store(
         Ok(args) => args,
         Err(message) => return instance_failure(&message),
     };
+    if let Err(message) = check_port_available(&params.host, params.port).await {
+        return instance_failure(&message);
+    }
     let command_summary = command_summary(binary_path, &args);
     let mut command = Command::new(binary_path);
     command.args(&args);
@@ -437,8 +450,19 @@ pub async fn start_model_instance_with_store(
         }
     }
     let base_url = format!("http://{}:{}", params.host, params.port);
-    if !(backend == "custom" && deploy_type == "script") && !endpoint_ready(&base_url).await {
+    let service_ready = if backend == "custom" && deploy_type == "script" {
+        sleep(Duration::from_millis(CUSTOM_SCRIPT_STARTUP_WAIT_MS)).await;
+        match child.try_wait() {
+            Ok(Some(_status)) => false,
+            Ok(None) => true,
+            Err(_) => false,
+        }
+    } else {
+        endpoint_ready(backend, &base_url).await
+    };
+    if !service_ready {
         let _ = child.kill().await;
+        sleep(Duration::from_millis(POST_KILL_LOG_WAIT_MS)).await;
         let log_tail = log_tail(&log_buffer).await;
         let detail = first_log_line(log_tail.as_deref())
             .unwrap_or_else(|| "端口或健康接口未就绪".to_string());
@@ -447,6 +471,27 @@ pub async fn start_model_instance_with_store(
             log_tail,
             Some(command_summary),
         );
+    }
+    sleep(Duration::from_millis(POST_READINESS_VERIFY_DELAY_MS)).await;
+    match child.try_wait() {
+        Ok(Some(status)) => {
+            let log_tail = log_tail(&log_buffer).await;
+            let detail = first_log_line(log_tail.as_deref()).unwrap_or_else(|| status.to_string());
+            return instance_failure_with_details(
+                &format!("本地进程在服务就绪后异常退出：{detail}"),
+                log_tail,
+                Some(command_summary),
+            );
+        }
+        Ok(None) => {}
+        Err(error) => {
+            let _ = child.kill().await;
+            return instance_failure_with_details(
+                &format!("确认进程状态失败：{error}"),
+                log_tail(&log_buffer).await,
+                Some(command_summary),
+            );
+        }
     }
     let log_path_text = log_path
         .as_ref()
@@ -477,6 +522,10 @@ pub async fn start_model_instance_with_store(
             );
         }
     }
+    spawn_process_monitor(
+        instance_id.to_string(),
+        managed_store_path.map(Path::to_path_buf),
+    );
     process_registry().lock().await.insert(
         instance_id.to_string(),
         ProcessHandle {
@@ -871,6 +920,57 @@ struct ProcessHandle {
 fn process_registry() -> &'static Mutex<HashMap<String, ProcessHandle>> {
     static REGISTRY: OnceLock<Mutex<HashMap<String, ProcessHandle>>> = OnceLock::new();
     REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn spawn_process_monitor(instance_id: String, managed_store_path: Option<PathBuf>) {
+    tokio::spawn(async move {
+        loop {
+            sleep(Duration::from_secs(PROCESS_MONITOR_INTERVAL_SECS)).await;
+            let mut guard = process_registry().lock().await;
+            let Some(handle) = guard.get_mut(&instance_id) else {
+                return;
+            };
+            match handle.child.try_wait() {
+                Ok(Some(status)) => {
+                    let log_tail = {
+                        let buffer = handle.log_buffer.lock().await;
+                        buffer.trim().to_string()
+                    };
+                    tracing::warn!(
+                        instance_id = %instance_id,
+                        exit_status = %status,
+                        "managed process exited; removing from registry"
+                    );
+                    guard.remove(&instance_id);
+                    drop(guard);
+                    if let Some(ref store_path) = managed_store_path {
+                        if let Err(error) = managed_process::remove(store_path, &instance_id).await
+                        {
+                            tracing::warn!(%error, instance_id = %instance_id, "failed to remove managed record for exited process");
+                        }
+                    }
+                    let _ = platform_log::append(
+                        &LogPolicy::default(),
+                        "agent.log",
+                        "warn",
+                        &format!(
+                            "受管实例 {instance_id} 进程异常退出（{status}），最近日志：{}",
+                            &log_tail.chars().take(300).collect::<String>()
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, instance_id = %instance_id, "process try_wait error; removing from registry");
+                    guard.remove(&instance_id);
+                    return;
+                }
+            }
+            drop(guard);
+        }
+    });
 }
 
 async fn detect_entrypoint_version(path: &str) -> Option<String> {
@@ -1393,26 +1493,163 @@ fn now_unix_secs() -> i64 {
         .as_secs() as i64
 }
 
-async fn endpoint_ready(base_url: &str) -> bool {
+async fn check_port_available(host: &str, port: u16) -> Result<(), String> {
+    let addr = format!("{host}:{port}");
+    match TcpListener::bind(&addr).await {
+        Ok(listener) => {
+            drop(listener);
+            Ok(())
+        }
+        Err(error) => {
+            if error.kind() == std::io::ErrorKind::AddrInUse {
+                Err(format!("端口 {addr} 已被占用，无法启动实例"))
+            } else {
+                Err(format!("端口 {addr} 不可用：{error}"))
+            }
+        }
+    }
+}
+
+/// 就绪探测：每轮请求次数上限。
+/// 后续可进入 Agent 配置策略。
+const ENDPOINT_READY_MAX_ATTEMPTS: u32 = 20;
+
+/// 就绪探测：轮次间隔（毫秒）。
+/// 后续可进入 Agent 配置策略。
+const ENDPOINT_READY_INTERVAL_MS: u64 = 300;
+
+/// 就绪探测：单次 HTTP 请求超时（毫秒）。
+/// 后续可进入 Agent 配置策略。
+const ENDPOINT_READY_REQUEST_TIMEOUT_MS: u64 = 400;
+
+/// 后台进程监控：检查周期（秒）。
+/// 后续可进入 Agent 配置策略。
+const PROCESS_MONITOR_INTERVAL_SECS: u64 = 3;
+
+/// 启动后等待 custom+script 后端进程初始化的时间（毫秒）。
+const CUSTOM_SCRIPT_STARTUP_WAIT_MS: u64 = 500;
+
+/// 就绪探测通过后再次验证进程存活前的等待（毫秒）。
+const POST_READINESS_VERIFY_DELAY_MS: u64 = 300;
+
+/// 探测失败 kill 进程后等待日志收集的缓冲时间（毫秒）。
+const POST_KILL_LOG_WAIT_MS: u64 = 200;
+
+/// 返回 backend 对应的就绪探测路径（优先级从高到低）。
+/// 与 build_test_urls 保持一致的路径策略。
+fn probe_paths(backend: &str) -> &'static [&'static str] {
+    match backend {
+        "llama_cpp" | "vllm" | "ollama" => &["/v1/models", "/health", "/"],
+        _ => &["/health", "/v1/models", "/"],
+    }
+}
+
+async fn endpoint_ready(backend: &str, base_url: &str) -> bool {
     let client = match reqwest::Client::builder()
-        .timeout(Duration::from_millis(600))
+        .timeout(Duration::from_millis(ENDPOINT_READY_REQUEST_TIMEOUT_MS))
         .build()
     {
         Ok(client) => client,
         Err(_) => return false,
     };
-    for _ in 0..10 {
-        for path in ["/health", "/v1/models", "/"] {
-            let url = format!("{}{}", base_url.trim_end_matches('/'), path);
+    let root = base_url.trim_end_matches('/');
+    let paths = probe_paths(backend);
+    for _ in 0..ENDPOINT_READY_MAX_ATTEMPTS {
+        for path in paths {
+            let url = format!("{root}{path}");
             if let Ok(response) = client.get(&url).send().await {
                 if response.status().is_success() || response.status().is_redirection() {
                     return true;
                 }
             }
         }
-        sleep(Duration::from_millis(400)).await;
+        sleep(Duration::from_millis(ENDPOINT_READY_INTERVAL_MS)).await;
     }
     false
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ReadInstanceLogResult {
+    log_status: String,
+    content: String,
+    message: String,
+}
+
+async fn read_instance_log(
+    payload: &serde_json::Value,
+    managed_store_path: Option<&Path>,
+) -> ReadInstanceLogResult {
+    let instance_id = payload
+        .get("instance_id")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+    let max_bytes = payload
+        .get("max_bytes")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(64 * 1024)
+        .min(512 * 1024) as usize;
+
+    if let Some(handle) = process_registry().lock().await.get(instance_id) {
+        let log_text = handle.log_buffer.lock().await.clone();
+        let tail = tail_bytes(&log_text, max_bytes);
+        if tail.trim().is_empty() {
+            return ReadInstanceLogResult {
+                log_status: "available".to_string(),
+                content: "实例进程正在运行，暂无日志输出".to_string(),
+                message: "从内存缓冲区读取".to_string(),
+            };
+        }
+        return ReadInstanceLogResult {
+            log_status: "available".to_string(),
+            content: tail,
+            message: "从内存缓冲区读取".to_string(),
+        };
+    }
+
+    if let Some(store_path) = managed_store_path {
+        if let Ok(Some(record)) = managed_process::find(store_path, instance_id).await {
+            if let Some(ref log_path) = record.log_path {
+                match tokio::fs::read_to_string(log_path).await {
+                    Ok(content) => {
+                        let tail = tail_bytes(&content, max_bytes);
+                        if tail.trim().is_empty() {
+                            return ReadInstanceLogResult {
+                                log_status: "available".to_string(),
+                                content: "日志文件为空".to_string(),
+                                message: format!("从日志文件 {} 读取", log_path),
+                            };
+                        }
+                        return ReadInstanceLogResult {
+                            log_status: "available".to_string(),
+                            content: sanitize_log(&tail),
+                            message: format!("从日志文件 {} 读取", log_path),
+                        };
+                    }
+                    Err(error) => {
+                        return ReadInstanceLogResult {
+                            log_status: "failed".to_string(),
+                            content: String::new(),
+                            message: format!("读取实例日志文件失败：{error}"),
+                        };
+                    }
+                }
+            }
+        }
+    }
+
+    ReadInstanceLogResult {
+        log_status: "failed".to_string(),
+        content: String::new(),
+        message: "未找到实例日志；实例可能已停止或 Agent 已重启".to_string(),
+    }
+}
+
+fn tail_bytes(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let start = text.len() - max_bytes;
+    text[start..].to_string()
 }
 
 fn parse_version_line(line: &str) -> Option<String> {
