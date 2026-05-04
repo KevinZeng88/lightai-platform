@@ -5,6 +5,7 @@ use axum::{routing::delete, routing::get, routing::post, Json, Router};
 use serde::Serialize;
 use sqlx::SqlitePool;
 
+use crate::domain;
 use crate::models::{
     AgentConfigPolicy, AgentTaskPollRequest, AgentTaskResultRequest, AuditQuery,
     FrontendErrorReport, GpuMetricsQuery, HeartbeatRequest, HeartbeatResponse, LogQuery,
@@ -13,7 +14,6 @@ use crate::models::{
 };
 use crate::platform_log::LogPolicy;
 use crate::repository;
-use crate::stage3a;
 
 #[derive(Debug, Serialize)]
 struct HealthResponse {
@@ -207,7 +207,7 @@ async fn read_logs(
                 source_type: "agent".to_string(),
                 node_id: Some(node_id.to_string()),
                 instance_id: None,
-                content: stage3a::read_agent_log(&pool, node_id, max_bytes).await?,
+                content: domain::read_agent_log(&pool, node_id, max_bytes).await?,
                 message: Some("Agent 日志读取成功".to_string()),
             }))
         }
@@ -216,7 +216,7 @@ async fn read_logs(
                 .instance_id
                 .as_deref()
                 .ok_or_else(|| ApiError::BadRequest("查看实例日志必须选择实例".to_string()))?;
-            let instance = stage3a::model_instance(&pool, instance_id).await?;
+            let instance = domain::model_instance(&pool, instance_id).await?;
             Ok(Json(crate::models::LogResponse {
                 source_type: "instance".to_string(),
                 node_id: instance.node_id,
@@ -232,14 +232,14 @@ async fn read_logs(
             source_type: "errors".to_string(),
             node_id: None,
             instance_id: None,
-            content: stage3a::recent_error_summary(&pool).await?,
+            content: domain::recent_error_summary(&pool).await?,
             message: Some("最近错误摘要读取成功".to_string()),
         })),
         "frontend" => Ok(Json(crate::models::LogResponse {
             source_type: "frontend".to_string(),
             node_id: None,
             instance_id: None,
-            content: stage3a::frontend_error_summary(&pool).await?,
+            content: domain::frontend_error_summary(&pool).await?,
             message: Some("前端错误日志读取成功".to_string()),
         })),
         _ => Err(ApiError::BadRequest("日志类型不受支持".to_string())),
@@ -302,7 +302,7 @@ async fn update_global_agent_config_policy(
         None,
     )
     .await;
-    stage3a::notify_agent_tasks();
+    domain::notify_agent_tasks();
     Ok(Json(view))
 }
 
@@ -330,7 +330,7 @@ async fn update_node_agent_config_policy(
         None,
     )
     .await;
-    stage3a::notify_agent_tasks();
+    domain::notify_agent_tasks();
     Ok(Json(view))
 }
 
@@ -373,7 +373,7 @@ async fn gpu_metrics_by_query(
 async fn list_runtime_environments(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<crate::models::RuntimeEnvironmentListResponse>, ApiError> {
-    Ok(Json(stage3a::list_runtime_environments(&pool, None).await?))
+    Ok(Json(domain::list_runtime_environments(&pool, None).await?))
 }
 
 async fn list_node_runtime_environments(
@@ -381,7 +381,7 @@ async fn list_node_runtime_environments(
     Path(node_id): Path<String>,
 ) -> Result<Json<crate::models::RuntimeEnvironmentListResponse>, ApiError> {
     Ok(Json(
-        stage3a::list_runtime_environments(&pool, Some(&node_id)).await?,
+        domain::list_runtime_environments(&pool, Some(&node_id)).await?,
     ))
 }
 
@@ -390,7 +390,7 @@ async fn create_runtime_environment(
     Path(node_id): Path<String>,
     Json(request): Json<RuntimeEnvironmentRequest>,
 ) -> Result<Json<crate::models::RuntimeEnvironmentView>, ApiError> {
-    let view = stage3a::create_runtime_environment(&pool, &node_id, request).await?;
+    let view = domain::create_runtime_environment(&pool, &node_id, request).await?;
     audit_success(
         &pool,
         "runtime.create",
@@ -407,7 +407,7 @@ async fn get_runtime_environment(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::RuntimeEnvironmentView>, ApiError> {
-    Ok(Json(stage3a::runtime_environment(&pool, &id).await?))
+    Ok(Json(domain::runtime_environment(&pool, &id).await?))
 }
 
 async fn update_runtime_environment(
@@ -415,7 +415,7 @@ async fn update_runtime_environment(
     Path(id): Path<String>,
     Json(request): Json<RuntimeEnvironmentRequest>,
 ) -> Result<Json<crate::models::RuntimeEnvironmentView>, ApiError> {
-    let view = stage3a::update_runtime_environment(&pool, &id, request).await?;
+    let view = domain::update_runtime_environment(&pool, &id, request).await?;
     audit_success(
         &pool,
         "runtime.update",
@@ -432,7 +432,7 @@ async fn delete_runtime_environment(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    stage3a::delete_runtime_environment(&pool, &id).await?;
+    domain::delete_runtime_environment(&pool, &id).await?;
     audit_success(
         &pool,
         "runtime.delete",
@@ -449,20 +449,20 @@ async fn check_runtime_environment(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::RuntimeEnvironmentView>, ApiError> {
-    Ok(Json(stage3a::check_runtime_environment(&pool, &id).await?))
+    Ok(Json(domain::check_runtime_environment(&pool, &id).await?))
 }
 
 async fn list_models(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<crate::models::ModelListResponse>, ApiError> {
-    Ok(Json(stage3a::list_models(&pool).await?))
+    Ok(Json(domain::list_models(&pool).await?))
 }
 
 async fn create_model(
     State(pool): State<SqlitePool>,
     Json(request): Json<ModelRequest>,
 ) -> Result<Json<crate::models::ModelView>, ApiError> {
-    let view = stage3a::create_model(&pool, request).await?;
+    let view = domain::create_model(&pool, request).await?;
     audit_success(&pool, "model.create", "model", Some(&view.id), None, None).await;
     Ok(Json(view))
 }
@@ -471,7 +471,7 @@ async fn get_model(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelView>, ApiError> {
-    Ok(Json(stage3a::model(&pool, &id).await?))
+    Ok(Json(domain::model(&pool, &id).await?))
 }
 
 async fn update_model(
@@ -479,7 +479,7 @@ async fn update_model(
     Path(id): Path<String>,
     Json(request): Json<ModelRequest>,
 ) -> Result<Json<crate::models::ModelView>, ApiError> {
-    let view = stage3a::update_model(&pool, &id, request).await?;
+    let view = domain::update_model(&pool, &id, request).await?;
     audit_success(&pool, "model.update", "model", Some(&id), None, None).await;
     Ok(Json(view))
 }
@@ -488,7 +488,7 @@ async fn delete_model(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    stage3a::delete_model(&pool, &id).await?;
+    domain::delete_model(&pool, &id).await?;
     audit_success(&pool, "model.delete", "model", Some(&id), None, None).await;
     Ok(StatusCode::OK)
 }
@@ -497,7 +497,7 @@ async fn list_model_files(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelFileListResponse>, ApiError> {
-    Ok(Json(stage3a::list_model_files(&pool, &id).await?))
+    Ok(Json(domain::list_model_files(&pool, &id).await?))
 }
 
 async fn create_model_file(
@@ -505,7 +505,7 @@ async fn create_model_file(
     Path(id): Path<String>,
     Json(request): Json<ModelFileRequest>,
 ) -> Result<Json<crate::models::ModelFileView>, ApiError> {
-    let view = stage3a::create_model_file(&pool, &id, request).await?;
+    let view = domain::create_model_file(&pool, &id, request).await?;
     audit_success(
         &pool,
         "model_file.create",
@@ -522,7 +522,7 @@ async fn get_model_file(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelFileView>, ApiError> {
-    Ok(Json(stage3a::model_file(&pool, &id).await?))
+    Ok(Json(domain::model_file(&pool, &id).await?))
 }
 
 async fn update_model_file(
@@ -530,7 +530,7 @@ async fn update_model_file(
     Path(id): Path<String>,
     Json(request): Json<ModelFileRequest>,
 ) -> Result<Json<crate::models::ModelFileView>, ApiError> {
-    let view = stage3a::update_model_file(&pool, &id, request).await?;
+    let view = domain::update_model_file(&pool, &id, request).await?;
     audit_success(
         &pool,
         "model_file.update",
@@ -547,7 +547,7 @@ async fn delete_model_file(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    stage3a::delete_model_file(&pool, &id).await?;
+    domain::delete_model_file(&pool, &id).await?;
     audit_success(
         &pool,
         "model_file.delete",
@@ -564,7 +564,7 @@ async fn verify_model_file(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelFileView>, ApiError> {
-    let view = stage3a::queue_model_file_verification(&pool, &id).await?;
+    let view = domain::queue_model_file_verification(&pool, &id).await?;
     audit_success(
         &pool,
         "model_file.verify",
@@ -580,14 +580,14 @@ async fn verify_model_file(
 async fn list_model_instances(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<crate::models::ModelInstanceListResponse>, ApiError> {
-    Ok(Json(stage3a::list_model_instances(&pool).await?))
+    Ok(Json(domain::list_model_instances(&pool).await?))
 }
 
 async fn create_model_instance(
     State(pool): State<SqlitePool>,
     Json(request): Json<ModelInstanceCreateRequest>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
-    let view = stage3a::create_model_instance(&pool, request).await?;
+    let view = domain::create_model_instance(&pool, request).await?;
     audit_success(
         &pool,
         "instance.create",
@@ -604,7 +604,7 @@ async fn get_model_instance(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
-    Ok(Json(stage3a::model_instance(&pool, &id).await?))
+    Ok(Json(domain::model_instance(&pool, &id).await?))
 }
 
 async fn update_model_instance(
@@ -612,7 +612,7 @@ async fn update_model_instance(
     Path(id): Path<String>,
     Json(request): Json<ModelInstanceUpdateRequest>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
-    let view = stage3a::update_model_instance(&pool, &id, request).await?;
+    let view = domain::update_model_instance(&pool, &id, request).await?;
     audit_success(
         &pool,
         "instance.update",
@@ -629,7 +629,7 @@ async fn delete_model_instance(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    stage3a::delete_model_instance(&pool, &id).await?;
+    domain::delete_model_instance(&pool, &id).await?;
     audit_success(
         &pool,
         "instance.delete",
@@ -646,7 +646,7 @@ async fn check_model_instance(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
-    let view = stage3a::check_model_instance(&pool, &id).await?;
+    let view = domain::check_model_instance(&pool, &id).await?;
     audit_success(
         &pool,
         "instance.check",
@@ -663,7 +663,7 @@ async fn start_model_instance(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
-    let view = stage3a::start_model_instance(&pool, &id).await?;
+    let view = domain::start_model_instance(&pool, &id).await?;
     audit_success(
         &pool,
         "instance.start",
@@ -680,7 +680,7 @@ async fn stop_model_instance(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
-    let view = stage3a::stop_model_instance(&pool, &id).await?;
+    let view = domain::stop_model_instance(&pool, &id).await?;
     audit_success(
         &pool,
         "instance.stop",
@@ -697,7 +697,7 @@ async fn test_model_instance(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
-    let view = stage3a::test_model_instance(&pool, &id).await?;
+    let view = domain::test_model_instance(&pool, &id).await?;
     audit_success(
         &pool,
         "instance.test",
@@ -714,8 +714,8 @@ async fn refresh_instance_logs(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::LogResponse>, ApiError> {
-    let content = stage3a::refresh_instance_logs(&pool, &id).await?;
-    let instance = stage3a::model_instance(&pool, &id).await?;
+    let content = domain::refresh_instance_logs(&pool, &id).await?;
+    let instance = domain::model_instance(&pool, &id).await?;
     Ok(Json(crate::models::LogResponse {
         source_type: "instance".to_string(),
         node_id: instance.node_id.clone(),
@@ -756,7 +756,7 @@ async fn report_frontend_error(
 async fn list_model_file_trash(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<crate::models::ModelFileTrashListResponse>, ApiError> {
-    Ok(Json(stage3a::list_model_file_trash(&pool).await?))
+    Ok(Json(domain::list_model_file_trash(&pool).await?))
 }
 
 async fn create_model_file_trash(
@@ -764,7 +764,7 @@ async fn create_model_file_trash(
     Path(id): Path<String>,
     Json(request): Json<ModelFileTrashRequest>,
 ) -> Result<Json<crate::models::ModelFileTrashView>, ApiError> {
-    let view = stage3a::create_model_file_trash(&pool, &id, request).await?;
+    let view = domain::create_model_file_trash(&pool, &id, request).await?;
     audit_success(
         &pool,
         "trash.create",
@@ -781,7 +781,7 @@ async fn cleanup_model_file_trash(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelFileTrashView>, ApiError> {
-    let view = stage3a::cleanup_model_file_trash(&pool, &id).await?;
+    let view = domain::cleanup_model_file_trash(&pool, &id).await?;
     audit_success(
         &pool,
         "trash.cleanup",
@@ -798,7 +798,7 @@ async fn delete_model_file_trash(
     State(pool): State<SqlitePool>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    stage3a::delete_model_file_trash(&pool, &id).await?;
+    domain::delete_model_file_trash(&pool, &id).await?;
     audit_success(
         &pool,
         "trash.delete_record",
@@ -821,7 +821,7 @@ async fn agent_task_poll(
         return Err(ApiError::Unauthorized);
     }
     Ok(Json(
-        stage3a::poll_agent_task(&pool, &request.node_id, request.current_config_version).await?,
+        domain::poll_agent_task(&pool, &request.node_id, request.current_config_version).await?,
     ))
 }
 
@@ -835,7 +835,7 @@ async fn agent_task_result(
     if !repository::authenticate_node(&pool, &request.node_id, token).await? {
         return Err(ApiError::Unauthorized);
     }
-    stage3a::record_agent_task_result(&pool, &id, request).await?;
+    domain::record_agent_task_result(&pool, &id, request).await?;
     Ok(StatusCode::OK)
 }
 
@@ -902,13 +902,13 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-impl From<stage3a::Stage3Error> for ApiError {
-    fn from(error: stage3a::Stage3Error) -> Self {
+impl From<domain::Stage3Error> for ApiError {
+    fn from(error: domain::Stage3Error) -> Self {
         match error {
-            stage3a::Stage3Error::BadRequest(message) => Self::BadRequest(message),
-            stage3a::Stage3Error::NotFound(message) => Self::NotFound(message),
-            stage3a::Stage3Error::Conflict(message) => Self::Conflict(message),
-            stage3a::Stage3Error::Internal(error) => Self::Internal(error),
+            domain::Stage3Error::BadRequest(message) => Self::BadRequest(message),
+            domain::Stage3Error::NotFound(message) => Self::NotFound(message),
+            domain::Stage3Error::Conflict(message) => Self::Conflict(message),
+            domain::Stage3Error::Internal(error) => Self::Internal(error),
         }
     }
 }
