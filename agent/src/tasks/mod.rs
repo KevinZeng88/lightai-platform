@@ -10,6 +10,7 @@ mod cleanup;
 mod logs;
 mod probe;
 mod process;
+mod process_command;
 mod verify_model;
 
 use crate::client::ServerClient;
