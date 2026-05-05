@@ -91,12 +91,20 @@ lightai-platform/
     db.rs              # SQLite 迁移与 schema
     ...
   agent/src/
-    tasks.rs           # Agent 侧任务执行（实例启停、文件验证等）
+    tasks/
+      mod.rs              # facade：re-export + run/run_once 调度 + 共享类型与 helper
+      process.rs          # 实例启停（start/stop）、受管进程监控、日志缓冲
+      probe.rs            # 就绪探测配置、测试 URL 构建、失败摘要
+      verify_model.rs     # 模型文件验证
+      cleanup.rs          # 受控模型文件清理
+      logs.rs             # 实例日志读取
     managed_process.rs # 受管进程持久化与恢复
     heartbeat.rs       # 心跳与指标上报
     platform_log.rs    # 日志写入与脱敏
     ...
   web/src/
+    utils/
+      instance.ts         # 共享状态/标签/格式化 helper
     components/
       InstancesPanel.vue # 实例管理 UI
       LogsAuditPanel.vue # 日志与审计 UI
@@ -106,7 +114,7 @@ lightai-platform/
   docs/               # 文档
 ```
 
-> **当前重构状态**：`stage3a.rs` 已删除。`agent_tasks.rs` 已提取为独立模块。`domain.rs` 已变为 43 行轻量 facade；业务逻辑已拆入 `domain/` 下 7 个业务域模块。后续计划拆 `agent/src/tasks.rs` 和整理 Web 组件。详见 `docs/REFACTOR_PLAN.md`。
+> **当前重构状态**：`stage3a.rs` 已删除。`agent_tasks.rs` 已提取为独立模块。`domain.rs` 已变为 43 行轻量 facade；业务逻辑已拆入 `domain/` 下 7 个业务域模块。`agent/src/tasks.rs` 已拆为 `tasks/` 目录下的 6 个子模块。`server/tests/stage3a_api.rs` 已重命名为 `instance_lifecycle_api.rs`。`InstancesPanel.vue` 已提取 `web/src/utils/instance.ts` 公共 helper。剩余大文件：`repository.rs`（1255 行）、`routes.rs`（981 行）、`instance_lifecycle_api.rs`（2805 行）。详见 `docs/REFACTOR_PLAN.md`。
 
 ## 启动
 

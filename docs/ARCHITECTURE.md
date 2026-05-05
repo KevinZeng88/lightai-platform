@@ -39,7 +39,13 @@ lightai-platform/
 
   agent/src/
     main.rs            # 启动入口
-    tasks.rs           # 任务执行（实例启停、文件验证、环境检查等，~1750 行）
+    tasks/
+      mod.rs              # facade：re-export + run/run_once 调度 + 共享类型与 helper（535 行）
+      process.rs          # 实例启停（start/stop）、受管进程监控、日志缓冲
+      probe.rs            # 就绪探测配置、测试 URL 构建、失败摘要
+      verify_model.rs     # 模型文件验证
+      cleanup.rs          # 受控模型文件清理
+      logs.rs             # 实例日志读取
     heartbeat.rs       # 心跳、指标采集、配置同步
     managed_process.rs # 受管进程持久化记录与恢复
     platform_log.rs    # 日志写入/读取/脱敏/轮转
@@ -51,10 +57,12 @@ lightai-platform/
     metrics.rs         # CPU/内存/磁盘指标采集
 
   web/src/
+    utils/
+      instance.ts         # 共享状态/标签/格式化 helper（61 行）
     main.ts            # Vue 应用入口，全局错误捕获
     api.ts             # Server API 客户端
     components/
-      InstancesPanel.vue   # 实例管理（~680 行）
+      InstancesPanel.vue   # 实例管理（616 行，已提取 utils/instance.ts）
       LogsAuditPanel.vue   # 日志与审计
       NodesPanel.vue       # 节点监控
       ModelsPanel.vue      # 模型管理
@@ -100,7 +108,7 @@ routes.rs 继续通过 `domain::function()` 调用（由 facade re-export 透明
 
 Axum HTTP 路由定义和请求处理器。所有 handler 委托给 `domain::` 或 `repository::` 的具体函数。
 
-### agent/src/tasks.rs
+### agent/src/tasks/mod.rs + agent/src/tasks/ 子模块
 
 Agent 侧任务执行。包含：
 - `start_model_instance_with_store` — 启动本地实例

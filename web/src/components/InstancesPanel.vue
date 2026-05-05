@@ -236,6 +236,7 @@ import {
   updateModelInstance
 } from '../api'
 import type { ModelDefinition, ModelFile, ModelInstance, NodeStatus, RuntimeEnvironment } from '../types'
+import { backendLabel, checkFailedReason, deployTypeLabel, emptyToNull, formatTime, runtimeDeployTypeLabel, statusLabel, statusType } from '../utils/instance'
 
 const backends = ['ollama', 'llama_cpp', 'vllm', 'custom']
 const models = ref<ModelDefinition[]>([])
@@ -430,14 +431,6 @@ async function pollInstanceUntilStable(id: string, initialStatus: string) {
   ElMessage.warning('等待实例状态超时（36 秒），请手动刷新查看结果')
 }
 
-/// 基于 last_error 文案关键词判断检查是否实际失败。
-/// 当前为轻量实现，后续建议 Server 返回结构化字段（agent_reachable / check_ok / check_failed_reason）
-/// 替代前端依赖错误文案关键词的方案。
-function checkFailedReason(error?: string | null): boolean {
-  if (!error) return false
-  return ['离线', '无法检查', '不可用', '超时', '失败'].some((kw) => error.includes(kw))
-}
-
 async function check(row: ModelInstance) {
   try {
     const checked = await checkModelInstance(row.id)
@@ -532,56 +525,6 @@ async function remove(row: ModelInstance) {
   await loadData()
 }
 
-function statusType(row: ModelInstance) {
-  if (row.status === 'running') {
-    if (checkFailedReason(row.last_error)) return 'warning'
-    return 'success'
-  }
-  if (row.status === 'failed') return 'danger'
-  if (row.status === 'pending' || row.status === 'starting') return 'warning'
-  return 'info'
-}
-
-function statusLabel(status: string) {
-  const labels: Record<string, string> = {
-    pending: '待处理',
-    starting: '启动中',
-    running: '运行中',
-    stopping: '停止中',
-    stopped: '已停止',
-    failed: '失败',
-    unknown: '未知'
-  }
-  return labels[status] ?? status
-}
-
-function deployTypeLabel(value: string) {
-  if (value === 'external') return '外部服务'
-  if (value === 'local') return '本地实例'
-  return value
-}
-
-function runtimeDeployTypeLabel(value: string) {
-  if (value === 'binary') return '程序'
-  if (value === 'script') return '脚本'
-  if (value === 'docker') return '容器'
-  return value
-}
-
-function backendLabel(value: string) {
-  const labels: Record<string, string> = {
-    ollama: 'Ollama',
-    llama_cpp: 'llama.cpp',
-    vllm: 'vLLM',
-    custom: '自定义'
-  }
-  return labels[value] ?? value
-}
-
-function emptyToNull(value: string) {
-  return value.trim() ? value.trim() : null
-}
-
 function localParams() {
   const probePaths = form.value.probe_paths_text
     .split('\n')
@@ -633,11 +576,6 @@ function parseParams(value?: string | null) {
       probe_timeout_ms: 400
     }
   }
-}
-
-function formatTime(value?: number | null) {
-  if (!value) return '-'
-  return new Date(value * 1000).toLocaleString()
 }
 
 let periodicTimer: ReturnType<typeof setInterval> | null = null

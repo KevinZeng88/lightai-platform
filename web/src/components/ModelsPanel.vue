@@ -189,6 +189,7 @@ import {
   verifyModelFile
 } from '../api'
 import type { ModelDefinition, ModelFile, NodeStatus } from '../types'
+import { emptyToNull, formatTime } from '../utils/instance'
 
 const modelTypes = ['llm', 'embedding', 'rerank', 'vlm', 'asr', 'tts', 'other']
 const backends = ['vllm', 'ollama', 'lmdeploy', 'mindie', 'llama_cpp', 'triton', 'custom']
@@ -528,21 +529,12 @@ function toBusinessMessage(err: unknown) {
   return message
 }
 
-function emptyToNull(value: string) {
-  return value.trim() ? value.trim() : null
-}
-
 function formatBytes(value?: number | null) {
   if (value == null) return '-'
   if (value < 1024) return `${value} B`
   if (value < 1024 * 1024) return `${(value / 1024).toFixed(1)} KiB`
   if (value < 1024 * 1024 * 1024) return `${(value / 1024 / 1024).toFixed(1)} MiB`
   return `${(value / 1024 / 1024 / 1024).toFixed(1)} GiB`
-}
-
-function formatTime(value?: number | null) {
-  if (!value) return '-'
-  return new Date(value * 1000).toLocaleString()
 }
 
 onMounted(loadData)

@@ -28,36 +28,41 @@ routes.rs 继续通过 `domain::function()` 透明调用各子模块。
 
 Agent 任务生命周期（poll / record / timeout / notify）的唯一实现已独立为 `agent_tasks.rs`（494 行）。domain 模块通过 re-export 保持兼容。
 
-## 后续计划
+## 后续计划（已执行）
 
-### 1. agent/src/tasks.rs 拆分（建议优先）
+### ✅ 1. agent/src/tasks.rs 拆分（已完成）
 
-当前约 1750 行，混合了实例启停、模型验证、文件清理、日志读取、启动参数构建等多种逻辑。
+原 1749 行已拆为 `agent/src/tasks/` 目录：
 
-建议按功能拆分为：
-- `agent/src/tasks/start_instance.rs`
-- `agent/src/tasks/verify_model.rs`
-- `agent/src/tasks/cleanup.rs`
-- `agent/src/tasks/logs.rs`
-- `agent/src/tasks/params.rs`（InstanceLaunchParams、ProbeConfig 等）
+| 模块 | 职责 |
+|------|------|
+| `tasks/mod.rs` | facade：module 声明 + re-export + run/run_once 调度 + 共享类型 + helper（535 行） |
+| `tasks/probe.rs` | 就绪探测配置、测试 URL 构建、失败摘要 |
+| `tasks/process.rs` | 实例启停、进程管理、监控、日志缓冲 |
+| `tasks/verify_model.rs` | 模型文件验证 |
+| `tasks/cleanup.rs` | 受控模型文件清理 |
+| `tasks/logs.rs` | 实例日志读取 |
 
-严格边界同 domain 拆分（不改 API/行为/前端/DB，只移动完整 item，每轮一个模块，每轮完整检查）。
+### ✅ 2. server/tests/stage3a_api.rs 整理（已完成）
 
-### 2. server/tests/stage3a_api.rs 整理
+- 重命名为 `tests/instance_lifecycle_api.rs`（2805 行，去掉 stage3a 代号）
+- 测试覆盖未减少（仍 49 项测试全部通过）
 
-- 重命名为 `instance_lifecycle_api.rs` 或按测试域拆分
-- 补充 Web 层关键逻辑的单元测试（checkFailedReason、statusType 等）
+### ✅ 3. web/src/components/InstancesPanel.vue 整理（已完成）
 
-### 3. web/src/components/InstancesPanel.vue 整理
+- 原 ~678 行 → 616 行
+- 提取 `web/src/utils/instance.ts`（61 行）：statusType / statusLabel / deployTypeLabel / runtimeDeployTypeLabel / backendLabel / checkFailedReason / formatTime / emptyToNull
+- ModelsPanel.vue 也已统一使用 `utils/instance.ts` 的 `emptyToNull` / `formatTime`
 
-当前约 680 行，可提取 composables：
-- `useInstanceForm.ts`
-- `useInstanceOperations.ts`
-- `useProbeConfig.ts`
+### ⏭️ 4. server/src/repository.rs / routes.rs（跳过后继续）
 
-### 4. server/src/repository.rs / routes.rs（低优先级）
+repository.rs（1255 行）、routes.rs（981 行）功能稳定，非紧急，本轮跳过。
 
-repository.rs 约 1260 行，routes.rs 约 990 行。功能稳定，接口明确。可后续拆分，非紧急。
+## 剩余 TODO
+
+- `tests/instance_lifecycle_api.rs` 仍 2805 行，可后续按测试域拆分
+- `repository.rs` / `routes.rs` 后续可拆分
+- 未引入新依赖、未改 API/DB/行为
 
 ## 每轮验收标准
 
