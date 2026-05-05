@@ -26,10 +26,25 @@ pub async fn check_runtime_environment(
             if image.trim().is_empty() || image.chars().any(char::is_whitespace) {
                 return runtime_unavailable("Docker 镜像配置非法");
             }
+            let inspect_ok = check_docker_image_exists(image).await;
+            if !inspect_ok {
+                return RuntimeEnvironmentCheckResult {
+                    check_status: "available".to_string(),
+                    version: None,
+                    message: "Docker 镜像配置已通过基础校验；镜像本地不存在，启动时需拉取"
+                        .to_string(),
+                };
+            }
+            let version = detect_docker_image_version(image).await;
+            let has_version = version.is_some();
             RuntimeEnvironmentCheckResult {
                 check_status: "available".to_string(),
-                version: None,
-                message: "Docker 镜像配置已通过基础校验，版本无法自动获取".to_string(),
+                version,
+                message: if has_version {
+                    "Docker 镜像存在且基础校验通过".to_string()
+                } else {
+                    "Docker 镜像基础校验通过；版本无法自动获取，可在真实启动时验证".to_string()
+                },
             }
         }
         "script" | "binary" => {
@@ -173,4 +188,52 @@ fn parse_version_line(line: &str) -> Option<String> {
     } else {
         None
     }
+}
+
+async fn check_docker_image_exists(image: &str) -> bool {
+    let output = timeout(
+        Duration::from_secs(5),
+        Command::new("docker")
+            .args(["image", "inspect", image])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await;
+    match output {
+        Ok(Ok(output)) => output.status.success(),
+        _ => false,
+    }
+}
+
+async fn detect_docker_image_version(image: &str) -> Option<String> {
+    let output = timeout(
+        Duration::from_secs(10),
+        Command::new("docker")
+            .args([
+                "run",
+                "--rm",
+                "--entrypoint",
+                "python",
+                image,
+                "-c",
+                "import importlib; m = importlib.util.find_spec('vllm'); print(m and __import__('vllm').__version__)",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .ok()?
+    .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(|v| v.chars().take(120).collect())
 }

@@ -25,7 +25,7 @@ async fn reports_missing_model_file() {
 
     assert_eq!(result.file_status, "missing");
     assert_eq!(result.size_bytes, None);
-    assert_eq!(result.message, "文件不存在");
+    assert_eq!(result.message, "路径不存在");
 }
 
 #[tokio::test]

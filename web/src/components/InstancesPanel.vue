@@ -119,7 +119,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="运行环境">
-          <el-select v-model="form.runtime_environment_id" filterable>
+          <el-select v-model="form.runtime_environment_id" filterable @change="onRuntimeChange">
             <el-option
               v-for="env in localRuntimeOptions"
               :key="env.id"
@@ -129,7 +129,7 @@
           </el-select>
         </el-form-item>
         <el-form-item label="模型文件">
-          <el-select v-model="form.model_file_id" filterable>
+          <el-select v-model="form.model_file_id" filterable @change="onModelChange">
             <el-option
               v-for="file in localFileOptions"
               :key="file.id"
@@ -138,63 +138,130 @@
             />
           </el-select>
         </el-form-item>
-        <el-divider content-position="left">运行参数</el-divider>
-        <el-form-item label="监听地址">
-          <el-input v-model="form.host" placeholder="127.0.0.1" />
-        </el-form-item>
-        <el-form-item label="端口">
-          <el-input-number v-model="form.port" :min="1" :max="65535" />
-        </el-form-item>
-        <el-form-item label="上下文">
-          <el-input-number v-model="form.ctx_size" :min="0" :step="512" />
-        </el-form-item>
-        <el-form-item label="GPU 层数">
-          <el-input-number v-model="form.gpu_layers" :min="-1" />
-        </el-form-item>
-        <el-form-item label="线程数">
-          <el-input-number v-model="form.threads" :min="0" />
-        </el-form-item>
-        <el-form-item label="高级参数">
-          <el-input
-            v-model="form.extra_args_text"
-            type="textarea"
-            :rows="4"
-            placeholder="一行一个参数，例如：&#10;--verbose&#10;--batch-size&#10;512"
-          />
-        </el-form-item>
-        <el-collapse class="advanced-fields">
-          <el-collapse-item title="高级探测配置（可选，留空使用后端默认值）" name="probe">
-            <el-alert
-              title="以下参数用于实例启动后的服务就绪探测：Agent 以指定间隔轮询探测路径，直到成功或达到重试上限。留空使用默认值（5 次 × 5 秒间隔）。运行期间 Agent 另有独立进程监控。"
-              type="info"
-              show-icon
-              class="alert"
-            />
-            <el-form-item label="探测路径">
-              <el-input
-                v-model="form.probe_paths_text"
-                type="textarea"
-                :rows="2"
-                placeholder="一行一个路径，留空使用后端默认：&#10;llama.cpp/ollama/vllm: /v1/models, /health, /&#10;custom/其他: /health, /v1/models, /"
-              />
-            </el-form-item>
-            <el-form-item label="失败重试次数">
-              <el-input-number v-model="form.probe_max_attempts" :min="1" :max="60" />
-            </el-form-item>
-            <el-form-item label="重试间隔(ms)">
-              <el-input-number v-model="form.probe_interval_ms" :min="50" :max="60000" :step="500" />
-            </el-form-item>
-            <el-form-item label="请求超时(ms)">
-              <el-input-number v-model="form.probe_timeout_ms" :min="50" :max="60000" :step="100" />
-            </el-form-item>
-          </el-collapse-item>
-        </el-collapse>
-        <el-alert
-          title="工作目录来自运行环境配置。未配置时 Agent 使用自身启动目录；建议为程序或脚本配置固定应用目录，避免依赖 /tmp、用户家目录等不稳定位置。"
-          type="info"
-          show-icon
-          class="alert"
-        />
+        <el-alert v-if="compatWarning" :title="compatWarning" type="warning" show-icon class="alert" />
+
+        <!-- Docker instance form -->
+        <template v-if="isDockerRuntime">
+          <el-divider content-position="left">Docker 实例参数</el-divider>
+          <el-alert title="以下为实例级覆盖参数。已启用的参数将覆盖运行环境默认值；未启用的参数使用运行环境默认值。未启用的参数不会被写入实例 params_json。image、GPU、IPC、缓存路径等通用参数来自运行环境，实例不必重复配置。" type="info" show-icon class="alert" />
+          <el-form-item label="容器名称">
+            <el-input v-model="form.container_name" placeholder="lightai-qwen3-0-6b" />
+          </el-form-item>
+          <el-form-item label="宿主机端口">
+            <el-input-number v-model="form.host_port" :min="1024" :max="65535" />
+          </el-form-item>
+          <el-form-item label="容器端口">
+            <el-input-number v-model="form.container_port" :min="1" :max="65535" />
+          </el-form-item>
+          <el-form-item label="模型容器路径">
+            <el-input v-model="form.model_container_path" placeholder="/models/qwen3-0.6b" />
+          </el-form-item>
+          <el-form-item label="服务模型名">
+            <el-input v-model="form.served_model_name" placeholder="qwen3-0.6b" />
+          </el-form-item>
+
+          <el-divider content-position="left">可选参数（勾选后启用）</el-divider>
+
+          <el-form-item label="GPU 显存使用比例">
+            <el-switch v-model="instToggles.showGpuMem" size="small" style="margin-right:8px" />
+            <el-input-number v-if="instToggles.showGpuMem" v-model="form.gpu_memory_utilization" :min="0.1" :max="1.0" :step="0.05" />
+            <span v-else class="muted">未启用（使用 Runtime 默认值）</span>
+          </el-form-item>
+
+          <el-form-item label="最大模型长度">
+            <el-switch v-model="instToggles.showMaxModelLen" size="small" style="margin-right:8px" />
+            <el-input-number v-if="instToggles.showMaxModelLen" v-model="form.max_model_len" :min="512" :step="512" />
+            <span v-else class="muted">未启用（使用 Runtime 默认值）</span>
+          </el-form-item>
+
+          <el-form-item label="最大并发序列数">
+            <el-switch v-model="instToggles.showMaxNumSeqs" size="small" style="margin-right:8px" />
+            <el-input-number v-if="instToggles.showMaxNumSeqs" v-model="form.max_num_seqs" :min="1" :max="256" />
+            <span v-else class="muted">未启用（使用 Runtime 默认值）</span>
+          </el-form-item>
+
+          <el-form-item label="GPU">
+            <el-switch v-model="instToggles.showGpu" size="small" style="margin-right:8px" />
+            <el-input v-if="instToggles.showGpu" v-model="form.docker_gpu" placeholder="all" />
+            <span v-else class="muted">未启用（使用 Runtime 默认值）</span>
+          </el-form-item>
+
+          <el-form-item label="高级 Docker 参数">
+            <el-switch v-model="instToggles.showExtraDocker" size="small" style="margin-right:8px" />
+            <el-input v-if="instToggles.showExtraDocker" v-model="form.extra_docker_args_text" type="textarea" :rows="2" placeholder="一行一个参数" />
+            <span v-else class="muted">未启用</span>
+          </el-form-item>
+
+          <el-form-item label="高级后端参数">
+            <el-switch v-model="instToggles.showExtraBackend" size="small" style="margin-right:8px" />
+            <el-input v-if="instToggles.showExtraBackend" v-model="form.extra_backend_args_text" type="textarea" :rows="2" placeholder="一行一个参数" />
+            <span v-else class="muted">未启用</span>
+          </el-form-item>
+
+          <el-collapse class="advanced-fields">
+            <el-collapse-item title="实例参数 JSON（高级编辑）" name="docker-json">
+              <el-alert title="点击下方按钮根据当前表单值生成 JSON，或手动编辑。Docker 容器默认不加 --rm。" type="info" show-icon class="alert" />
+              <el-button size="small" type="primary" @click="generateDockerParamsJson" style="margin-bottom:8px">根据表单生成 JSON</el-button>
+              <el-button size="small" @click="generateDockerTemplate" :disabled="!form.model_file_id || !form.runtime_environment_id" style="margin-bottom:8px">从 Runtime 模板生成</el-button>
+              <el-form-item label="参数 JSON">
+                <el-input v-model="form.params_json" type="textarea" :rows="10" placeholder='{"container_name":"lightai-test","host_port":18000,...}' />
+              </el-form-item>
+            </el-collapse-item>
+          </el-collapse>
+
+          <el-alert type="warning" show-icon class="alert" style="margin-top: 8px">
+            <template #title>
+              <div>Docker 部署环境要求：</div>
+              <ul style="margin: 4px 0; padding-left: 16px">
+                <li>请确认目标 Node 已安装 Docker 和 NVIDIA Container Toolkit</li>
+                <li>请确认模型路径是目标 Node 上可访问的路径</li>
+                <li>host_port 可能冲突，当前需用户自行确认</li>
+                <li>Docker 容器默认不加 --rm，便于失败诊断</li>
+              </ul>
+            </template>
+          </el-alert>
+        </template>
+
+        <!-- Local (non-Docker) instance form -->
+        <template v-else>
+          <el-divider content-position="left">运行参数</el-divider>
+          <el-form-item label="监听地址">
+            <el-input v-model="form.host" placeholder="127.0.0.1" />
+          </el-form-item>
+          <el-form-item label="端口">
+            <el-input-number v-model="form.port" :min="1" :max="65535" />
+          </el-form-item>
+          <el-form-item label="上下文">
+            <el-input-number v-model="form.ctx_size" :min="0" :step="512" />
+          </el-form-item>
+          <el-form-item label="GPU 层数">
+            <el-input-number v-model="form.gpu_layers" :min="-1" />
+          </el-form-item>
+          <el-form-item label="线程数">
+            <el-input-number v-model="form.threads" :min="0" />
+          </el-form-item>
+          <el-form-item label="高级参数">
+            <el-input v-model="form.extra_args_text" type="textarea" :rows="4" placeholder="一行一个参数，例如：&#10;--verbose&#10;--batch-size&#10;512" />
+          </el-form-item>
+          <el-collapse class="advanced-fields">
+            <el-collapse-item title="高级探测配置（可选，留空使用后端默认值）" name="probe">
+              <el-alert title="以下参数用于实例启动后的服务就绪探测" type="info" show-icon class="alert" />
+              <el-form-item label="探测路径">
+                <el-input v-model="form.probe_paths_text" type="textarea" :rows="2" />
+              </el-form-item>
+              <el-form-item label="失败重试次数">
+                <el-input-number v-model="form.probe_max_attempts" :min="1" :max="60" />
+              </el-form-item>
+              <el-form-item label="重试间隔(ms)">
+                <el-input-number v-model="form.probe_interval_ms" :min="50" :max="60000" :step="500" />
+              </el-form-item>
+              <el-form-item label="请求超时(ms)">
+                <el-input-number v-model="form.probe_timeout_ms" :min="50" :max="60000" :step="100" />
+              </el-form-item>
+            </el-collapse-item>
+          </el-collapse>
+          <el-alert title="工作目录来自运行环境配置。" type="info" show-icon class="alert" />
+        </template>
       </template>
     </el-form>
     <template #footer>
@@ -223,7 +290,7 @@
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { ElNotification } from 'element-plus/es/components/notification/index'
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import {
   checkModelInstance,
   createModelInstance,
@@ -242,9 +309,10 @@ import {
 } from '../api'
 import type { ModelDefinition, ModelFile, ModelInstance, NodeStatus, RuntimeEnvironment } from '../types'
 import { backendLabel, checkFailedReason, deployTypeLabel, emptyToNull, formatTime, instanceStatusLabel, isAgentOffline, runtimeDeployTypeLabel, statusLabel, statusType } from '../utils/instance'
-import { emptyForm, localParams, parseParams } from './instances/instanceParams'
+import { buildDockerInstanceParams, emptyForm, localParams, parseParams } from './instances/instanceParams'
 import type { InstanceForm } from './instances/instanceParams'
 import { useInstanceRefresh } from './instances/useInstanceRefresh'
+import { checkModelRuntimeCompat, generateDockerInstanceOverrides, toTemplateJson } from '../utils/templates'
 
 const backends = ['ollama', 'llama_cpp', 'vllm', 'custom']
 const models = ref<ModelDefinition[]>([])
@@ -261,6 +329,121 @@ const selectedLogInstance = ref<ModelInstance | null>(null)
 const logRefreshing = ref(false)
 const logMessage = ref('')
 const form = ref<InstanceForm>(emptyForm())
+const compatWarning = ref('')
+const instToggles = reactive({
+  showGpuMem: false,
+  showMaxModelLen: false,
+  showMaxNumSeqs: false,
+  showGpu: false,
+  showExtraDocker: false,
+  showExtraBackend: false,
+})
+const isDockerRuntime = computed(() => {
+  const rt = runtimeEnvironments.value.find(e => e.id === form.value.runtime_environment_id)
+  return rt?.deploy_type === 'docker'
+})
+
+function onRuntimeChange() {
+  if (!isDockerRuntime.value) return
+  const runtime = runtimeEnvironments.value.find(e => e.id === form.value.runtime_environment_id)
+  if (!runtime?.params_json) return
+  try {
+    const rp = JSON.parse(runtime.params_json)
+    // Populate instance fields from Runtime defaults (only if instance field is empty/default)
+    const formFilled = (form.value as any).__runtime_defaults_filled
+    if (!formFilled) {
+      form.value.container_port = rp.container_port || 8000
+      form.value.docker_gpu = rp.gpu || 'all'
+      form.value.gpu_memory_utilization = rp.defaults?.gpu_memory_utilization ?? 0.5
+      form.value.max_model_len = rp.defaults?.max_model_len ?? 4096
+      form.value.max_num_seqs = rp.defaults?.max_num_seqs ?? 8
+      ;(form.value as any).__runtime_defaults_filled = true
+    }
+    // Enable toggles based on what Runtime provides
+    instToggles.showGpu = !!rp.gpu
+    instToggles.showGpuMem = rp.defaults?.gpu_memory_utilization != null
+    instToggles.showMaxModelLen = rp.defaults?.max_model_len != null
+    instToggles.showMaxNumSeqs = rp.defaults?.max_num_seqs != null
+    instToggles.showExtraDocker = Array.isArray(rp.extra_docker_args) && rp.extra_docker_args.length > 0
+    instToggles.showExtraBackend = Array.isArray(rp.extra_backend_args) && rp.extra_backend_args.length > 0
+  } catch { /* ignore */ }
+}
+
+function onModelChange() {
+  if (!isDockerRuntime.value) return
+  const model = models.value.find(m => m.id === form.value.model_id)
+  const modelFile = modelFiles.value.find(f => f.id === form.value.model_file_id)
+  if (!modelFile) return
+  // Derive model_container_path from model path
+  const modelDir = (modelFile.path || '').split('/').pop() || 'model'
+  if (!form.value.model_container_path) {
+    form.value.model_container_path = `/models/${modelDir}`
+  }
+  // Derive served_model_name from model metadata or model name
+  if (!form.value.served_model_name) {
+    if (model?.params_json) {
+      try {
+        const mp = JSON.parse(model.params_json)
+        form.value.served_model_name = mp.served_model_name || model.name || ''
+      } catch { form.value.served_model_name = model.name || '' }
+    } else {
+      form.value.served_model_name = model?.name || ''
+    }
+  }
+}
+
+function generateDockerParamsJson() {
+  const overrides = buildDockerInstanceParams(form.value)
+  const modelFile = modelFiles.value.find(f => f.id === form.value.model_file_id)
+  if (modelFile) {
+    const modelDir = (modelFile.path || '').split('/').pop() || 'model'
+    ;(overrides as any).model_host_path = modelFile.path
+    if (!overrides.model_container_path) (overrides as any).model_container_path = `/models/${modelDir}`
+  }
+  if (form.value.params_json && form.value.params_json.trim()) {
+    ElMessageBox.confirm('当前已有实例参数，覆盖会丢失已填信息。是否继续？', '确认覆盖', { type: 'warning', confirmButtonText: '覆盖', cancelButtonText: '取消' }).then(() => {
+      form.value.params_json = toTemplateJson(overrides)
+      ElMessage.success('已根据表单生成实例参数 JSON')
+    }).catch(() => {})
+  } else {
+    form.value.params_json = toTemplateJson(overrides)
+    ElMessage.success('已根据表单生成实例参数 JSON')
+  }
+}
+
+function generateDockerTemplate() {
+  const model = models.value.find(m => m.id === form.value.model_id)
+  const modelFile = modelFiles.value.find(f => f.id === form.value.model_file_id)
+  const runtime = runtimeEnvironments.value.find(e => e.id === form.value.runtime_environment_id)
+  if (!modelFile || !runtime) {
+    ElMessage.warning('请先选择模型文件和运行环境')
+    return
+  }
+  const modelParams = model?.params_json ? JSON.parse(model.params_json) : null
+  const runtimeParams = runtime.params_json ? JSON.parse(runtime.params_json) : null
+  const modelName = model?.name || ''
+  const modelPath = modelFile.path || ''
+  const overrides = generateDockerInstanceOverrides(modelName, modelPath, modelParams, runtimeParams)
+  if (form.value.params_json && form.value.params_json.trim()) {
+    ElMessageBox.confirm('当前已有实例参数，覆盖会丢失已填信息。是否继续？', '确认覆盖', { type: 'warning', confirmButtonText: '覆盖', cancelButtonText: '取消' }).then(() => {
+      form.value.params_json = toTemplateJson(overrides)
+      ElMessage.success('已从 Runtime 模板生成实例覆盖参数')
+    }).catch(() => {})
+  } else {
+    form.value.params_json = toTemplateJson(overrides)
+    ElMessage.success('已从 Runtime 模板生成实例覆盖参数')
+  }
+}
+
+function checkCompat() {
+  const model = models.value.find(m => m.id === form.value.model_id)
+  const runtime = runtimeEnvironments.value.find(e => e.id === form.value.runtime_environment_id)
+  if (!model || !runtime) { compatWarning.value = ''; return }
+  const modelParams = model.params_json ? JSON.parse(model.params_json) : null
+  const result = checkModelRuntimeCompat(modelParams, runtime.backend)
+  compatWarning.value = result.warning
+}
+
 const instanceTypeOptions = [
   { label: '外部服务', value: 'external' },
   { label: '本地', value: 'local' }
@@ -320,10 +503,22 @@ function openEdit(row: ModelInstance) {
     gpu_layers: params.gpu_layers,
     threads: params.threads,
     extra_args_text: params.extra_args.join('\n'),
+    container_name: params.container_name,
+    host_port: params.host_port,
+    container_port: params.container_port,
+    model_container_path: params.model_container_path,
+    served_model_name: params.served_model_name,
+    gpu_memory_utilization: params.gpu_memory_utilization,
+    max_model_len: params.max_model_len,
+    max_num_seqs: params.max_num_seqs,
+    docker_gpu: params.docker_gpu,
+    extra_docker_args_text: params.extra_docker_args_text,
+    extra_backend_args_text: params.extra_backend_args_text,
     probe_paths_text: params.probe_paths_text,
     probe_max_attempts: params.probe_max_attempts,
     probe_interval_ms: params.probe_interval_ms,
-    probe_timeout_ms: params.probe_timeout_ms
+    probe_timeout_ms: params.probe_timeout_ms,
+    params_json: row.params_json ?? '',
   }
   dialogVisible.value = true
 }
@@ -374,7 +569,11 @@ async function submit() {
     runtime_version: emptyToNull(form.value.runtime_version),
     model_name: emptyToNull(form.value.model_name),
     description: emptyToNull(form.value.description),
-    params_json: form.value.deploy_type === 'local' ? JSON.stringify(localParams(form.value)) : null,
+    params_json: form.value.deploy_type === 'local'
+      ? (isDockerRuntime.value
+          ? (form.value.params_json.trim() || JSON.stringify(buildDockerInstanceParams(form.value)))
+          : JSON.stringify(localParams(form.value)))
+      : null,
     status: 'unknown'
   }
   if (editingId.value) {
@@ -468,6 +667,8 @@ async function testLocal(row: ModelInstance) {
     await refreshSingleInstance(row.id)
   }
 }
+
+watch([() => form.value.model_id, () => form.value.runtime_environment_id], checkCompat)
 
 const localRuntimeOptions = computed(() =>
   runtimeEnvironments.value.filter(

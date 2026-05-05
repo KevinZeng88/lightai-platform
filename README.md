@@ -30,21 +30,25 @@ Agent (GPU 节点) ──主动连接──> Server (中央控制面) <── We
 - Server 保存节点当前状态、GPU 状态和历史采样。
 - Web 显示节点列表、GPU 状态、自定义时间段趋势图。
 
-### 模型、模型文件与运行环境
+### 产品模型：Model / Runtime / Node / Instance
 
-- **模型**：平台中的模型定义，组织模型配置和文件状态。
-- **模型文件**：具体节点上的文件或目录路径。创建或重新验证时由对应节点 Agent 检查路径存在性和基础信息。验证不代表模型格式正确或服务可用。
-- **运行环境**：节点具备的本地运行能力（ollama / llama_cpp / vllm / custom），绑定节点，描述 backend、运行方式、入口路径、工作目录、日志目录等。
+平台核心产品模型是：**Model + Runtime Environment + Node + Instance Overrides = Model Instance**
+
+- **Model（模型）**：描述"跑什么模型"。包含模型名称、路径、路径类型（directory/file/ollama/custom）、模型格式（huggingface/gguf/ollama/custom）、支持的后端（vllm/llama.cpp/ollama/custom）、默认 served_model_name。模型元数据通过 `params_json` 保存，Web 提供模板快捷填充。
+- **Runtime Environment（运行环境）**：描述"以什么后端、什么运行形态跑"。由 **backend** + **deploy_type** 组合。backend 是推理引擎（vllm / llama_cpp / ollama / custom），deploy_type 是运行形态（local / docker）。Docker 不是 backend，它是 deploy_type。vLLM + Docker、llama.cpp + Local、llama.cpp + Docker 都是合法组合。运行环境配置默认参数（image、port、GPU、cache volume、backend defaults），Web 提供四套模板。
+- **Node（节点）**：描述"在哪台机器上跑"。当前每个 Model Instance 绑定一个 Node（单节点单副本）。Agent 离线时，该 Node 上实例显示 warning："Agent 离线，运行状态无法确认"。未来多节点部署通过 Deployment/Replica 抽象扩展，不在当前版本实现。
+- **Model Instance（实例）**：用户选择 Node + Model + Runtime，系统根据三层配置生成实例覆盖参数模板（container_name、host_port、model_container_path、资源参数），用户确认后创建。实例 params_json 只保存覆盖参数，不重复完整 runtime 配置。
 
 ### 实例生命周期
 
 - **External 实例**：接入已有外部模型服务。平台只记录和 HTTP 可达性检查，不负责启动/停止。
 - **本地实例**：绑定节点、运行环境和已验证模型文件，由 Agent 负责启动/停止/测试。
-  - 支持 local（本地进程）和 docker（Docker 容器）两种运行方式，统一使用同一套 start/stop/check/logs 操作。
-  - **Local**：启动本地二进制/脚本进程，记录 pid + start_time。启动前端口占用检查。
-  - **Docker**：通过 `docker run` 启动容器，记录 container_id + container_name。Docker 参数通过 `params_json` 以 JSON 配置。
-  - Docker 容器默认不加 `--rm`，便于 Agent 在容器退出后仍能 inspect/logs 获取 OOM、退出码等诊断信息。
-  - 启动后按后端区分服务就绪探测路径（可通过实例参数自定义）。
+  - 支持 local（本地进程）和 docker（Docker 容器）两种 deploy_type，统一使用同一套 start/stop/check/logs 操作。
+  - **local**：启动本地二进制/脚本进程，记录 pid + start_time。启动前端口占用检查。
+  - **docker**：通过 `docker run` 启动容器，记录 container_id + container_name。
+  - **Agent 合并三层配置**：Model（模型路径 + 模型名）+ Runtime（镜像/entrypoint + 默认参数）+ Instance Overrides（端口/名称/资源覆盖）→ 最终启动参数。Instance 覆盖优先于 Runtime 默认值。
+  - Docker 容器默认不加 `--rm`，便于 Agent 在容器退出后仍能 inspect/logs 获取 OOM、退出码等诊断信息。用户显式 stop instance 才 docker stop；删除实例/清理资源时再 docker rm。
+  - Docker 与 local 共用同一套 start/stop/check/test/logs 按钮和生命周期语义。
   - 就绪后额外验证进程存活（local）或 docker inspect 状态（docker），防止假就绪。
   - 后台进程存活监控（local 3s 周期 / docker heartbeat 周期 inspect），异常退出通过心跳上报 failed。
   - Docker 第一版通过高级 JSON 参数配置，后续可扩展为 Web 表单字段。

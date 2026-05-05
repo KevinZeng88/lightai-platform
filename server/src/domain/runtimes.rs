@@ -55,7 +55,7 @@ pub async fn create_runtime_environment(
     .bind(request.working_dir)
     .bind(request.log_dir)
     .bind(request.allowed_model_dirs_json)
-    .bind(request.config_json)
+    .bind(request.params_json.or(request.config_json))
     .bind(bool_to_int(request.enabled.unwrap_or(true)))
     .bind(checked.checked_at)
     .bind(checked.check_status)
@@ -147,7 +147,7 @@ pub async fn update_runtime_environment(
     .bind(request.working_dir)
     .bind(request.log_dir)
     .bind(request.allowed_model_dirs_json)
-    .bind(request.config_json)
+    .bind(request.params_json.or(request.config_json))
     .bind(bool_to_int(request.enabled.unwrap_or(true)))
     .bind(now)
     .bind(id)
@@ -222,6 +222,7 @@ pub async fn check_runtime_environment(
         log_dir: environment.log_dir.clone(),
         allowed_model_dirs_json: environment.allowed_model_dirs_json.clone(),
         config_json: environment.config_json.clone(),
+        params_json: None,
         enabled: Some(environment.enabled),
     };
     let checked = check_runtime_environment_before_save(pool, node_id, &request).await?;
@@ -388,6 +389,7 @@ pub(super) fn runtime_environment_from_row(row: sqlx::sqlite::SqliteRow) -> Runt
         log_dir: row.get("log_dir"),
         allowed_model_dirs_json: row.get("allowed_model_dirs_json"),
         config_json: row.get("config_json"),
+        params_json: row.get("config_json"),
         enabled: int_to_bool(row.get("enabled")),
         last_checked_at: row.get("last_checked_at"),
         check_status: row.get("check_status"),

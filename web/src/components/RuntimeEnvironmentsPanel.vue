@@ -2,7 +2,7 @@
   <section class="panel-header">
     <div>
       <h2>运行环境</h2>
-      <p>运行环境表示某节点具备哪些本地运行能力；External 服务请在“实例”中直接接入。</p>
+      <p>运行环境表示某节点具备哪些本地运行能力；External 服务请在"实例"中直接接入。</p>
     </div>
     <div class="toolbar compact">
       <el-button :loading="loading" @click="loadData">刷新</el-button>
@@ -65,51 +65,101 @@
           <el-option v-for="node in nodes" :key="node.id" :label="node.name" :value="node.id" />
         </el-select>
       </el-form-item>
-      <el-form-item label="名称">
-        <el-input v-model="form.name" />
+      <el-form-item label="名称" required>
+        <el-input v-model="form.name" placeholder="例如 vLLM Docker" />
       </el-form-item>
-      <el-form-item label="后端">
+      <el-form-item label="后端" required>
         <el-select v-model="form.backend">
           <el-option v-for="backend in backends" :key="backend" :label="backendLabel(backend)" :value="backend" />
         </el-select>
       </el-form-item>
-      <el-form-item label="运行方式">
+      <el-form-item label="运行方式" required>
         <el-select v-model="form.deploy_type">
           <el-option label="容器 / Docker" value="docker" />
           <el-option label="脚本 / Script" value="script" />
           <el-option label="本地程序" value="binary" />
         </el-select>
       </el-form-item>
-      <el-alert
-        title="保存时会由所选节点 Agent 立即检查。版本优先由 Agent 返回；无法自动获取时会说明原因，也可手工填写/覆盖版本。"
-        type="info"
-        show-icon
-        class="alert"
-      />
-      <el-form-item label="版本">
-        <el-input v-model="form.version" placeholder="可选；无法自动获取时可手工填写" />
-      </el-form-item>
-      <el-form-item v-if="form.deploy_type === 'docker'" label="Docker Image">
-        <el-input v-model="form.docker_image" placeholder="vllm/vllm-openai:latest" />
-      </el-form-item>
-      <el-form-item v-if="form.deploy_type === 'script'" label="脚本路径">
-        <el-input v-model="form.binary_path" placeholder="/opt/lightai/scripts/start-vllm" />
-      </el-form-item>
-      <el-form-item v-if="form.deploy_type === 'binary'" label="程序路径">
-        <el-input v-model="form.binary_path" placeholder="/usr/local/bin/ollama" />
-      </el-form-item>
+
+      <!-- Docker fields -->
+      <template v-if="form.deploy_type === 'docker'">
+        <el-form-item label="Docker Image" required>
+          <el-input v-model="dockerRt.image" :placeholder="form.backend === 'vllm' ? 'vllm/vllm-openai:latest' : 'image:tag'" />
+        </el-form-item>
+        <el-form-item label="容器端口">
+          <el-input-number v-model="dockerRt.container_port" :min="1" :max="65535" />
+        </el-form-item>
+        <el-form-item label="Host">
+          <el-input v-model="dockerRt.default_host" placeholder="0.0.0.0" />
+        </el-form-item>
+        <el-form-item label="Port">
+          <el-input-number v-model="dockerRt.default_port" :min="1" :max="65535" />
+        </el-form-item>
+        <el-divider content-position="left">可选参数</el-divider>
+        <el-form-item label="GPU">
+          <el-switch v-model="rtToggles.showGpu" size="small" style="margin-right:8px" />
+          <el-input v-if="rtToggles.showGpu" v-model="dockerRt.gpu" placeholder="all" />
+          <span v-else class="muted">未启用</span>
+        </el-form-item>
+        <el-form-item label="IPC">
+          <el-switch v-model="rtToggles.showIpc" size="small" style="margin-right:8px" />
+          <el-input v-if="rtToggles.showIpc" v-model="dockerRt.ipc" placeholder="host" />
+          <span v-else class="muted">未启用</span>
+        </el-form-item>
+        <el-form-item label="缓存路径">
+          <el-switch v-model="rtToggles.showCache" size="small" style="margin-right:8px" />
+          <template v-if="rtToggles.showCache">
+            <el-input v-model="dockerRt.cache_host_path" placeholder="宿主机路径" style="margin-bottom:4px" />
+            <el-input v-model="dockerRt.cache_container_path" placeholder="容器内路径" />
+          </template>
+          <span v-else class="muted">未启用</span>
+        </el-form-item>
+        <el-form-item label="显存使用比例">
+          <el-switch v-model="rtToggles.showGpuMem" size="small" style="margin-right:8px" />
+          <el-input-number v-if="rtToggles.showGpuMem" v-model="dockerRt.gpu_memory_utilization" :min="0.1" :max="1.0" :step="0.05" />
+          <span v-else class="muted">未启用</span>
+        </el-form-item>
+        <el-form-item label="最大模型长度">
+          <el-switch v-model="rtToggles.showMaxModelLen" size="small" style="margin-right:8px" />
+          <el-input-number v-if="rtToggles.showMaxModelLen" v-model="dockerRt.max_model_len" :min="512" :step="512" />
+          <span v-else class="muted">未启用</span>
+        </el-form-item>
+        <el-form-item label="最大并发序列数">
+          <el-switch v-model="rtToggles.showMaxNumSeqs" size="small" style="margin-right:8px" />
+          <el-input-number v-if="rtToggles.showMaxNumSeqs" v-model="dockerRt.max_num_seqs" :min="1" :max="256" />
+          <span v-else class="muted">未启用</span>
+        </el-form-item>
+        <el-form-item label="高级后端参数">
+          <el-switch v-model="rtToggles.showExtraBackend" size="small" style="margin-right:8px" />
+          <el-input v-if="rtToggles.showExtraBackend" v-model="form.extra_backend_args" type="textarea" :rows="3" placeholder="每行一个参数" />
+          <span v-else class="muted">未启用</span>
+        </el-form-item>
+        <el-form-item label="高级 Docker 参数">
+          <el-switch v-model="rtToggles.showExtraDocker" size="small" style="margin-right:8px" />
+          <el-input v-if="rtToggles.showExtraDocker" v-model="form.extra_docker_args" type="textarea" :rows="3" placeholder="每行一个参数" />
+          <span v-else class="muted">未启用</span>
+        </el-form-item>
+      </template>
+
+      <!-- Local entrypoint fields -->
+      <template v-if="form.deploy_type !== 'docker'">
+        <el-form-item label="入口路径" :required="form.backend !== 'ollama'">
+          <el-input v-model="form.binary_path" placeholder="/usr/local/bin/ollama 或程序路径" />
+        </el-form-item>
+        <el-form-item label="高级后端参数" v-if="form.backend !== 'ollama'">
+          <el-input v-model="form.extra_backend_args" type="textarea" :rows="3" placeholder="每行一个参数" />
+        </el-form-item>
+      </template>
+
       <el-form-item label="工作目录">
-        <el-input v-model="form.working_dir" placeholder="/opt/lightai/apps/llama.cpp" />
+        <el-input v-model="form.working_dir" placeholder="可选" />
       </el-form-item>
       <el-form-item label="日志目录">
-        <el-input v-model="form.log_dir" placeholder="/var/log/lightai/instances" />
+        <el-input v-model="form.log_dir" placeholder="可选" />
       </el-form-item>
-      <el-alert
-        title="工作目录用于设置程序或脚本的 current_dir。日志目录用于 Agent 保存本地实例 stdout/stderr，必须是受控绝对路径；未配置日志目录时只保留最近日志摘要。"
-        type="info"
-        show-icon
-        class="alert"
-      />
+      <el-form-item label="版本">
+        <el-input v-model="form.version" placeholder="可选" />
+      </el-form-item>
       <el-form-item label="启用">
         <el-switch v-model="form.enabled" />
       </el-form-item>
@@ -125,7 +175,7 @@
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { ElNotification } from 'element-plus/es/components/notification/index'
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, reactive, ref } from 'vue'
 import {
   checkRuntimeEnvironment,
   createRuntimeEnvironment,
@@ -135,6 +185,12 @@ import {
   updateRuntimeEnvironment
 } from '../api'
 import type { NodeStatus, RuntimeEnvironment } from '../types'
+import {
+  assembleDockerRuntimeParams,
+  defaultDockerRuntimeFields,
+  parseDockerRuntimeParams,
+  type DockerRuntimeFields,
+} from '../utils/templates'
 
 const backends = ['ollama', 'llama_cpp', 'vllm', 'custom']
 const nodes = ref<NodeStatus[]>([])
@@ -153,8 +209,39 @@ const form = ref({
   docker_image: '',
   working_dir: '',
   log_dir: '',
-  enabled: true
+  enabled: true,
+  extra_backend_args: '',
+  extra_docker_args: '',
+  params_json: '',
 })
+
+const dockerRt = reactive<DockerRuntimeFields>(defaultDockerRuntimeFields())
+
+const rtToggles = reactive({
+  showGpu: false,
+  showIpc: false,
+  showCache: false,
+  showGpuMem: false,
+  showMaxModelLen: false,
+  showMaxNumSeqs: false,
+  showExtraBackend: false,
+  showExtraDocker: false,
+})
+
+const currentRuntimeParamsJson = computed(() => {
+  if (form.value.deploy_type === 'docker') {
+    return assembleDockerRuntimeParams(dockerRt, form.value.backend, rtToggles, form.value.extra_backend_args, form.value.extra_docker_args)
+  }
+  // For local runtimes, assemble basic params
+  if (form.value.extra_backend_args.trim()) {
+    return JSON.stringify({ extra_backend_args: form.value.extra_backend_args.split('\n').map(s => s.trim()).filter(Boolean) })
+  }
+  return ''
+})
+
+function emptyToNull(value: string) {
+  return value.trim() ? value.trim() : null
+}
 
 async function loadData() {
   loading.value = true
@@ -178,15 +265,20 @@ function openCreate() {
   form.value = {
     node_id: nodes.value[0]?.id ?? '',
     name: '',
-    backend: 'ollama',
-    deploy_type: 'binary',
+    backend: 'vllm',
+    deploy_type: 'docker',
     version: '',
     binary_path: '',
     docker_image: '',
     working_dir: '',
     log_dir: '',
-    enabled: true
+    enabled: true,
+    extra_backend_args: '',
+    extra_docker_args: '',
+    params_json: '',
   }
+  Object.assign(dockerRt, defaultDockerRuntimeFields())
+  Object.assign(rtToggles, { showGpu: false, showIpc: false, showCache: false, showGpuMem: false, showMaxModelLen: false, showMaxNumSeqs: false, showExtraBackend: false, showExtraDocker: false })
   dialogVisible.value = true
 }
 
@@ -202,15 +294,52 @@ function openEdit(row: RuntimeEnvironment) {
     docker_image: row.docker_image ?? '',
     working_dir: row.working_dir ?? '',
     log_dir: row.log_dir ?? '',
-    enabled: row.enabled
+    enabled: row.enabled,
+    extra_backend_args: '',
+    extra_docker_args: '',
+    params_json: row.params_json ?? '',
+  }
+  if (row.deploy_type === 'docker') {
+    Object.assign(dockerRt, parseDockerRuntimeParams(row.params_json))
+    if (row.params_json) {
+      try {
+        const p = JSON.parse(row.params_json)
+        rtToggles.showGpu = !!p.gpu
+        rtToggles.showIpc = !!p.ipc
+        rtToggles.showCache = !!(p.cache_host_path || p.cache_container_path)
+        rtToggles.showGpuMem = !!(p.defaults?.gpu_memory_utilization != null)
+        rtToggles.showMaxModelLen = !!(p.defaults?.max_model_len != null)
+        rtToggles.showMaxNumSeqs = !!(p.defaults?.max_num_seqs != null)
+        rtToggles.showExtraBackend = !!(p.extra_backend_args?.length > 0)
+        rtToggles.showExtraDocker = !!(p.extra_docker_args?.length > 0)
+      } catch { /* ignore */ }
+    }
   }
   dialogVisible.value = true
 }
 
+function validateForm(): string | null {
+  if (!form.value.name.trim()) return '请填写名称'
+  if (!form.value.node_id) return '请选择节点'
+  if (form.value.deploy_type === 'docker') {
+    if (!dockerRt.image.trim()) return '请填写 Docker 镜像'
+    if (!dockerRt.container_port || dockerRt.container_port < 1 || dockerRt.container_port > 65535) return '容器端口无效'
+    if (!dockerRt.default_port || dockerRt.default_port < 1 || dockerRt.default_port > 65535) return '默认端口无效'
+    if (rtToggles.showGpuMem && (dockerRt.gpu_memory_utilization <= 0 || dockerRt.gpu_memory_utilization > 1)) return '显存使用比例需在 0~1 之间'
+    if (rtToggles.showMaxModelLen && dockerRt.max_model_len < 1) return '最大模型长度需为正整数'
+    if (rtToggles.showMaxNumSeqs && dockerRt.max_num_seqs < 1) return '最大并发序列数需为正整数'
+  }
+  if (form.value.deploy_type !== 'docker' && form.value.backend !== 'ollama') {
+    if (!form.value.binary_path.trim()) return '请填写入口路径'
+  }
+  return null
+}
+
 async function submit() {
-  if (!form.value.node_id || !form.value.name) return
+  const err = validateForm()
+  if (err) { ElMessage.error(err); return }
   const payload = {
-    name: form.value.name,
+    name: form.value.name.trim(),
     backend: form.value.backend,
     deploy_type: form.value.deploy_type,
     version: emptyToNull(form.value.version),
@@ -218,18 +347,25 @@ async function submit() {
     health_url: null,
     endpoint_url: null,
     binary_path: emptyToNull(form.value.binary_path),
-    docker_image: emptyToNull(form.value.docker_image),
+    docker_image: form.value.deploy_type === 'docker' ? (dockerRt.image.trim() || null) : emptyToNull(form.value.docker_image),
     working_dir: emptyToNull(form.value.working_dir),
     log_dir: emptyToNull(form.value.log_dir),
-    enabled: form.value.enabled
+    enabled: form.value.enabled,
+    params_json: currentRuntimeParamsJson.value || null,
   }
-  if (editingId.value) {
-    await updateRuntimeEnvironment(editingId.value, payload)
-  } else {
-    await createRuntimeEnvironment(form.value.node_id, payload)
+  try {
+    if (editingId.value) {
+      await updateRuntimeEnvironment(editingId.value, payload)
+      ElMessage.success('运行环境已更新')
+    } else {
+      await createRuntimeEnvironment(form.value.node_id, payload)
+      ElMessage.success('运行环境已创建')
+    }
+    dialogVisible.value = false
+    await loadData()
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '保存失败')
   }
-  dialogVisible.value = false
-  await loadData()
 }
 
 async function check(row: RuntimeEnvironment) {
@@ -260,10 +396,6 @@ async function remove(row: RuntimeEnvironment) {
 function nodeName(nodeId?: string | null) {
   if (!nodeId) return '-'
   return nodes.value.find((node) => node.id === nodeId)?.name ?? nodeId
-}
-
-function emptyToNull(value: string) {
-  return value.trim() ? value.trim() : null
 }
 
 function checkType(status?: string | null) {

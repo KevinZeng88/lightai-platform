@@ -287,6 +287,7 @@ pub struct RuntimeEnvironmentRequest {
     pub log_dir: Option<String>,
     pub allowed_model_dirs_json: Option<String>,
     pub config_json: Option<String>,
+    pub params_json: Option<String>,
     pub enabled: Option<bool>,
 }
 
@@ -307,6 +308,7 @@ pub struct RuntimeEnvironmentView {
     pub log_dir: Option<String>,
     pub allowed_model_dirs_json: Option<String>,
     pub config_json: Option<String>,
+    pub params_json: Option<String>,
     pub enabled: bool,
     pub last_checked_at: Option<i64>,
     pub check_status: Option<String>,

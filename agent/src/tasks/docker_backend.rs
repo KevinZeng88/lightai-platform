@@ -83,28 +83,35 @@ pub(crate) struct DockerPayload {
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub(crate) struct DockerRuntimeConfig {
+    pub backend: String,
+    pub deploy_type: String,
     pub image: String,
+    pub entrypoint: String,
     pub gpu: String,
     pub ipc: String,
     pub container_port: u16,
     pub cache_host_path: String,
     pub cache_container_path: String,
-    pub vllm_defaults: VllmDefaults,
+    #[serde(alias = "vllm_defaults")]
+    pub defaults: BackendDefaults,
     pub extra_docker_args: Vec<String>,
-    pub extra_vllm_args: Vec<String>,
+    #[serde(alias = "extra_vllm_args")]
+    pub extra_backend_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
-pub(crate) struct VllmDefaults {
+pub(crate) struct BackendDefaults {
     pub host: String,
     pub port: u16,
     pub gpu_memory_utilization: Option<f64>,
     pub max_model_len: Option<u32>,
     pub max_num_seqs: Option<u32>,
+    pub ctx_size: Option<u32>,
+    pub n_gpu_layers: Option<i64>,
 }
 
-impl Default for VllmDefaults {
+impl Default for BackendDefaults {
     fn default() -> Self {
         Self {
             host: "0.0.0.0".to_string(),
@@ -112,6 +119,8 @@ impl Default for VllmDefaults {
             gpu_memory_utilization: Some(0.5),
             max_model_len: Some(4096),
             max_num_seqs: Some(8),
+            ctx_size: Some(4096),
+            n_gpu_layers: Some(-1),
         }
     }
 }
@@ -126,8 +135,11 @@ pub(crate) struct DockerInstanceOverrides {
     pub gpu_memory_utilization: Option<f64>,
     pub max_model_len: Option<u32>,
     pub max_num_seqs: Option<u32>,
+    pub gpu: Option<String>,
+    pub container_port: Option<u16>,
     pub extra_docker_args: Vec<String>,
-    pub extra_vllm_args: Vec<String>,
+    #[serde(alias = "extra_vllm_args")]
+    pub extra_backend_args: Vec<String>,
 }
 
 pub(crate) fn merge_docker_config(
@@ -174,7 +186,7 @@ pub(crate) fn merge_docker_config(
     let mut docker = DockerInstanceParams {
         image: rt.image.clone(),
         container_name: ov.container_name.clone(),
-        gpu: rt.gpu.clone(),
+        gpu: ov.gpu.clone().unwrap_or(rt.gpu.clone()),
         ipc: rt.ipc.clone(),
         ports: vec![DockerPortMapping {
             host: host_port,
@@ -206,16 +218,16 @@ pub(crate) fn merge_docker_config(
     let vllm = VllmParams {
         model: container_model,
         served_model_name: served_name,
-        host: rt.vllm_defaults.host.clone(),
-        port: rt.vllm_defaults.port,
+        host: rt.defaults.host.clone(),
+        port: rt.defaults.port,
         gpu_memory_utilization: ov
             .gpu_memory_utilization
-            .or(rt.vllm_defaults.gpu_memory_utilization),
-        max_model_len: ov.max_model_len.or(rt.vllm_defaults.max_model_len),
-        max_num_seqs: ov.max_num_seqs.or(rt.vllm_defaults.max_num_seqs),
+            .or(rt.defaults.gpu_memory_utilization),
+        max_model_len: ov.max_model_len.or(rt.defaults.max_model_len),
+        max_num_seqs: ov.max_num_seqs.or(rt.defaults.max_num_seqs),
         extra_vllm_args: {
-            let mut args = rt.extra_vllm_args.clone();
-            args.extend(ov.extra_vllm_args.clone());
+            let mut args = rt.extra_backend_args.clone();
+            args.extend(ov.extra_backend_args.clone());
             args
         },
     };
@@ -847,7 +859,7 @@ mod tests {
             container_port: 8000,
             cache_host_path: "/data/vllm-cache".to_string(),
             cache_container_path: "/root/.cache/huggingface".to_string(),
-            vllm_defaults: VllmDefaults::default(),
+            defaults: BackendDefaults::default(),
             ..Default::default()
         }
     }

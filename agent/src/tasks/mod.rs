@@ -37,7 +37,7 @@ pub use result::{
 };
 pub use runtime_check::check_runtime_environment;
 pub(crate) use runtime_check::verify_controlled_entrypoint;
-pub use verify_model::verify_model_file;
+pub use verify_model::{verify_model_file, verify_model_file_with_hint};
 
 pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
     let client = ServerClient::new(config.server_url.clone());
@@ -126,7 +126,11 @@ pub async fn run_once(
                 .get("path")
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
-            let result = verify_model_file(path).await;
+            let path_type_hint = task
+                .payload
+                .get("path_type")
+                .and_then(|value| value.as_str());
+            let result = verify_model_file_with_hint(path, path_type_hint).await;
             let status = if result.file_status == "verified" {
                 "succeeded"
             } else {
