@@ -58,11 +58,43 @@ Agent 任务生命周期（poll / record / timeout / notify）的唯一实现已
 
 repository.rs（1255 行）、routes.rs（981 行）功能稳定，非紧急，本轮跳过。
 
+### ✅ 5. 可观测性与 Agent 离线展示（已完成）
+
+**日志时间人可读化：**
+- Server/Agent 的 `platform_log::append` 日志时间戳从 Unix timestamp 改为 ISO 8601（如 `2026-05-05T10:23:11Z`）
+- 无外部依赖，使用纯 std 日历算法
+
+**关键路径日志补齐：**
+- Agent 进程监控：instance_id、pid、exit_status、managed store 保留状态
+- Agent 心跳：running/failed 计数 + 失败详情
+- Agent 退出：保留 N 条受管进程记录
+- Server reconcile：running→failed 写 server log
+- Server check_instance：Agent 离线检查写 server log
+- Server heartbeat reconcile "未上报" 的 instance 写 server log
+
+**进程隔离（Agent 退出不终止模型实例）：**
+- stdin 设为 null
+- Unix `process_group(0)` — 子进程进入独立进程组
+- Agent 退出时不遍历、不 kill 受管进程
+- 环境限制文档说明：systemd KillMode=control-group 或 Docker 容器内需额外注意
+
+**Agent 离线 Web 自动展示：**
+- `ModelInstanceView` 新增 `node_online: bool` + `last_heartbeat_at: Option<i64>`
+- `web/src/utils/instance.ts` 新增 `instanceStatusLabel` / `isAgentOffline`
+- Agent 离线时 running 实例显示 warning 标签 "Agent 离线，运行状态无法确认"
+- 周期刷新自动更新，不误改实例状态为 failed
+
+**新增测试（+3 项 → 95 项总计）：**
+- `running_instance_on_offline_node_shows_node_online_false`
+- `instance_list_includes_node_online_when_agent_offline`
+- `running_instance_on_online_node_shows_node_online_true`
+
 ## 剩余 TODO
 
-- `tests/instance_lifecycle_api.rs` 仍 2805 行，可后续按测试域拆分
+- `tests/instance_lifecycle_api.rs` 仍 ~2900 行，可后续按测试域拆分
 - `repository.rs` / `routes.rs` 后续可拆分
-- 未引入新依赖、未改 API/DB/行为
+- systemd KillMode / Docker 容器生命周期对模型实例进程的影响需真实环境验证
+- 未引入新依赖、未改 API/DB/行为（ModelInstanceView 为向后兼容追加字段）
 
 ## 每轮验收标准
 

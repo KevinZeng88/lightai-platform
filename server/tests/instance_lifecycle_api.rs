@@ -2797,6 +2797,176 @@ async fn disk_sqlite_persistence_survives_restart_and_reconciles() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+// ── 离线 Agent 上 running 实例保持 running，但 node_online=false ──
+
+#[tokio::test]
+async fn running_instance_on_offline_node_shows_node_online_false() {
+    let (app, pool) = test_app_with_pool().await;
+    let registered = register_node_json(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+    let token = registered["agent_token"].as_str().unwrap();
+    heartbeat_node_with_managed_instances(app.clone(), node_id, token, json!([])).await;
+    let environment = create_runtime_environment(app.clone(), node_id, token).await;
+    let model = create_model_for_node(app.clone(), node_id, token).await;
+    let model_id = model["id"].as_str().unwrap();
+    let (_, files) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/models/{model_id}/files"),
+        None,
+    )
+    .await;
+    let model_file_id = files["files"][0]["id"].as_str().unwrap();
+    let (_, instance) = request(
+        app.clone(),
+        "POST",
+        "/api/model-instances",
+        Some(json!({
+            "deploy_type": "local", "name": "offline-node-instance",
+            "node_id": node_id, "runtime_environment_id": environment["id"],
+            "model_file_id": model_file_id
+        })),
+    )
+    .await;
+    let instance_id = instance["id"].as_str().unwrap();
+    sqlx::query("UPDATE model_instances SET status = 'running' WHERE id = ?")
+        .bind(instance_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    // 设置心跳时间为过期，模拟 Agent 离线
+    let cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        - 120;
+    sqlx::query("UPDATE nodes SET last_heartbeat_at = ? WHERE id = ?")
+        .bind(cutoff)
+        .bind(node_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, fetched) = request(
+        app,
+        "GET",
+        &format!("/api/model-instances/{instance_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["status"], "running");
+    assert_eq!(fetched["node_online"], false);
+    assert!(fetched["last_error"].as_str().is_none_or(|s| s.is_empty()));
+    assert!(fetched["last_heartbeat_at"].is_number());
+}
+
+#[tokio::test]
+async fn instance_list_includes_node_online_when_agent_offline() {
+    let (app, pool) = test_app_with_pool().await;
+    let registered = register_node_json(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+    let token = registered["agent_token"].as_str().unwrap();
+    heartbeat_node_with_managed_instances(app.clone(), node_id, token, json!([])).await;
+    let environment = create_runtime_environment(app.clone(), node_id, token).await;
+    let model = create_model_for_node(app.clone(), node_id, token).await;
+    let model_id = model["id"].as_str().unwrap();
+    let (_, files) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/models/{model_id}/files"),
+        None,
+    )
+    .await;
+    let model_file_id = files["files"][0]["id"].as_str().unwrap();
+    let (_, instance) = request(
+        app.clone(),
+        "POST",
+        "/api/model-instances",
+        Some(json!({
+            "deploy_type": "local", "name": "list-offline-test",
+            "node_id": node_id, "runtime_environment_id": environment["id"],
+            "model_file_id": model_file_id
+        })),
+    )
+    .await;
+    let instance_id = instance["id"].as_str().unwrap();
+    sqlx::query("UPDATE model_instances SET status = 'running' WHERE id = ?")
+        .bind(instance_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let cutoff = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
+        - 120;
+    sqlx::query("UPDATE nodes SET last_heartbeat_at = ? WHERE id = ?")
+        .bind(cutoff)
+        .bind(node_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, list) = request(app, "GET", "/api/model-instances", None).await;
+    assert_eq!(status, StatusCode::OK);
+    let instances = list["model_instances"].as_array().unwrap();
+    let instance = instances.iter().find(|i| i["id"] == instance_id).unwrap();
+    assert_eq!(instance["status"], "running");
+    assert_eq!(instance["node_online"], false);
+    assert!(instance["last_error"].as_str().is_none_or(|s| s.is_empty()));
+}
+
+// ── Agent 在线时 node_online=true ──
+
+#[tokio::test]
+async fn running_instance_on_online_node_shows_node_online_true() {
+    let (app, pool) = test_app_with_pool().await;
+    let registered = register_node_json(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+    let token = registered["agent_token"].as_str().unwrap();
+    heartbeat_node_with_managed_instances(app.clone(), node_id, token, json!([])).await;
+    let environment = create_runtime_environment(app.clone(), node_id, token).await;
+    let model = create_model_for_node(app.clone(), node_id, token).await;
+    let model_id = model["id"].as_str().unwrap();
+    let (_, files) = request(
+        app.clone(),
+        "GET",
+        &format!("/api/models/{model_id}/files"),
+        None,
+    )
+    .await;
+    let model_file_id = files["files"][0]["id"].as_str().unwrap();
+    let (_, instance) = request(
+        app.clone(),
+        "POST",
+        "/api/model-instances",
+        Some(json!({
+            "deploy_type": "local", "name": "online-node-instance",
+            "node_id": node_id, "runtime_environment_id": environment["id"],
+            "model_file_id": model_file_id
+        })),
+    )
+    .await;
+    let instance_id = instance["id"].as_str().unwrap();
+    sqlx::query("UPDATE model_instances SET status = 'running' WHERE id = ?")
+        .bind(instance_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+    let (status, fetched) = request(
+        app,
+        "GET",
+        &format!("/api/model-instances/{instance_id}"),
+        None,
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fetched["status"], "running");
+    assert_eq!(fetched["node_online"], true);
+}
+
 async fn stage2_test_app() -> (sqlx::SqlitePool, axum::Router) {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     db::migrate(&pool).await.unwrap();

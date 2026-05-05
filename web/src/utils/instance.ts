@@ -2,12 +2,20 @@ import type { ModelInstance } from '../types'
 
 export function statusType(row: ModelInstance) {
   if (row.status === 'running') {
+    if (row.deploy_type === 'local' && row.node_online === false) return 'warning'
     if (checkFailedReason(row.last_error)) return 'warning'
     return 'success'
   }
   if (row.status === 'failed') return 'danger'
   if (row.status === 'pending' || row.status === 'starting') return 'warning'
   return 'info'
+}
+
+export function instanceStatusLabel(row: ModelInstance) {
+  if (row.status === 'running' && row.deploy_type === 'local' && row.node_online === false) {
+    return 'Agent 离线，运行状态无法确认'
+  }
+  return statusLabel(row.status)
 }
 
 export function statusLabel(status: string) {
@@ -52,8 +60,12 @@ export function checkFailedReason(error?: string | null): boolean {
 }
 
 export function formatTime(value?: number | null) {
-  if (!value) return '-'
+  if (!value || value <= 0) return '-'
   return new Date(value * 1000).toLocaleString()
+}
+
+export function isAgentOffline(row: ModelInstance): boolean {
+  return row.deploy_type === 'local' && row.node_id != null && row.node_online === false
 }
 
 export function emptyToNull(value: string) {

@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use lightai_agent::{config::Config, heartbeat, platform_log, routes, tasks};
+use lightai_agent::{config::Config, heartbeat, managed_process, platform_log, routes, tasks};
 use tokio::sync::RwLock;
 
 #[tokio::main]
@@ -17,6 +17,7 @@ async fn main() -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
     let heartbeat_config = config.clone();
     let task_config = config.clone();
+    let state_path = config.state_path.clone();
     let runtime_config = Arc::new(RwLock::new(heartbeat::RuntimeConfig::from_config(&config)));
 
     tracing::info!(
@@ -32,6 +33,21 @@ async fn main() -> anyhow::Result<()> {
         _ = heartbeat::run(heartbeat_config, runtime_config.clone()) => {}
         _ = tasks::run(task_config, runtime_config.clone()) => {}
     }
+
+    let managed_store_path = managed_process::store_path_from_state_path(&state_path);
+    let record_count = managed_process::load(&managed_store_path)
+        .await
+        .map(|records| records.len())
+        .unwrap_or(0);
+    let _ = lightai_agent::platform_log::append(
+        &lightai_agent::platform_log::LogPolicy::default(),
+        "agent.log",
+        "info",
+        &format!(
+            "Agent 正在退出，不会终止受管实例。managed store 保留 {record_count} 条受管进程记录。",
+        ),
+    )
+    .await;
 
     Ok(())
 }

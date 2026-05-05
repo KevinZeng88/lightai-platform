@@ -14,14 +14,19 @@
 
   <el-table :data="instances" row-key="id" border>
     <el-table-column prop="name" label="实例" min-width="150" fixed="left" />
-    <el-table-column label="状态" width="120">
+    <el-table-column label="状态" width="180">
       <template #default="{ row }">
-        <el-tag :type="statusType(row)">{{ statusLabel(row.status) }}</el-tag>
+        <el-tag :type="statusType(row)">{{ instanceStatusLabel(row) }}</el-tag>
       </template>
     </el-table-column>
     <el-table-column label="检查结果" min-width="280">
       <template #default="{ row }">
-        <div>{{ row.last_error ?? '暂无错误' }}</div>
+        <div v-if="isAgentOffline(row)" class="agent-offline-warning">
+          <el-tag type="warning" size="small">Agent 离线</el-tag>
+          <span>实例运行状态无法确认</span>
+          <div v-if="row.last_heartbeat_at" class="muted tiny-text">最后心跳：{{ formatTime(row.last_heartbeat_at) }}</div>
+        </div>
+        <div v-else>{{ row.last_error ?? '暂无错误' }}</div>
         <div v-if="row.last_checked_at" class="muted">{{ formatTime(row.last_checked_at) }}</div>
       </template>
     </el-table-column>
@@ -236,7 +241,7 @@ import {
   updateModelInstance
 } from '../api'
 import type { ModelDefinition, ModelFile, ModelInstance, NodeStatus, RuntimeEnvironment } from '../types'
-import { backendLabel, checkFailedReason, deployTypeLabel, emptyToNull, formatTime, runtimeDeployTypeLabel, statusLabel, statusType } from '../utils/instance'
+import { backendLabel, checkFailedReason, deployTypeLabel, emptyToNull, formatTime, instanceStatusLabel, isAgentOffline, runtimeDeployTypeLabel, statusLabel, statusType } from '../utils/instance'
 
 const backends = ['ollama', 'llama_cpp', 'vllm', 'custom']
 const models = ref<ModelDefinition[]>([])

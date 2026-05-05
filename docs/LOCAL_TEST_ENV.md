@@ -52,25 +52,52 @@ Web 应显示明确的端口冲突原因；
 
 ## 状态检查与异常恢复验证
 
-以下端到端场景需在真实环境中逐项验证。所有代码路径已由 92 项自动化测试覆盖。
+以下端到端场景需在真实环境中逐项验证。所有代码路径已由 95 项自动化测试覆盖。
 
-### 1. Agent 离线状态检查
+### 1. Agent 离线 — 自动状态检测
 
 ```bash
 # 启动 Server、Agent、Web，创建并启动一个本地实例
 # 确认 Web 显示 running（绿色标签）
 
 # 停止 Agent（Ctrl+C 或 kill）
-# 在 Web 中点击该实例的"检查状态"
+# 等待约 15-30 秒（Web 周期刷新）
+
+# 预期（无需用户点击任何按钮）：
+# - 实例状态标签自动变为黄色 warning
+# - 标签文字："Agent 离线，运行状态无法确认"
+# - 检查结果列显示 "[Agent 离线] 实例运行状态无法确认"
+# - 显示最后心跳时间（格式化后的本地时间）
+# - 实例 status 字段仍为 running（没有误改为 failed）
+# - last_error 为空
+```
+
+### 2. Agent 离线 — 点击检查状态
+
+```bash
+# 停止 Agent 后点击"检查状态"
 
 # 预期：
 # - 弹出红色错误通知，提示"Agent 离线，无法检查实例状态"
-# - 实例状态标签变为黄色 warning（不是绿色 success）
-# - 检查结果列显示"Agent 离线，无法检查实例状态"和最后检查时间
-# - last_error 字段内容可见
+# - instance last_error 记录"Agent 离线，无法检查实例状态"
+# - last_checked_at 更新为当前时间
 ```
 
-### 2. Agent 重启 — 存活实例恢复
+### 3. Agent 退出 — 模型实例进程继续存活
+
+```bash
+# 启动 Agent、启动一个本地实例（确认 running）
+# 记录模型实例的 PID（ps aux | grep llama）
+# 停止 Agent（Ctrl+C 或 kill）
+
+# 预期：
+# - Agent 日志显示"Agent 正在退出，不会终止受管实例"
+# - Agent 日志显示 managed store 保留 N 条记录
+# - 模型实例进程仍然存在（ps aux 可见原 PID）
+# - 模型服务仍可访问（curl 原端口）
+```
+
+### 4. Agent 重启 — 存活实例恢复
 
 ```bash
 # 启动 Agent、启动一个本地实例（确认 running）
@@ -79,11 +106,11 @@ Web 应显示明确的端口冲突原因；
 # 预期：
 # - Agent 日志显示"Agent 重启后恢复受管进程记录 N 条"
 # - Agent 日志显示"Agent 上报受管实例：运行中 X，已退出 Y"
-# - Web 周期刷新后实例保持 running，last_error 为空
+# - Web 周期刷新后实例保持 running，last_error 清空
 # - 不需要人工干预
 ```
 
-### 3. Agent 重启 — 已退出实例纠正
+### 5. Agent 重启 — 已退出实例纠正
 
 ```bash
 # 启动 Agent、启动一个本地实例
@@ -91,12 +118,13 @@ Web 应显示明确的端口冲突原因；
 # 重启 Agent
 
 # 预期：
-# - Agent 日志显示"受管实例进程已退出"
+# - Agent 日志显示"受管实例进程已退出"（包含 instance_id、pid）
+# - Server log 显示 running→failed reconcile
 # - 实例状态变为 failed（红色标签）
 # - 检查结果列显示失败原因"受管进程不存在，可能已异常退出"
 ```
 
-### 4. 手工 kill 受管进程
+### 6. 手工 kill 受管进程
 
 ```bash
 # 启动 Agent、启动一个本地实例（确认 running）
@@ -104,12 +132,25 @@ Web 应显示明确的端口冲突原因；
 # 等待约 30 秒（monitor 3s + heartbeat 15s + Web refresh 15s）
 
 # 预期：
+# - Agent 日志包含实例退出详情（instance_id、pid、exit_status）
 # - 实例状态自动变为 failed
 # - 不需要人工刷新页面
 # - 失败原因包含"受管进程不存在"或"进程已退出"
 ```
 
-### 5. Server 重启 — SQLite 状态恢复
+### 7. 显式 stop instance — 进程被终止
+
+```bash
+# 在 Web 中点击"停止"按钮
+
+# 预期：
+# - 模型实例进程被 kill（ps aux 不再可见）
+# - managed store 记录被移除
+# - 实例状态变为 stopped
+# - Agent 日志记录停止操作
+```
+
+### 8. Server 重启 — SQLite 状态恢复
 
 ```bash
 # 确认 data/lightai.db 存在且包含节点和实例数据
@@ -122,7 +163,7 @@ Web 应显示明确的端口冲突原因；
 # - Agent 下一次心跳后实例状态被 reconcile 同步
 ```
 
-### 6. Agent token 重注册 — node_id 不变
+### 9. Agent token 重注册 — node_id 不变
 
 ```bash
 # 确认 Agent 已注册并获得 node_id
@@ -134,6 +175,59 @@ Web 应显示明确的端口冲突原因；
 # - 新注册返回的 node_id 与旧 node_id 一致
 # - 已有实例状态不受影响
 ```
+
+### 10. 日志格式验证
+
+```bash
+cat logs/agent.log | head -5
+cat logs/server.log | head -5
+
+# 预期：
+# - 每行开头为 ISO 8601 时间戳，如 2026-05-05T10:23:11Z
+# - 而非 Unix timestamp 如 1777953391
+```
+
+## 部署环境注意事项
+
+### systemd — KillMode
+
+若 Agent 以 systemd 运行，**必须**将 `KillMode` 设为 `process`。systemd 默认 `KillMode=control-group`，在 `systemctl stop lightai-agent` 或 `systemctl restart lightai-agent` 时会向整个 cgroup 内所有进程发送 SIGTERM，导致 Agent 启动的模型实例进程也被终止。这违反"Agent 退出不终止模型实例"的设计约束。
+
+完整 service 示例文件见 `deploy/lightai-agent.service`，关键配置：
+
+```ini
+[Service]
+KillMode=process
+```
+
+部署后验证：
+
+```bash
+# 1. 检查当前 KillMode
+systemctl show lightai-agent -p KillMode
+
+# 2. 预期输出
+KillMode=process
+
+# 3. 端到端验证：启动实例后重启 Agent service
+systemctl restart lightai-agent
+
+# 4. 确认模型实例进程未被终止
+ps aux | grep llama  # 原 PID 应仍然存在
+curl http://127.0.0.1:18088/health  # 服务应仍可访问
+```
+
+> **注意**：若 Agent 升级需要重启，使用 `systemctl restart` 而非 `systemctl stop && systemctl start`，配合 `KillMode=process` 确保模型实例不中断。
+
+### Docker 容器
+
+若 Agent 运行在 Docker 容器中，容器停止会终止容器内所有进程。如果要求模型实例在 Agent 退出后继续运行，Agent 与模型进程不能共用同一个会被停止的容器生命周期。建议：
+
+- Agent 以 host 网络模式运行（`--network host`）
+- 模型实例进程由 Agent 启动在宿主机上（Agent 容器有宿主机 PID namespace 访问权限时）
+- 或模型实例运行在独立容器中，Agent 仅通过 Docker API 管理
+
+上述部署模式不在当前平台自动化范围内，需运维侧配合。
 
 ## 安全提醒
 

@@ -462,6 +462,8 @@ pub struct ModelInstanceView {
     pub model_file_path: Option<String>,
     pub node_id: Option<String>,
     pub node_name: Option<String>,
+    pub node_online: bool,
+    pub last_heartbeat_at: Option<i64>,
     pub runtime_environment_id: Option<String>,
     pub runtime_environment_name: Option<String>,
     pub name: String,

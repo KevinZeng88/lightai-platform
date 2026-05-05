@@ -47,19 +47,33 @@ Agent (GPU 节点) ──主动连接──> Server (中央控制面) <── We
   - running 状态下 `last_error` 为空；failed/stopped 才保留失败原因。
   - 实例操作后 Web 原地更新状态；过渡态轮询直至终态。
 
+### Agent 与模型实例的进程关系
+
+- **Agent 是模型实例的管理进程，不是宿主进程。** Agent 退出、崩溃或升级重启时，不会主动终止它启动的模型实例。
+- 模型实例以独立进程组启动（Unix `process_group(0)`），stdin 设为 null，stdout/stderr 写入受控日志文件，不依赖 Agent 进程存活。
+- Agent 退出时只 flush 状态、写日志、退出自身，不遍历和 kill 受管进程。Agent 退出日志包含"不会终止受管实例"及 managed store 保留记录数。
+- Agent 重启后读取 managed store，通过 `/proc/{pid}/stat` 校验原进程是否仍存活。
+- **只有用户显式执行"停止实例"操作，才允许终止模型进程**。停止时优先按 pid + start_time 校验，确认是原进程后才 kill。
+- **环境限制**：若 Agent 运行在 systemd 下且 KillMode=control-group，则 systemd 停止 Agent service 时会 kill 整个 cgroup 内的子进程。建议设置 `KillMode=process`。若 Agent 运行在 Docker 容器内，容器停止会终止容器内所有进程，Agent 与模型实例不能共用同一个会被停止的容器生命周期。
+
 ### 状态检查与异常恢复
 
+- **Agent 离线 ≠ 实例 failed**。Agent 离线时，模型实例进程可能仍在运行，Server 无法确认。实例状态保持原值（如 running），`node_online` 返回 false，Web 显示黄色 warning 标签"Agent 离线，运行状态无法确认"。不将 running 误改为 failed。
 - Agent 离线时，状态检查返回 "Agent 离线，无法检查实例状态"，Web 显示黄色 warning 标签和红色错误通知。
 - Agent 重启后恢复 managed store 中持久化的受管进程（不扫描外部进程）。通过 `/proc/{pid}/stat` 的 start_time 校验防止 PID 复用误判。
 - Agent 重启/重连后首次心跳立即上报受管实例状态；Server reconcile 同步。
 - Server 重启后状态从 SQLite 恢复，下一次 Agent 心跳触发 reconcile。
-- `last_error` 仅表示错误/警告；running 状态下为空。
+- `last_error` 仅表示错误/警告；running 状态下为空（Agent 离线不写 last_error）。
 - 受管进程被手工 kill 后 ≤33s（monitor 3s + heartbeat 15s + Web refresh 15s）自动同步为 failed。
 - 外部手工启动的进程不自动纳管。
+- Server heartbeat reconcile 将 running→failed 时写入 server log。
+- Agent 进程监控检测到进程退出时写入 agent log（包含 instance_id、pid、退出原因）。
+- Web 周期刷新自动更新 Agent 离线状态，用户无需手工点击检查。
 
 ### 平台日志与审计
 
 - Server / Agent 各自写入受控日志文件，支持级别过滤、按大小轮转、按文件数/天数保留。
+- 日志时间戳使用 ISO 8601 格式（如 `2026-05-05T10:23:11Z`），人类可读。
 - 日志目录自动创建，路径白名单管控（仅 server.log / agent.log / instance.log）。
 - 日志写入和读取全程做敏感信息隐藏（token / password / authorization / secret 等）。
 - Web 前端未捕获异常和 API 请求失败自动上报 Server。
@@ -133,7 +147,7 @@ cd web && npm install && npm run dev
 
 ```bash
 cargo fmt --all --check
-cargo test --workspace          # 当前 92 项
+cargo test --workspace          # 当前 95 项
 cargo build --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cd web && npm run build
@@ -141,13 +155,17 @@ cd web && npm run build
 
 ## 需真实环境手工验证
 
-以下端到端场景代码路径已由 92 项自动化测试覆盖，完整流程仍需在 GPU + llama-server + GGUF 模型环境中验证：
+以下端到端场景代码路径已由 95 项自动化测试覆盖，完整流程仍需在 GPU + llama-server + GGUF 模型环境中验证：
 
 - Agent 离线状态检查 → 红色错误 + yellow warning 标签
+- Agent 离线后 Web 周期刷新自动更新为 warning（无需手工点击检查）
 - Agent 重启后存活实例自动恢复 running（last_error 清空）
+- Agent 退出后模型实例进程仍存活（进程隔离）
 - 手工 kill 受管进程后自动纠正为 failed
 - Server 重启后 SQLite 状态恢复 + heartbeat reconcile
 - Agent token 重注册后 node_id 不变
+- 日志时间戳为 ISO 8601 格式（人类可读）
+- systemd KillMode 对模型实例进程的影响（建议 KillMode=process）
 
 详见 `docs/LOCAL_TEST_ENV.md`。
 

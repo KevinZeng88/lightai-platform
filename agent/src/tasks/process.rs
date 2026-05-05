@@ -1,11 +1,11 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Stdio;
+use std::process::{Command as StdCommand, Stdio};
 use std::sync::{Arc, OnceLock};
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
-use tokio::process::{Child, Command};
+use tokio::process::Child;
 use tokio::sync::Mutex;
 use tokio::time::{sleep, timeout, Duration};
 
@@ -136,14 +136,23 @@ pub async fn start_model_instance_with_store(
         return instance_failure(&message);
     }
     let command_summary = command_summary(binary_path, &args);
-    let mut command = Command::new(binary_path);
-    command.args(&args);
-    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut std_cmd = StdCommand::new(binary_path);
+    std_cmd.args(&args);
+    std_cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
     if let Some(working_dir) = payload.get("working_dir").and_then(|value| value.as_str()) {
         if !working_dir.trim().is_empty() {
-            command.current_dir(working_dir);
+            std_cmd.current_dir(working_dir);
         }
     }
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        std_cmd.process_group(0);
+    }
+    let mut command = tokio::process::Command::from(std_cmd);
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -422,10 +431,11 @@ pub(crate) async fn run_controlled_script_action(
     }
     let args = vec![action.to_string()];
     let command = command_summary(binary_path, &args);
-    let output = match timeout(
-        Duration::from_secs(10),
-        Command::new(binary_path).args(&args).output(),
-    )
+    let output = match timeout(Duration::from_secs(10), {
+        let mut cmd = tokio::process::Command::new(binary_path);
+        cmd.args(&args).stdin(Stdio::null());
+        cmd.output()
+    })
     .await
     {
         Ok(Ok(output)) => output,
@@ -809,6 +819,11 @@ fn spawn_process_monitor(instance_id: String, _managed_store_path: Option<PathBu
                         exit_status = %status,
                         "managed process exited; removing from registry, keeping store record for heartbeat"
                     );
+                    let pid = handle
+                        .child
+                        .id()
+                        .map(|p| p.to_string())
+                        .unwrap_or_else(|| "未知".to_string());
                     guard.remove(&instance_id);
                     drop(guard);
                     // 不移除 managed store 记录：下次心跳 reports() 会检查到进程不存在，
@@ -818,7 +833,7 @@ fn spawn_process_monitor(instance_id: String, _managed_store_path: Option<PathBu
                         "agent.log",
                         "warn",
                         &format!(
-                            "受管实例 {instance_id} 进程异常退出（{status}），最近日志：{}",
+                            "受管实例进程异常退出 instance_id={instance_id} pid={pid} exit_status={status}；managed store 保留记录等待下次心跳上报，最近日志：{}",
                             &log_tail.chars().take(300).collect::<String>()
                         ),
                     )

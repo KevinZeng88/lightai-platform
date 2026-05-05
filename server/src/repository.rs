@@ -10,6 +10,7 @@ use crate::models::{
     GpuMetrics, GpuView, HeartbeatRequest, NodeListResponse, NodeMetricSample,
     NodeMetricSamplesResponse, NodeMetrics, NodeView, RegisterRequest, RegisterResponse,
 };
+use crate::platform_log;
 use crate::platform_log::LogPolicy;
 
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
@@ -542,6 +543,21 @@ async fn reconcile_managed_instances(
         .bind(node_id)
         .execute(&mut **tx)
         .await?;
+
+        if status == "failed" {
+            let _ = platform_log::append(
+                &platform_log::global(),
+                "server.log",
+                "warn",
+                &format!(
+                    "heartbeat reconcile: instance={instance_id} node={node_id} running→failed: {reason}",
+                    instance_id = report.instance_id,
+                    node_id = node_id,
+                    reason = report.message,
+                ),
+            )
+            .await;
+        }
     }
 
     let rows = sqlx::query(
@@ -571,9 +587,19 @@ async fn reconcile_managed_instances(
         )
         .bind(now)
         .bind(now)
-        .bind(id)
+        .bind(&id)
         .execute(&mut **tx)
         .await?;
+
+        let _ = platform_log::append(
+            &platform_log::global(),
+            "server.log",
+            "warn",
+            &format!(
+                "heartbeat reconcile: instance={id} node={node_id} running→failed: Agent 未上报该实例受管进程状态",
+            ),
+        )
+        .await;
     }
 
     Ok(())

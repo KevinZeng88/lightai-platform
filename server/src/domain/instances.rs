@@ -167,7 +167,8 @@ pub async fn list_model_instances(
     let rows = sqlx::query(
         r#"
         SELECT mi.*, m.name AS model_definition_name, mf.path AS model_file_path,
-               n.name AS node_name, re.name AS runtime_environment_name
+               n.name AS node_name, n.last_heartbeat_at AS node_last_heartbeat_at,
+               re.name AS runtime_environment_name
         FROM model_instances mi
         LEFT JOIN models m ON m.id = mi.model_id
         LEFT JOIN model_files mf ON mf.id = mi.model_file_id
@@ -187,7 +188,8 @@ pub async fn model_instance(pool: &SqlitePool, id: &str) -> Result<ModelInstance
     let row = sqlx::query(
         r#"
         SELECT mi.*, m.name AS model_definition_name, mf.path AS model_file_path,
-               n.name AS node_name, re.name AS runtime_environment_name
+               n.name AS node_name, n.last_heartbeat_at AS node_last_heartbeat_at,
+               re.name AS runtime_environment_name
         FROM model_instances mi
         LEFT JOIN models m ON m.id = mi.model_id
         LEFT JOIN model_files mf ON mf.id = mi.model_file_id
@@ -311,6 +313,15 @@ pub async fn check_model_instance(
             .as_deref()
             .ok_or_else(|| Stage3Error::BadRequest("本地实例缺少节点".to_string()))?;
         if !node_online(pool, node_id).await? {
+            let _ = crate::platform_log::append(
+                &crate::platform_log::global(),
+                "server.log",
+                "warn",
+                &format!(
+                    "check_instance: instance={id} node={node_id} agent offline, 无法检查实例状态"
+                ),
+            )
+            .await;
             return update_instance_check(
                 pool,
                 id,
@@ -527,6 +538,11 @@ pub(crate) async fn update_instance_check(
 }
 
 fn model_instance_from_row(row: sqlx::sqlite::SqliteRow) -> ModelInstanceView {
+    let last_heartbeat_at: Option<i64> = row.get("node_last_heartbeat_at");
+    let node_online = match last_heartbeat_at {
+        Some(last_seen) => now_unix_secs() - last_seen <= crate::repository::ONLINE_THRESHOLD_SECS,
+        None => false,
+    };
     ModelInstanceView {
         id: row.get("id"),
         model_id: row.get("model_id"),
@@ -535,6 +551,8 @@ fn model_instance_from_row(row: sqlx::sqlite::SqliteRow) -> ModelInstanceView {
         model_file_path: row.get("model_file_path"),
         node_id: row.get("node_id"),
         node_name: row.get("node_name"),
+        node_online,
+        last_heartbeat_at,
         runtime_environment_id: row.get("runtime_environment_id"),
         runtime_environment_name: row.get("runtime_environment_name"),
         name: row.get("name"),

@@ -1,0 +1,29 @@
+[Unit]
+Description=LightAI Agent (GPU node)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lightai
+Group=lightai
+WorkingDirectory=/opt/lightai
+ExecStart=/opt/lightai/bin/lightai-agent
+Restart=always
+RestartSec=5
+
+# CRITICAL: KillMode=process 确保 systemd 停止 Agent 时只终止 Agent 自身，
+# 不会向整个 cgroup 发送信号。Agent 管理的模型实例进程必须独立存活。
+# 默认值 KillMode=control-group 会导致 Agent 退出时杀死所有子进程（模型实例），
+# 违反"Agent 退出不终止实例"的设计约束。
+KillMode=process
+
+# 安全加固
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/lightai/data /opt/lightai/logs /opt/lightai/models
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -188,6 +188,8 @@ export interface ModelInstance {
   model_name?: string | null
   node_id?: string | null
   node_name?: string | null
+  node_online?: boolean
+  last_heartbeat_at?: number | null
   runtime_environment_id?: string | null
   runtime_environment_name?: string | null
   name: string

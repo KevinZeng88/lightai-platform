@@ -1,0 +1,27 @@
+[Unit]
+Description=LightAI Server (control plane)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=lightai
+Group=lightai
+WorkingDirectory=/opt/lightai
+ExecStart=/opt/lightai/bin/lightai-server
+Restart=always
+RestartSec=3
+
+# Server 不管理子进程，KillMode=process 或 control-group 均安全。
+# 此处显式设为 process 以保持与 Agent 配置一致。
+KillMode=process
+
+# 安全加固
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/opt/lightai/data /opt/lightai/logs
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

@@ -120,15 +120,20 @@ Agent 侧任务执行。包含：
 
 ### web/src/components/InstancesPanel.vue
 
-实例管理 UI，约 680 行。包含：
+实例管理 UI（616 行）。包含：
 - 实例列表、创建/编辑表单
 - start / stop / test / check 操作 + 自动刷新
+- Agent 离线自动检测：周期刷新时基于 `node_online` / `last_heartbeat_at` 展示 warning 标签
 - 过渡态轮询（pollInstanceUntilStable）
 - 周期刷新（15s）
 - 探测配置面板
 - 日志查看对话框 + 刷新按钮
 
-后续可提取 composables 进一步拆分。
+辅助模块 `web/src/utils/instance.ts`（61 行）：statusType / statusLabel / instanceStatusLabel / isAgentOffline / formatTime 等。
+
+### server/src/models.rs — ModelInstanceView
+
+`ModelInstanceView` 包含 `node_online: bool` 和 `last_heartbeat_at: Option<i64>` 字段，从实例节点的心跳时间推算。Agent 离线时 `node_online=false`，但实例状态保持原值（不误改为 failed）。
 
 ## 数据流
 
@@ -158,3 +163,32 @@ Agent 重启 → managed_process::load → 逐条 /proc/{pid}/stat 校验
   → Server reconcile_managed_instances → running 实例保持 running
   → 已退出实例标记为 failed + 原因
 ```
+
+### Agent 离线检测（Web 自动感知）
+
+```
+Server list_model_instances → 查询 n.last_heartbeat_at
+  → 计算 node_online（now - last_heartbeat_at <= 60s）
+  → 返回 ModelInstanceView { node_online, last_heartbeat_at, status, last_error }
+Web 周期刷新（15s）→ 检查 node_online
+  → 离线 + running → warning 标签 "Agent 离线，运行状态无法确认"
+  → 在线 + running → success 标签 "运行中"
+  → 不误改 instance status 为 failed
+```
+
+### 进程隔离（Agent 退出不终止实例）
+
+```
+Agent 启动实例 → std::process::Command
+  → stdin(Stdio::null())       # 脱离 Agent 控制终端
+  → stdout/stderr → piped      # 写入受控日志文件
+  → Unix: process_group(0)     # 独立进程组，不接收 Agent 进程组信号
+  → spawn                      # 子进程独立于 Agent 存活
+Agent 退出 → main.rs 日志"正在退出，不会终止受管实例"
+  → managed store 保留 N 条记录
+  → 不遍历、不 kill 受管进程
+Agent 重启 → managed_process::load → reports()
+  → 存活实例上报 running，已退出上报 failed
+```
+
+> **systemd 部署**：必须设置 `KillMode=process`（非默认的 `control-group`），否则 systemd 停止 Agent service 时会向整个 cgroup 发送 SIGTERM，导致模型实例进程也被终止。示例 service 文件见 `deploy/lightai-agent.service`。

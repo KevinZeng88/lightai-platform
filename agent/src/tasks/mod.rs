@@ -454,7 +454,10 @@ fn has_parent_dir(path: &str) -> bool {
 async fn detect_entrypoint_version(path: &str) -> Option<String> {
     let output = timeout(
         Duration::from_secs(3),
-        Command::new(path).arg("--version").output(),
+        Command::new(path)
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .output(),
     )
     .await
     .ok()?
