@@ -40,10 +40,14 @@ Agent (GPU 节点) ──主动连接──> Server (中央控制面) <── We
 
 - **External 实例**：接入已有外部模型服务。平台只记录和 HTTP 可达性检查，不负责启动/停止。
 - **本地实例**：绑定节点、运行环境和已验证模型文件，由 Agent 负责启动/停止/测试。
-  - 启动前端口占用检查，失败时返回中文原因。
+  - 支持 local（本地进程）和 docker（Docker 容器）两种运行方式，统一使用同一套 start/stop/check/logs 操作。
+  - **Local**：启动本地二进制/脚本进程，记录 pid + start_time。启动前端口占用检查。
+  - **Docker**：通过 `docker run` 启动容器，记录 container_id + container_name。Docker 参数通过 `params_json` 以 JSON 配置。
+  - Docker 容器默认不加 `--rm`，便于 Agent 在容器退出后仍能 inspect/logs 获取 OOM、退出码等诊断信息。
   - 启动后按后端区分服务就绪探测路径（可通过实例参数自定义）。
-  - 就绪后额外验证进程存活，防止假就绪。
-  - 后台进程存活监控（3s 周期），异常退出通过心跳上报 failed。
+  - 就绪后额外验证进程存活（local）或 docker inspect 状态（docker），防止假就绪。
+  - 后台进程存活监控（local 3s 周期 / docker heartbeat 周期 inspect），异常退出通过心跳上报 failed。
+  - Docker 第一版通过高级 JSON 参数配置，后续可扩展为 Web 表单字段。
   - running 状态下 `last_error` 为空；failed/stopped 才保留失败原因。
   - 实例操作后 Web 原地更新状态；过渡态轮询直至终态。
 
@@ -171,7 +175,7 @@ cd web && npm run build
 
 ## 当前未实现
 
-- Docker 推理进程完整启动模板、进程守护、日志流
+- Docker 实例 Web 表单化配置（当前通过高级 JSON params_json 配置）
 - OpenAI-compatible API Gateway、API Key 管理
 - 使用量统计、计费、复杂报表、告警
 - 历史数据自动清理、降采样

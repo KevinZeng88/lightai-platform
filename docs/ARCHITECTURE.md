@@ -46,6 +46,7 @@ lightai-platform/
       verify_model.rs     # 模型文件验证
       cleanup.rs          # 受控模型文件清理
       logs.rs             # 实例日志读取
+      docker_backend.rs  # Docker 容器后端（run/stop/inspect/logs/check）
     heartbeat.rs       # 心跳、指标采集、配置同步
     managed_process.rs # 受管进程持久化记录与恢复
     platform_log.rs    # 日志写入/读取/脱敏/轮转
@@ -192,3 +193,32 @@ Agent 重启 → managed_process::load → reports()
 ```
 
 > **systemd 部署**：必须设置 `KillMode=process`（非默认的 `control-group`），否则 systemd 停止 Agent service 时会向整个 cgroup 发送 SIGTERM，导致模型实例进程也被终止。示例 service 文件见 `deploy/lightai-agent.service`。
+
+### Docker 容器启动
+
+```
+Web 点击启动 → POST /api/model-instances/{id}/start
+  → domain::start_model_instance → 创建 agent_task
+  → Agent poll 获取任务 → tasks::start_model_instance_with_store
+  → deploy_type == "docker" → start_docker_instance
+    → parse_docker_payload → DockerPayload { docker, vllm }
+    → build_docker_run_args → ["run", "--name", ..., "--gpus", ..., "-p", ..., "-v", ..., "--detach", image]
+    → build_vllm_args → ["--model", ..., "--served-model-name", ..., "--port", ...]
+    → docker run (argv-style, no shell) → container_id
+    → ManagedProcessRecord { container_id, container_name, deploy_type: "docker" }
+    → upsert managed store
+  → 上报结果 → running + base_url
+```
+
+### Docker 实例恢复
+
+```
+Agent 重启 → managed_process::load → 逐条 check_record
+  → deploy_type == "docker" → docker_backend::check_docker_record
+    → docker inspect <container> → parse State.Running/ExitCode/Error
+    → running → 保持 running，清空 last_error
+    → exited/not found → 上报 failed + 退出原因
+  → deploy_type == "local" | None → 现有 pid + start_time 校验
+```
+
+> **Docker 部署验证**：本机使用 `vllm/vllm-openai:latest` 镜像 + `/data/models/qwen3-0.6b` 模型目录。Docker 容器默认不加 `--rm`，便于 Agent 在容器异常退出后仍能通过 `docker inspect` 获取 OOM、退出码等诊断信息。用户显式 stop instance 时才 `docker stop`；后续清理资源时才 `docker rm`。

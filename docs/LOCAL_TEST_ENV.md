@@ -234,3 +234,27 @@ curl http://127.0.0.1:18088/health  # 服务应仍可访问
 不要用真实模型文件测试删除功能。
 删除测试请使用临时文件。
 模型文件物理删除必须走模型垃圾箱和 Agent 受控清理流程。
+
+## Docker 端到端测试（手工验证）
+
+### 前置条件
+
+- Docker + NVIDIA GPU + nvidia-container-toolkit
+- vLLM Docker 镜像：`vllm/vllm-openai:latest`
+- 测试模型目录：`/data/models/qwen3-0.6b`
+- 缓存目录：`/data/vllm-cache`
+- 测试端口：`18000`
+
+### 测试步骤
+
+1. **创建 Docker Runtime**：Web → 运行环境 → 新增，deploy_type=docker, backend=vllm
+2. **创建模型**：名称 qwen3-0.6b，路径 /data/models/qwen3-0.6b
+3. **创建 Docker Instance**：选择节点、runtime、模型文件
+4. **启动** → `docker ps | grep lightai`
+5. **验证** → `curl http://127.0.0.1:18000/v1/models`
+6. **检查** → Web 显示 running
+7. **日志** → 查看 vLLM 启动日志
+8. **Agent 重启** → 容器仍在，Web 保持 running
+9. **手工 stop 容器** → 等待心跳 → Web failed
+10. **Web stop** → 容器停止
+11. **Agent 离线** → Web warning

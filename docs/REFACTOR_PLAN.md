@@ -58,7 +58,19 @@ Agent 任务生命周期（poll / record / timeout / notify）的唯一实现已
 
 repository.rs（1255 行）、routes.rs（981 行）功能稳定，非紧急，本轮跳过。
 
-### ✅ 5. 可观测性与 Agent 离线展示（已完成）
+### ✅ 5. Docker 后端（已完成）
+
+- `agent/src/tasks/docker_backend.rs` 新增（~950 行）
+- Docker run/stop/inspect/logs 命令构造、容器管理、状态解析
+- 三层配置模型：model + runtime + instance → docker run
+- managed store 扩展支持 container_id/container_name
+- Docker 与 local 统一生命周期（start/stop/check/logs/recover）
+- Web 第一版通过高级 JSON params_json 配置
+- Docker 容器默认不加 --rm
+- Agent 退出不停止容器
+- 23 项 Docker 相关测试
+
+### ✅ 6. 可观测性与 Agent 离线展示（已完成）
 
 **日志时间人可读化：**
 - Server/Agent 的 `platform_log::append` 日志时间戳从 Unix timestamp 改为 ISO 8601（如 `2026-05-05T10:23:11Z`）

@@ -20,10 +20,17 @@ use super::{
 };
 use crate::managed_process::{self, ManagedProcessRecord};
 use crate::platform_log::{self, LogPolicy};
+use crate::tasks::docker_backend;
 use crate::tasks::probe::{
     endpoint_ready, ProbeConfig, CUSTOM_SCRIPT_STARTUP_WAIT_MS, POST_KILL_LOG_WAIT_MS,
     POST_READINESS_VERIFY_DELAY_MS,
 };
+
+#[derive(Debug, Clone)]
+pub(crate) struct DockerCheckResult {
+    pub(crate) is_running: bool,
+    pub(crate) message: String,
+}
 
 /// 运行状态监控：检查周期（秒）。Agent 后台持续检查受管进程是否存活，
 /// 与启动就绪探测无关。本轮不进入配置。
@@ -103,12 +110,17 @@ pub async fn start_model_instance_with_store(
         .get("instance_id")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
-    let backend = payload
-        .get("backend")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default();
     let deploy_type = payload
         .get("deploy_type")
+        .and_then(|value| value.as_str())
+        .unwrap_or_default();
+
+    if deploy_type == "docker" {
+        return start_docker_instance(instance_id, payload, managed_store_path).await;
+    }
+
+    let backend = payload
+        .get("backend")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     let model_path = payload
@@ -287,6 +299,9 @@ pub async fn start_model_instance_with_store(
                 command: Some(command_summary.clone()),
                 log_path: log_path_text.clone(),
                 started_at: now_unix_secs(),
+                container_id: None,
+                container_name: None,
+                deploy_type: Some("local".to_string()),
             },
         )
         .await
@@ -336,6 +351,15 @@ pub async fn stop_model_instance_with_store(
         .get("instance_id")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
+
+    if let Some(store_path) = managed_store_path {
+        if let Ok(Some(record)) = managed_process::find(store_path, instance_id).await {
+            if record.deploy_type.as_deref() == Some("docker") {
+                return stop_docker_instance(instance_id, &record, store_path).await;
+            }
+        }
+    }
+
     let Some(mut handle) = process_registry().lock().await.remove(instance_id) else {
         let Some(store_path) = managed_store_path else {
             return instance_failure("未找到本地进程引用，且未配置受管进程记录，拒绝停止");
@@ -554,6 +578,133 @@ fn attach_log_reader(
                 }
             }
         });
+    }
+}
+
+async fn start_docker_instance(
+    instance_id: &str,
+    payload: &serde_json::Value,
+    managed_store_path: Option<&Path>,
+) -> ModelInstanceTaskResult {
+    let docker_payload = resolve_docker_payload(payload).await;
+
+    let container_name = docker_payload.docker.container_name.clone();
+
+    let result = docker_backend::start_docker_container(instance_id, &docker_payload).await;
+
+    if result.instance_status == "running" {
+        let now = now_unix_secs();
+        let container_id = result.process_ref.clone().unwrap_or_default();
+        let base_url = result.base_url.clone().unwrap_or_default();
+        let command_summary = result.command.clone().unwrap_or_default();
+
+        if let Some(store_path) = managed_store_path {
+            let record = docker_backend::create_docker_managed_record(
+                instance_id,
+                &container_id,
+                &container_name,
+                &docker_payload,
+                &base_url,
+                &command_summary,
+                now,
+            );
+            if let Err(error) = managed_process::upsert(store_path, record).await {
+                return instance_failure_with_details(
+                    &format!("Docker 受管记录写入失败：{error}"),
+                    None,
+                    Some(command_summary),
+                );
+            }
+        }
+    }
+
+    result
+}
+
+async fn resolve_docker_payload(payload: &serde_json::Value) -> docker_backend::DockerPayload {
+    let runtime_params = payload
+        .get("runtime_params")
+        .or_else(|| payload.get("runtime_config"));
+
+    let runtime_cfg: Option<docker_backend::DockerRuntimeConfig> = runtime_params.and_then(|v| {
+        let val: serde_json::Value = if let Some(s) = v.as_str() {
+            serde_json::from_str(s).unwrap_or_default()
+        } else {
+            v.clone()
+        };
+        serde_json::from_value(val).ok()
+    });
+
+    let overrides: Option<docker_backend::DockerInstanceOverrides> = {
+        let params = payload.get("params").or_else(|| payload.get("params_json"));
+        params.and_then(|v| {
+            let val: serde_json::Value = if let Some(s) = v.as_str() {
+                serde_json::from_str(s).unwrap_or_default()
+            } else {
+                v.clone()
+            };
+            serde_json::from_value(val).ok()
+        })
+    };
+
+    if runtime_cfg.is_some() || overrides.is_some() {
+        let model_path = payload
+            .get("model_path")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let model_name = payload
+            .get("model_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+
+        if let Ok(merged) = docker_backend::merge_docker_config(
+            model_path,
+            model_name,
+            runtime_cfg.as_ref(),
+            overrides.as_ref(),
+        ) {
+            return merged;
+        }
+    }
+
+    // Fallback: try old full DockerPayload format
+    docker_backend::parse_docker_payload(payload).unwrap_or_default()
+}
+
+async fn stop_docker_instance(
+    instance_id: &str,
+    record: &ManagedProcessRecord,
+    managed_store_path: &Path,
+) -> ModelInstanceTaskResult {
+    match docker_backend::stop_docker_container(record).await {
+        Ok(()) => {
+            let _ = managed_process::remove(managed_store_path, instance_id).await;
+            ModelInstanceTaskResult {
+                instance_status: "stopped".to_string(),
+                message: "Docker 容器已停止".to_string(),
+                base_url: None,
+                endpoint_url: None,
+                process_id: None,
+                process_ref: None,
+                response_summary: None,
+                log_tail: None,
+                command: record.command.clone(),
+            }
+        }
+        Err(message) => {
+            let _ = managed_process::remove(managed_store_path, instance_id).await;
+            ModelInstanceTaskResult {
+                instance_status: "stopped".to_string(),
+                message,
+                base_url: None,
+                endpoint_url: None,
+                process_id: None,
+                process_ref: None,
+                response_summary: None,
+                log_tail: None,
+                command: record.command.clone(),
+            }
+        }
     }
 }
 

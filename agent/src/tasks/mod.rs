@@ -5,6 +5,7 @@ use tokio::sync::RwLock;
 use tokio::time::{sleep, Duration};
 
 mod cleanup;
+pub(crate) mod docker_backend;
 mod logs;
 mod probe;
 mod process;

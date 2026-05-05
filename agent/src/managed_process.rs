@@ -14,6 +14,12 @@ pub struct ManagedProcessRecord {
     pub command: Option<String>,
     pub log_path: Option<String>,
     pub started_at: i64,
+    #[serde(default)]
+    pub container_id: Option<String>,
+    #[serde(default)]
+    pub container_name: Option<String>,
+    #[serde(default)]
+    pub deploy_type: Option<String>,
 }
 
 pub fn store_path_from_state_path(state_path: &str) -> PathBuf {
@@ -107,6 +113,9 @@ pub async fn process_start_time(pid: i64) -> Option<u64> {
 }
 
 pub async fn kill_managed(record: &ManagedProcessRecord) -> Result<(), String> {
+    if record.deploy_type.as_deref() == Some("docker") {
+        return crate::tasks::docker_backend::stop_docker_container(record).await;
+    }
     let check = check_record(record).await;
     if !check.is_running {
         return Err(check.message);
@@ -120,6 +129,13 @@ struct ProcessCheck {
 }
 
 async fn check_record(record: &ManagedProcessRecord) -> ProcessCheck {
+    if record.deploy_type.as_deref() == Some("docker") {
+        let result = crate::tasks::docker_backend::check_docker_record(record).await;
+        return ProcessCheck {
+            is_running: result.is_running,
+            message: result.message,
+        };
+    }
     let Some(current_start_time) = process_start_time(record.process_id).await else {
         return ProcessCheck {
             is_running: false,
@@ -185,11 +201,36 @@ fn parse_linux_stat_start_time(stat: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::parse_linux_stat_start_time;
+    use super::ManagedProcessRecord;
 
     #[test]
     fn parses_linux_proc_stat_start_time() {
         let stat = "123 (cmd with space) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20";
 
         assert_eq!(parse_linux_stat_start_time(stat), Some(987654));
+    }
+
+    #[test]
+    fn managed_record_backward_compat_without_docker_fields() {
+        let old_json = r#"{
+            "instance_id": "inst-1",
+            "process_id": 12345,
+            "process_start_time": 987654,
+            "base_url": "http://127.0.0.1:18080",
+            "endpoint_url": "http://127.0.0.1:18080",
+            "command": "[\"/usr/local/bin/llama-server\",\"-m\",\"/models/test.gguf\"]",
+            "log_path": "/tmp/instance.log",
+            "started_at": 1700000000
+        }"#;
+        let record: ManagedProcessRecord = serde_json::from_str(old_json).unwrap();
+        assert_eq!(record.instance_id, "inst-1");
+        assert_eq!(record.process_id, 12345);
+        assert_eq!(record.process_start_time, Some(987654));
+        assert_eq!(record.base_url.as_deref(), Some("http://127.0.0.1:18080"));
+        assert!(record.container_id.is_none());
+        assert!(record.container_name.is_none());
+        assert!(record.deploy_type.is_none());
+        // Old local record should NOT be treated as Docker
+        assert_ne!(record.deploy_type.as_deref(), Some("docker"));
     }
 }

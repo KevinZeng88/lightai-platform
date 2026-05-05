@@ -42,6 +42,36 @@ pub(crate) async fn read_instance_log(
 
     if let Some(store_path) = managed_store_path {
         if let Ok(Some(record)) = managed_process::find(store_path, instance_id).await {
+            if record.deploy_type.as_deref() == Some("docker") {
+                let container_ref = record
+                    .container_id
+                    .as_deref()
+                    .or(record.container_name.as_deref())
+                    .unwrap_or("unknown");
+                match super::docker_backend::read_docker_logs(container_ref, max_bytes).await {
+                    Ok(content) => {
+                        if content.trim().is_empty() {
+                            return ReadInstanceLogResult {
+                                log_status: "available".to_string(),
+                                content: "Docker 容器日志为空".to_string(),
+                                message: format!("从 docker logs {} 读取", container_ref),
+                            };
+                        }
+                        return ReadInstanceLogResult {
+                            log_status: "available".to_string(),
+                            content,
+                            message: format!("从 docker logs {} 读取", container_ref),
+                        };
+                    }
+                    Err(error) => {
+                        return ReadInstanceLogResult {
+                            log_status: "failed".to_string(),
+                            content: String::new(),
+                            message: format!("Docker 日志读取失败：{error}"),
+                        };
+                    }
+                }
+            }
             if let Some(ref log_path) = record.log_path {
                 match tokio::fs::read_to_string(log_path).await {
                     Ok(content) => {
