@@ -242,6 +242,9 @@ import {
 } from '../api'
 import type { ModelDefinition, ModelFile, ModelInstance, NodeStatus, RuntimeEnvironment } from '../types'
 import { backendLabel, checkFailedReason, deployTypeLabel, emptyToNull, formatTime, instanceStatusLabel, isAgentOffline, runtimeDeployTypeLabel, statusLabel, statusType } from '../utils/instance'
+import { emptyForm, localParams, parseParams } from './instances/instanceParams'
+import type { InstanceForm } from './instances/instanceParams'
+import { useInstanceRefresh } from './instances/useInstanceRefresh'
 
 const backends = ['ollama', 'llama_cpp', 'vllm', 'custom']
 const models = ref<ModelDefinition[]>([])
@@ -257,39 +260,14 @@ const editingId = ref('')
 const selectedLogInstance = ref<ModelInstance | null>(null)
 const logRefreshing = ref(false)
 const logMessage = ref('')
-const form = ref(emptyForm())
+const form = ref<InstanceForm>(emptyForm())
 const instanceTypeOptions = [
   { label: '外部服务', value: 'external' },
   { label: '本地', value: 'local' }
 ]
 
-function emptyForm() {
-  return {
-    model_id: '',
-    model_file_id: '',
-    node_id: '',
-    runtime_environment_id: '',
-    name: '',
-    deploy_type: 'external',
-    backend: '',
-    model_name: '',
-    runtime_version: '',
-    base_url: '',
-    endpoint_url: '',
-    health_url: '',
-    description: '',
-    host: '127.0.0.1',
-    port: 8080,
-    ctx_size: 4096,
-    gpu_layers: 0,
-    threads: 0,
-    extra_args_text: '',
-    probe_paths_text: '',
-    probe_max_attempts: 5,
-    probe_interval_ms: 5000,
-    probe_timeout_ms: 400
-  }
-}
+const { replaceInstance, refreshSingleInstance, startPeriodicRefresh, stopPeriodicRefresh } =
+  useInstanceRefresh(instances)
 
 async function loadData() {
   loading.value = true
@@ -396,7 +374,7 @@ async function submit() {
     runtime_version: emptyToNull(form.value.runtime_version),
     model_name: emptyToNull(form.value.model_name),
     description: emptyToNull(form.value.description),
-    params_json: form.value.deploy_type === 'local' ? JSON.stringify(localParams()) : null,
+    params_json: form.value.deploy_type === 'local' ? JSON.stringify(localParams(form.value)) : null,
     status: 'unknown'
   }
   if (editingId.value) {
@@ -406,11 +384,6 @@ async function submit() {
   }
   dialogVisible.value = false
   await loadData()
-}
-
-function replaceInstance(updated: ModelInstance) {
-  const idx = instances.value.findIndex((inst) => inst.id === updated.id)
-  if (idx !== -1) instances.value[idx] = updated
 }
 
 async function pollInstanceUntilStable(id: string, initialStatus: string) {
@@ -496,15 +469,6 @@ async function testLocal(row: ModelInstance) {
   }
 }
 
-async function refreshSingleInstance(id: string) {
-  try {
-    const updated = await fetchModelInstance(id)
-    replaceInstance(updated)
-  } catch {
-    // keep current state on transient errors
-  }
-}
-
 const localRuntimeOptions = computed(() =>
   runtimeEnvironments.value.filter(
     (env) => env.node_id === form.value.node_id && env.check_status === 'available'
@@ -528,86 +492,6 @@ async function remove(row: ModelInstance) {
   await deleteModelInstance(row.id)
   ElMessage.success('已删除')
   await loadData()
-}
-
-function localParams() {
-  const probePaths = form.value.probe_paths_text
-    .split('\n')
-    .map((line) => line.trim())
-    .filter(Boolean)
-  return {
-    host: form.value.host.trim() || '127.0.0.1',
-    port: form.value.port,
-    ctx_size: form.value.ctx_size || undefined,
-    gpu_layers: form.value.gpu_layers,
-    threads: form.value.threads || undefined,
-    extra_args: form.value.extra_args_text
-      .split('\n')
-      .map((line) => line.trim())
-      .filter(Boolean),
-    ...(probePaths.length > 0 ? { probe_paths: probePaths } : {}),
-    ...(form.value.probe_max_attempts !== 5 ? { probe_max_attempts: form.value.probe_max_attempts } : {}),
-    ...(form.value.probe_interval_ms !== 5000 ? { probe_interval_ms: form.value.probe_interval_ms } : {}),
-    ...(form.value.probe_timeout_ms !== 400 ? { probe_timeout_ms: form.value.probe_timeout_ms } : {})
-  }
-}
-
-function parseParams(value?: string | null) {
-  try {
-    const parsed = value ? JSON.parse(value) : {}
-    return {
-      host: typeof parsed.host === 'string' ? parsed.host : '127.0.0.1',
-      port: typeof parsed.port === 'number' ? parsed.port : 8080,
-      ctx_size: typeof parsed.ctx_size === 'number' ? parsed.ctx_size : 4096,
-      gpu_layers: typeof parsed.gpu_layers === 'number' ? parsed.gpu_layers : 0,
-      threads: typeof parsed.threads === 'number' ? parsed.threads : 0,
-      extra_args: Array.isArray(parsed.extra_args) ? parsed.extra_args.filter((item: unknown) => typeof item === 'string') : [],
-      probe_paths_text: Array.isArray(parsed.probe_paths) ? parsed.probe_paths.filter((p: unknown) => typeof p === 'string').join('\n') : '',
-      probe_max_attempts: typeof parsed.probe_max_attempts === 'number' ? parsed.probe_max_attempts : 5,
-      probe_interval_ms: typeof parsed.probe_interval_ms === 'number' ? parsed.probe_interval_ms : 5000,
-      probe_timeout_ms: typeof parsed.probe_timeout_ms === 'number' ? parsed.probe_timeout_ms : 400
-    }
-  } catch {
-    return {
-      host: '127.0.0.1',
-      port: 8080,
-      ctx_size: 4096,
-      gpu_layers: 0,
-      threads: 0,
-      extra_args: [] as string[],
-      probe_paths_text: '',
-      probe_max_attempts: 5,
-      probe_interval_ms: 5000,
-      probe_timeout_ms: 400
-    }
-  }
-}
-
-let periodicTimer: ReturnType<typeof setInterval> | null = null
-
-function startPeriodicRefresh() {
-  if (periodicTimer) return
-  periodicTimer = setInterval(async () => {
-    const active = instances.value.filter((inst) =>
-      ['starting', 'stopping', 'running'].includes(inst.status)
-    )
-    if (active.length === 0) return
-    try {
-      const list = await fetchModelInstances()
-      for (const updated of list) {
-        replaceInstance(updated)
-      }
-    } catch {
-      // silent on transient errors
-    }
-  }, 15_000)
-}
-
-function stopPeriodicRefresh() {
-  if (periodicTimer) {
-    clearInterval(periodicTimer)
-    periodicTimer = null
-  }
 }
 
 onMounted(async () => {
