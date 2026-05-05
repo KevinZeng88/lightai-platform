@@ -11,6 +11,7 @@ mod logs;
 mod probe;
 mod process;
 mod process_command;
+mod process_logs;
 mod verify_model;
 
 use crate::client::ServerClient;

@@ -1,6 +1,7 @@
 use std::path::Path;
 
-use super::process::{running_instance_log_tail, sanitize_log, tail_bytes};
+use super::process::running_instance_log_tail;
+use super::process_logs::{sanitize_log, tail_bytes};
 use crate::managed_process;
 
 #[derive(Debug, Clone, serde::Serialize)]
