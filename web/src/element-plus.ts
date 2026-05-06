@@ -2,6 +2,7 @@ import type { App } from 'vue'
 import { ElAlert } from 'element-plus/es/components/alert/index'
 import { ElButton } from 'element-plus/es/components/button/index'
 import { ElCard } from 'element-plus/es/components/card/index'
+import { ElCheckbox, ElCheckboxGroup } from 'element-plus/es/components/checkbox/index'
 import { ElCollapse, ElCollapseItem } from 'element-plus/es/components/collapse/index'
 import { ElConfigProvider } from 'element-plus/es/components/config-provider/index'
 import { ElDatePicker } from 'element-plus/es/components/date-picker/index'
@@ -20,6 +21,8 @@ import { ElTag } from 'element-plus/es/components/tag/index'
 import 'element-plus/es/components/alert/style/css'
 import 'element-plus/es/components/button/style/css'
 import 'element-plus/es/components/card/style/css'
+import 'element-plus/es/components/checkbox/style/css'
+import 'element-plus/es/components/checkbox-group/style/css'
 import 'element-plus/es/components/collapse/style/css'
 import 'element-plus/es/components/collapse-item/style/css'
 import 'element-plus/es/components/config-provider/style/css'
@@ -47,6 +50,8 @@ const components = [
   ElAlert,
   ElButton,
   ElCard,
+  ElCheckbox,
+  ElCheckboxGroup,
   ElCollapse,
   ElCollapseItem,
   ElConfigProvider,

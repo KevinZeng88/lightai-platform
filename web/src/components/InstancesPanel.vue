@@ -300,7 +300,7 @@
     <template #footer>
       <el-alert v-if="editingId && isInstanceRunning" title="实例正在运行中，不能修改配置。请先停止实例。" type="warning" show-icon class="alert" />
       <el-button @click="dialogVisible = false">取消</el-button>
-      <el-button type="primary" :disabled="Boolean(editingId) && isInstanceRunning" @click="submit">保存</el-button>
+      <el-button type="primary" :disabled="(Boolean(editingId) && isInstanceRunning) || compatError" @click="submit">保存</el-button>
     </template>
   </el-dialog>
 
@@ -407,9 +407,12 @@ function onRuntimeChange() {
 }
 
 function onModelChange() {
+  const modelFile = modelFiles.value.find(f => f.id === form.value.model_file_id)
+  if (modelFile) {
+    form.value.model_id = modelFile.model_id
+  }
   if (!isDockerRuntime.value) return
   const model = models.value.find(m => m.id === form.value.model_id)
-  const modelFile = modelFiles.value.find(f => f.id === form.value.model_file_id)
   if (!modelFile) return
   // Derive model_container_path from model path
   const modelDir = (modelFile.path || '').split('/').pop() || 'model'
@@ -462,13 +465,22 @@ function resetOverride(field: string) {
   }
 }
 
+const compatError = ref(false)
+
 function checkCompat() {
-  const model = models.value.find(m => m.id === form.value.model_id)
+  let modelId = form.value.model_id
+  // Derive model_id from model_file if not directly set
+  if (!modelId && form.value.model_file_id) {
+    const mf = modelFiles.value.find(f => f.id === form.value.model_file_id)
+    if (mf) modelId = mf.model_id
+  }
+  const model = models.value.find(m => m.id === modelId)
   const runtime = runtimeEnvironments.value.find(e => e.id === form.value.runtime_environment_id)
-  if (!model || !runtime) { compatWarning.value = ''; return }
+  if (!model || !runtime) { compatWarning.value = ''; compatError.value = false; return }
   const modelParams = model.params_json ? JSON.parse(model.params_json) : null
   const result = checkModelRuntimeCompat(modelParams, runtime.backend)
   compatWarning.value = result.warning
+  compatError.value = !result.compatible
 }
 
 const instanceTypeOptions = [
@@ -598,6 +610,10 @@ async function refreshLogs() {
 async function submit() {
   if (editingId.value && isInstanceRunning.value) {
     ElMessage.warning('实例正在运行中，不能修改配置。请先停止实例。')
+    return
+  }
+  if (compatError.value) {
+    ElMessage.error(compatWarning.value || '模型与运行环境不兼容，无法创建实例。')
     return
   }
   if (form.value.deploy_type === 'external' && (!form.value.name || !form.value.model_name || !form.value.base_url)) {

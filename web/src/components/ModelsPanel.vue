@@ -88,61 +88,23 @@
   </el-table>
 
   <el-dialog v-model="dialogVisible" :title="editingId ? '编辑模型' : '新增模型'" width="640px">
-    <el-form label-width="110px">
-      <el-form-item label="名称">
-        <el-input v-model="form.name" />
+    <el-form label-width="120px">
+      <!-- 1. 模型名称 -->
+      <el-form-item label="模型名称" required>
+        <el-input v-model="form.name" placeholder="例如 qwen3-0.6b" />
       </el-form-item>
+      <!-- 2. 显示名 -->
       <el-form-item label="显示名">
-        <el-input v-model="form.display_name" />
+        <el-input v-model="form.display_name" placeholder="可选" />
       </el-form-item>
+      <!-- 3. 类型 -->
       <el-form-item label="类型">
         <el-select v-model="form.model_type">
           <el-option v-for="type in modelTypes" :key="type" :label="type" :value="type" />
         </el-select>
       </el-form-item>
-      <el-form-item label="默认后端">
-        <el-select v-model="form.default_backend" clearable>
-          <el-option v-for="backend in backends" :key="backend" :label="backend" :value="backend" />
-        </el-select>
-      </el-form-item>
-      <el-form-item label="描述">
-        <el-input v-model="form.description" type="textarea" :rows="3" />
-      </el-form-item>
-      <el-collapse class="advanced-fields">
-        <el-collapse-item title="模型元数据（可选）" name="meta">
-          <el-alert title="模型元数据用于判断模型与运行环境的兼容性。支持后端决定该模型可由哪些运行环境加载。" type="info" show-icon class="alert" />
-          <el-form-item label="路径类型">
-            <el-select v-model="modelMeta.path_type">
-              <el-option label="目录 (directory)" value="directory" />
-              <el-option label="文件 (file)" value="file" />
-              <el-option label="Ollama 模型名" value="ollama" />
-              <el-option label="自定义 (custom)" value="custom" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="模型格式">
-            <el-select v-model="modelMeta.model_format">
-              <el-option label="HuggingFace" value="huggingface" />
-              <el-option label="GGUF" value="gguf" />
-              <el-option label="Ollama" value="ollama" />
-              <el-option label="自定义 (custom)" value="custom" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="支持后端">
-            <el-checkbox-group v-model="modelMeta.supported_backends">
-              <el-checkbox label="vllm">vLLM</el-checkbox>
-              <el-checkbox label="llama_cpp">llama.cpp</el-checkbox>
-              <el-checkbox label="ollama">Ollama</el-checkbox>
-              <el-checkbox label="custom">Custom</el-checkbox>
-            </el-checkbox-group>
-          </el-form-item>
-          <el-form-item label="served_model_name">
-            <el-input v-model="modelMeta.served_model_name" placeholder="模型名，留空使用模型名称" />
-          </el-form-item>
-          <div class="template-buttons" style="margin-bottom:8px">
-            <el-button size="small" v-for="(tpl, key) in MODEL_TEMPLATES" :key="key" @click="fillModelMetaTemplate(key)">{{ tpl.label }}</el-button>
-          </div>
-        </el-collapse-item>
-      </el-collapse>
+
+      <!-- New model: node + path -->
       <template v-if="!editingId">
         <el-alert
           title="保存前会由所选节点 Agent 验证模型文件或目录；验证成功后才会创建模型。"
@@ -157,19 +119,64 @@
           show-icon
           class="alert"
         />
-        <el-form-item label="节点">
+        <el-form-item label="节点" required>
           <el-select v-model="form.initial_node_id" filterable>
             <el-option v-for="node in nodes" :key="node.id" :label="node.name" :value="node.id" />
           </el-select>
         </el-form-item>
-        <el-form-item label="模型资产路径">
+        <el-form-item label="模型资产路径" required>
           <el-input v-model="form.initial_path" placeholder="/models/qwen2.5-0.5b 或 /models/model.gguf" />
         </el-form-item>
       </template>
+
+      <!-- 4. 路径类型 -->
+      <el-form-item label="路径类型">
+        <el-select v-model="modelMeta.path_type">
+          <el-option label="目录" value="directory" />
+          <el-option label="文件" value="file" />
+          <el-option label="Ollama 模型名" value="ollama" />
+          <el-option label="自定义" value="custom" />
+        </el-select>
+      </el-form-item>
+      <!-- 5. 模型格式 -->
+      <el-form-item label="模型格式">
+        <el-select v-model="modelMeta.model_format" @change="onModelFormatChange">
+          <el-option label="HuggingFace" value="huggingface" />
+          <el-option label="GGUF" value="gguf" />
+          <el-option label="Ollama" value="ollama" />
+          <el-option label="自定义" value="custom" />
+        </el-select>
+      </el-form-item>
+      <!-- 6. 支持后端 -->
+      <el-form-item label="支持后端">
+        <el-checkbox-group v-model="modelMeta.supported_backends" @change="onBackendsChange">
+          <el-checkbox label="vllm">vLLM</el-checkbox>
+          <el-checkbox label="llama_cpp">llama.cpp</el-checkbox>
+          <el-checkbox label="ollama">Ollama</el-checkbox>
+          <el-checkbox label="custom">自定义</el-checkbox>
+        </el-checkbox-group>
+      </el-form-item>
+      <!-- 7. 服务模型名 -->
+      <el-form-item label="服务模型名">
+        <el-input v-model="modelMeta.served_model_name" :placeholder="form.name || '默认使用模型名称'" />
+        <div class="muted tiny-text" style="margin-top:2px">默认使用模型名称，可在实例中覆盖</div>
+      </el-form-item>
+      <!-- 8. 描述 -->
+      <el-form-item label="描述">
+        <el-input v-model="form.description" type="textarea" :rows="2" placeholder="可选" />
+      </el-form-item>
+      <!-- 9. 高级额外参数 -->
+      <el-collapse class="advanced-fields">
+        <el-collapse-item title="高级额外参数" name="extra">
+          <el-form-item label="额外后端参数">
+            <el-input v-model="modelMeta.extra_backend_args" type="textarea" :rows="3" placeholder="每行一个参数，例如：&#10;--tensor-parallel-size&#10;4" />
+          </el-form-item>
+        </el-collapse-item>
+      </el-collapse>
     </el-form>
     <template #footer>
       <el-button @click="dialogVisible = false">取消</el-button>
-      <el-button type="primary" :loading="saving" @click="submit">{{ saving && !editingId ? '验证并保存中' : '保存' }}</el-button>
+      <el-button type="primary" :disabled="modelMeta.supported_backends.length === 0" :loading="saving" @click="submit">{{ saving && !editingId ? '验证并保存中' : '保存' }}</el-button>
     </template>
   </el-dialog>
 
@@ -228,8 +235,8 @@ import type { ModelDefinition, ModelFile, ModelInstance, NodeStatus } from '../t
 import { emptyToNull, formatTime } from '../utils/instance'
 import {
   assembleModelMeta,
+  autoFillFromFormat,
   defaultModelMeta,
-  MODEL_TEMPLATES,
   parseModelMeta,
   type ModelMetaFields,
 } from '../utils/templates'
@@ -253,6 +260,9 @@ const form = ref(emptyForm())
 const fileForm = ref({ node_id: '', path: '' })
 const verificationTimers = new Map<string, ReturnType<typeof window.setInterval>>()
 const modelMeta = reactive<ModelMetaFields>(defaultModelMeta())
+let initMeta = false
+const modelBackendsTouched = ref(false)
+let settingBackends = false
 
 function emptyForm() {
   return {
@@ -260,39 +270,43 @@ function emptyForm() {
     display_name: '',
     model_type: 'llm',
     description: '',
-    default_backend: '',
-      params_json: '',
+    params_json: '',
     initial_node_id: '',
     initial_path: ''
   }
 }
 
-  function fillModelMetaTemplate(key: string) {
-    const tpl = MODEL_TEMPLATES[key as keyof typeof MODEL_TEMPLATES]
-    if (!tpl) return
-    const changed = Object.values(modelMeta).some(v => Array.isArray(v) ? v.length > 0 : !!v)
-    if (changed) {
-      ElMessageBox.confirm('当前已有元数据内容，覆盖会丢失已填信息。是否继续？', '确认覆盖', { type: 'warning', confirmButtonText: '覆盖', cancelButtonText: '取消' }).then(() => {
-        Object.assign(modelMeta, {
-          ...defaultModelMeta(),
-          path_type: tpl.template.path_type,
-          model_format: tpl.template.model_format,
-          supported_backends: tpl.template.supported_backends as string[],
-          served_model_name: tpl.template.served_model_name || '',
-        })
-        ElMessage.success('已填充 ' + tpl.label)
-      }).catch(() => {})
-    } else {
-      Object.assign(modelMeta, {
-        ...defaultModelMeta(),
-        path_type: tpl.template.path_type,
-        model_format: tpl.template.model_format,
-        supported_backends: tpl.template.supported_backends as string[],
-        served_model_name: tpl.template.served_model_name || '',
-      })
-      ElMessage.success('已填充 ' + tpl.label)
-    }
+/** Auto-fill path_type and supported_backends from model_format. Does NOT overwrite user manual selections unless backends are empty. */
+function onModelFormatChange(format: string) {
+  if (initMeta) return
+  const auto = autoFillFromFormat(format)
+  if (!editingId.value) {
+    modelMeta.path_type = auto.path_type
   }
+  // Fill if user hasn't touched backends, or if they cleared all (empty)
+  if (!modelBackendsTouched.value || modelMeta.supported_backends.length === 0) {
+    settingBackends = true
+    modelMeta.supported_backends = [...auto.supported_backends]
+    settingBackends = false
+  }
+}
+
+/** Mark that the user has manually edited supported_backends (not programmatic fill). */
+function onBackendsChange() {
+  if (!initMeta && !settingBackends) {
+    modelBackendsTouched.value = true
+  }
+}
+
+/** Apply default backends from current format (only when empty). */
+function applyDefaultBackendsForFormat() {
+  if (modelMeta.supported_backends.length === 0 && modelMeta.model_format) {
+    settingBackends = true
+    const auto = autoFillFromFormat(modelMeta.model_format)
+    modelMeta.supported_backends = [...auto.supported_backends]
+    settingBackends = false
+  }
+}
 
 async function loadData() {
   loading.value = true
@@ -328,7 +342,12 @@ function openCreate() {
     ...emptyForm(),
     initial_node_id: nodes.value[0]?.id ?? ''
   }
-  Object.assign(modelMeta, defaultModelMeta())
+  modelBackendsTouched.value = false
+  initMeta = true
+  Object.assign(modelMeta, { ...defaultModelMeta(), supported_backends: [] })
+  initMeta = false
+  // Auto-fill backends from initial format (empty → fill)
+  applyDefaultBackendsForFormat()
   dialogVisible.value = true
 }
 
@@ -339,12 +358,16 @@ function openEdit(row: ModelDefinition) {
     display_name: row.display_name ?? '',
     model_type: row.model_type,
     description: row.description ?? '',
-    default_backend: row.default_backend ?? '',
     params_json: '',
     initial_node_id: '',
     initial_path: ''
   }
+  modelBackendsTouched.value = false
+  initMeta = true
   Object.assign(modelMeta, parseModelMeta(row.params_json))
+  initMeta = false
+  // If saved data has no supported_backends, auto-fill from current format
+  applyDefaultBackendsForFormat()
   dialogVisible.value = true
 }
 
@@ -377,7 +400,7 @@ async function submit() {
     model_path: null,
     description: emptyToNull(form.value.description),
     params_json: assembleModelMeta(modelMeta) || null,
-    default_backend: emptyToNull(form.value.default_backend),
+    default_backend: null,
     initial_file: editingId.value
       ? undefined
       : {

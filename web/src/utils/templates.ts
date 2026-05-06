@@ -1,42 +1,3 @@
-export const MODEL_TEMPLATES = {
-  'huggingface-vllm': {
-    label: 'HuggingFace 目录 + vLLM',
-    template: {
-      path_type: 'directory',
-      model_format: 'huggingface',
-      supported_backends: ['vllm'],
-      served_model_name: ''
-    }
-  },
-  'gguf-llamacpp': {
-    label: 'GGUF 文件 + llama.cpp',
-    template: {
-      path_type: 'file',
-      model_format: 'gguf',
-      supported_backends: ['llama.cpp'],
-      served_model_name: ''
-    }
-  },
-  'ollama': {
-    label: 'Ollama 模型 + Ollama',
-    template: {
-      path_type: 'ollama',
-      model_format: 'ollama',
-      supported_backends: ['ollama'],
-      served_model_name: ''
-    }
-  },
-  'custom': {
-    label: 'Custom 自定义',
-    template: {
-      path_type: 'custom',
-      model_format: 'custom',
-      supported_backends: ['custom'],
-      served_model_name: ''
-    }
-  }
-}
-
 export const RUNTIME_TEMPLATES = {
   'vllm-docker': {
     label: 'vLLM + Docker',
@@ -305,14 +266,25 @@ export function defaultModelMeta(): ModelMetaFields {
   }
 }
 
+/** Auto-fill path_type and supported_backends from model_format when creating new model. */
+export function autoFillFromFormat(format: string): { path_type: string; supported_backends: string[] } {
+  switch (format) {
+    case 'huggingface': return { path_type: 'directory', supported_backends: ['vllm'] }
+    case 'gguf': return { path_type: 'file', supported_backends: ['llama_cpp'] }
+    case 'ollama': return { path_type: 'ollama', supported_backends: ['ollama'] }
+    default: return { path_type: 'custom', supported_backends: ['custom'] }
+  }
+}
+
 export function assembleModelMeta(fields: ModelMetaFields): string {
-  return JSON.stringify({
-    path_type: fields.path_type || 'directory',
-    model_format: fields.model_format || 'huggingface',
-    supported_backends: fields.supported_backends || [],
-    served_model_name: fields.served_model_name || '',
-    extra_backend_args: linesToArgs(fields.extra_backend_args || '')
-  })
+  const result: Record<string, unknown> = {}
+  if (fields.path_type) result.path_type = fields.path_type
+  if (fields.model_format) result.model_format = fields.model_format
+  if (fields.supported_backends.length > 0) result.supported_backends = fields.supported_backends
+  if (fields.served_model_name) result.served_model_name = fields.served_model_name
+  const extra = linesToArgs(fields.extra_backend_args || '')
+  if (extra.length > 0) result.extra_backend_args = extra
+  return JSON.stringify(result)
 }
 
 export function parseModelMeta(paramsJson: string | null | undefined): ModelMetaFields {
@@ -320,11 +292,14 @@ export function parseModelMeta(paramsJson: string | null | undefined): ModelMeta
   if (!paramsJson) return defaults
   try {
     const p = JSON.parse(paramsJson)
+    const backends = Array.isArray(p.supported_backends) && p.supported_backends.length > 0
+      ? p.supported_backends.filter((b: unknown) => typeof b === 'string')
+      : []
     return {
-      path_type: p.path_type || defaults.path_type,
-      model_format: p.model_format || defaults.model_format,
-      supported_backends: Array.isArray(p.supported_backends) ? p.supported_backends : defaults.supported_backends,
-      served_model_name: p.served_model_name || defaults.served_model_name,
+      path_type: typeof p.path_type === 'string' ? p.path_type : defaults.path_type,
+      model_format: typeof p.model_format === 'string' ? p.model_format : defaults.model_format,
+      supported_backends: backends.length > 0 ? backends : defaults.supported_backends,
+      served_model_name: typeof p.served_model_name === 'string' ? p.served_model_name : defaults.served_model_name,
       extra_backend_args: argsToLines(p.extra_backend_args || [])
     }
   } catch {

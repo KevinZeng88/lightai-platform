@@ -1,3 +1,4 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -12,18 +13,14 @@ use crate::models::{AgentConfig, HeartbeatRequest, RegisterRequest};
 use crate::platform_log::{self, LogPolicy};
 use crate::state::{self, AgentState};
 
+/// Guard: "managed store recovery" log fires at most once per process lifetime.
+static MANAGED_STORE_RECOVERY_LOGGED: AtomicBool = AtomicBool::new(false);
+
 pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
     let mut metrics_collector = MetricsCollector::new();
 
     loop {
         let snapshot = runtime_config.read().await.clone();
-        let _ = platform_log::append(
-            &snapshot.log_policy,
-            "agent.log",
-            "debug",
-            "Agent heartbeat cycle started",
-        )
-        .await;
         let sleep_secs = match run_once(&config, &snapshot, &mut metrics_collector).await {
             Ok(next_config) => {
                 let mut runtime = runtime_config.write().await;
@@ -51,19 +48,19 @@ async fn run_once(
     // 每条记录通过 /proc/{pid}/stat 的 start_time 校验，防止 PID 复用误判。
     let mut agent_state = match state::load(&config.state_path).await? {
         Some(state) => {
-            let store_path = managed_process::store_path_from_state_path(&config.state_path);
-            if let Ok(records) = managed_process::load(&store_path).await {
-                if !records.is_empty() {
-                    let _ = platform_log::append(
-                        &runtime_config.log_policy,
-                        "agent.log",
-                        "info",
-                        &format!(
-                            "Agent 重启后恢复受管进程记录 {} 条，将在心跳中上报状态",
-                            records.len()
-                        ),
-                    )
-                    .await;
+            // Log managed store recovery at most once per process lifetime.
+            if !MANAGED_STORE_RECOVERY_LOGGED.swap(true, Ordering::Relaxed) {
+                let store_path = managed_process::store_path_from_state_path(&config.state_path);
+                if let Ok(records) = managed_process::load(&store_path).await {
+                    if !records.is_empty() {
+                        let _ = platform_log::append(
+                            &runtime_config.log_policy,
+                            "agent.log",
+                            "info",
+                            &format!("Agent 启动后恢复受管实例记录 {} 条", records.len()),
+                        )
+                        .await;
+                    }
                 }
             }
             state
@@ -90,8 +87,8 @@ async fn run_once(
         let _ = platform_log::append(
             &runtime_config.log_policy,
             "agent.log",
-            "info",
-            &format!("Agent 上报受管实例：运行中 {running_count}，已退出 {failed_count}",),
+            "debug",
+            &format!("Agent 心跳上报受管实例状态：running={running_count}, failed={failed_count}"),
         )
         .await;
         if failed_count > 0 {

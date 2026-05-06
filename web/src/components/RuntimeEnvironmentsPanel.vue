@@ -83,8 +83,8 @@
 
       <!-- Docker fields -->
       <template v-if="form.deploy_type === 'docker'">
-        <el-form-item label="Docker Image" required>
-          <el-input v-model="dockerRt.image" :placeholder="form.backend === 'vllm' ? 'vllm/vllm-openai:latest' : 'image:tag'" />
+        <el-form-item label="Docker 镜像" required>
+          <el-input v-model="dockerRt.image" placeholder="例如：vllm/vllm-openai:latest" />
         </el-form-item>
         <el-form-item label="容器内服务端口">
           <el-input-number v-model="dockerRt.container_port" :min="1" :max="65535" />
