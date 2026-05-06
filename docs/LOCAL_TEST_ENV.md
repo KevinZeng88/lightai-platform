@@ -245,16 +245,36 @@ curl http://127.0.0.1:18088/health  # 服务应仍可访问
 - 缓存目录：`/data/vllm-cache`
 - 测试端口：`18000`
 
+### 预期平台 docker run
+
+```
+docker run --name lightai-<model> --gpus all --ipc host \
+  -p 18000:8000 \
+  -v /data/vllm-cache:/root/.cache/huggingface \
+  -v /data/models/qwen3-0.6b:/models/qwen3-0.6b:ro \
+  --detach vllm/vllm-openai:latest \
+  --model /models/qwen3-0.6b --served-model-name qwen3-0.6b \
+  --host 0.0.0.0 --port 8000 \
+  --gpu-memory-utilization 0.5 --max-model-len 4096 --max-num-seqs 8
+```
+
+注意：平台默认不加 `--rm`，使用 `--detach`。
+agent.log 中记录完整 command summary，可对比手工命令。
+
 ### 测试步骤
 
 1. **创建 Docker Runtime**：Web → 运行环境 → 新增，deploy_type=docker, backend=vllm
+   - image: vllm/vllm-openai:latest
+   - container_port: 8000
+   - GPU: all, IPC: host
+   - 缓存：/data/vllm-cache → /root/.cache/huggingface
 2. **创建模型**：名称 qwen3-0.6b，路径 /data/models/qwen3-0.6b
-3. **创建 Docker Instance**：选择节点、runtime、模型文件
-4. **启动** → `docker ps | grep lightai`
+3. **创建 Docker Instance**：选择节点、runtime、模型文件，host_port=18000
+4. **启动** → `docker ps | grep lightai`，对比 agent.log 中 command summary
 5. **验证** → `curl http://127.0.0.1:18000/v1/models`
 6. **检查** → Web 显示 running
-7. **日志** → 查看 vLLM 启动日志
+7. **日志** → Web 日志页面显示 command summary
 8. **Agent 重启** → 容器仍在，Web 保持 running
-9. **手工 stop 容器** → 等待心跳 → Web failed
+9. **手工 `docker stop` 容器** → 等待心跳 → Web failed
 10. **Web stop** → 容器停止
 11. **Agent 离线** → Web warning

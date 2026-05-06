@@ -211,6 +211,21 @@ pub async fn update_model_instance(
     request: ModelInstanceUpdateRequest,
 ) -> Result<ModelInstanceView, Stage3Error> {
     let current = model_instance(pool, id).await?;
+    if matches!(current.status.as_str(), "running" | "starting" | "stopping") {
+        let is_config_change = request.name.is_some()
+            || request.params_json.is_some()
+            || request.backend.is_some()
+            || request.base_url.is_some()
+            || request.endpoint_url.is_some()
+            || request.health_url.is_some()
+            || request.runtime_version.is_some()
+            || request.model_name.is_some();
+        if is_config_change {
+            return Err(Stage3Error::Conflict(
+                "实例正在运行中，不能修改配置。请先停止实例。".to_string(),
+            ));
+        }
+    }
     if current.deploy_type == "local" {
         let name = request.name.unwrap_or(current.name);
         validate_non_empty("name", &name)?;
@@ -287,6 +302,15 @@ pub async fn update_model_instance(
 }
 
 pub async fn delete_model_instance(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error> {
+    let instance = model_instance(pool, id).await?;
+    if matches!(
+        instance.status.as_str(),
+        "running" | "starting" | "stopping"
+    ) {
+        return Err(Stage3Error::Conflict(
+            "实例正在运行中，不能删除。请先停止实例。".to_string(),
+        ));
+    }
     let result = sqlx::query("DELETE FROM model_instances WHERE id = ?")
         .bind(id)
         .execute(pool)
@@ -417,9 +441,14 @@ async fn run_local_instance_task(
     }
     let params = parse_instance_params(instance.params_json.as_deref())?;
 
+    let runtime_params: Option<serde_json::Value> = env
+        .params_json
+        .as_deref()
+        .and_then(|v| serde_json::from_str(v).ok());
+
     let task_id = Uuid::new_v4().to_string();
     let now = now_unix_secs();
-    let payload = serde_json::json!({
+    let mut payload = serde_json::json!({
         "instance_id": id,
         "runtime_environment_id": runtime_environment_id,
         "backend": env.backend,
@@ -435,6 +464,12 @@ async fn run_local_instance_task(
         "endpoint_url": instance.endpoint_url,
         "params": params,
     });
+    if let Some(rp) = runtime_params {
+        payload["runtime_params"] = rp;
+    }
+    if let Some(ref model_name) = instance.model_definition_name {
+        payload["model_name"] = serde_json::Value::String(model_name.clone());
+    }
     let mut tx = pool.begin().await?;
     sqlx::query(
         r#"

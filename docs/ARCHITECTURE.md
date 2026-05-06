@@ -194,21 +194,30 @@ Agent 重启 → managed_process::load → reports()
 
 > **systemd 部署**：必须设置 `KillMode=process`（非默认的 `control-group`），否则 systemd 停止 Agent service 时会向整个 cgroup 发送 SIGTERM，导致模型实例进程也被终止。示例 service 文件见 `deploy/lightai-agent.service`。
 
-### Docker 容器启动
+### Docker 容器启动（三层配置合并）
 
 ```
 Web 点击启动 → POST /api/model-instances/{id}/start
-  → domain::start_model_instance → 创建 agent_task
+  → domain::start_model_instance → 创建 agent_task（payload 含 runtime_params + params + model_path + model_name）
   → Agent poll 获取任务 → tasks::start_model_instance_with_store
-  → deploy_type == "docker" → start_docker_instance
-    → parse_docker_payload → DockerPayload { docker, vllm }
-    → build_docker_run_args → ["run", "--name", ..., "--gpus", ..., "-p", ..., "-v", ..., "--detach", image]
-    → build_vllm_args → ["--model", ..., "--served-model-name", ..., "--port", ...]
+  → deploy_type == "docker" → resolve_docker_payload
+    → 解析 runtime_params → DockerRuntimeConfig（image, gpu="all", ipc="host", container_port, defaults）
+    → 解析 params → DockerInstanceOverrides（container_name, host_port, gpu?, ...）
+    → merge_docker_config(model_path, model_name, runtime, overrides)
+      → docker.gpu = instance.gpu ?? runtime.gpu
+      → docker.image = runtime.image
+      → port mapping = instance.host_port : runtime.container_port
+      → vllm.port = runtime.defaults.port (= container_port)
+    → build_docker_run_args → ["run", "--name", ..., "--gpus", ..., "--ipc", ..., "-p", ..., "-v", ..., "--detach", image]
+    → build_vllm_args → ["--model", ..., "--served-model-name", ..., "--host", "0.0.0.0", "--port", ...]
+    → agent.log 记录完整 command_summary（image, gpu, ipc, port, volumes）
     → docker run (argv-style, no shell) → container_id
-    → ManagedProcessRecord { container_id, container_name, deploy_type: "docker" }
+    → ManagedProcessRecord { container_id, container_name, deploy_type: "docker", command }
     → upsert managed store
-  → 上报结果 → running + base_url
+  → 上报结果 → running + base_url + command_summary
 ```
+
+GPU 默认 "all"，ipc 默认 "host"（来自 `DockerRuntimeConfig` 自定义 Default）。Host 固定 "0.0.0.0"，不在 UI 配置。
 
 ### Docker 实例恢复
 
@@ -222,3 +231,5 @@ Agent 重启 → managed_process::load → 逐条 check_record
 ```
 
 > **Docker 部署验证**：本机使用 `vllm/vllm-openai:latest` 镜像 + `/data/models/qwen3-0.6b` 模型目录。Docker 容器默认不加 `--rm`，便于 Agent 在容器异常退出后仍能通过 `docker inspect` 获取 OOM、退出码等诊断信息。用户显式 stop instance 时才 `docker stop`；后续清理资源时才 `docker rm`。
+>
+> **Docker 日志审计**：Docker start/stop/inspect 操作均通过 `platform_log::append` 写入 agent.log（ISO 8601 时间戳、脱敏），记录 container_name, image, gpu, ipc, 端口映射, volumes, command_summary。失败时额外记录 stderr 摘要。Web 日志页面可见 command_summary。

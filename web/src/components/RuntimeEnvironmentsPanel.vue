@@ -86,25 +86,15 @@
         <el-form-item label="Docker Image" required>
           <el-input v-model="dockerRt.image" :placeholder="form.backend === 'vllm' ? 'vllm/vllm-openai:latest' : 'image:tag'" />
         </el-form-item>
-        <el-form-item label="容器端口">
+        <el-form-item label="容器内服务端口">
           <el-input-number v-model="dockerRt.container_port" :min="1" :max="65535" />
         </el-form-item>
-        <el-form-item label="Host">
-          <el-input v-model="dockerRt.default_host" placeholder="0.0.0.0" />
-        </el-form-item>
-        <el-form-item label="Port">
-          <el-input-number v-model="dockerRt.default_port" :min="1" :max="65535" />
-        </el-form-item>
-        <el-divider content-position="left">可选参数</el-divider>
+        <el-divider content-position="left">Docker 参数</el-divider>
         <el-form-item label="GPU">
-          <el-switch v-model="rtToggles.showGpu" size="small" style="margin-right:8px" />
-          <el-input v-if="rtToggles.showGpu" v-model="dockerRt.gpu" placeholder="all" />
-          <span v-else class="muted">未启用</span>
+          <el-input v-model="dockerRt.gpu" placeholder="all" />
         </el-form-item>
         <el-form-item label="IPC">
-          <el-switch v-model="rtToggles.showIpc" size="small" style="margin-right:8px" />
-          <el-input v-if="rtToggles.showIpc" v-model="dockerRt.ipc" placeholder="host" />
-          <span v-else class="muted">未启用</span>
+          <el-input v-model="dockerRt.ipc" placeholder="host" />
         </el-form-item>
         <el-form-item label="缓存路径">
           <el-switch v-model="rtToggles.showCache" size="small" style="margin-right:8px" />
@@ -180,11 +170,12 @@ import {
   checkRuntimeEnvironment,
   createRuntimeEnvironment,
   deleteRuntimeEnvironment,
+  fetchModelInstances,
   fetchNodes,
   fetchRuntimeEnvironments,
   updateRuntimeEnvironment
 } from '../api'
-import type { NodeStatus, RuntimeEnvironment } from '../types'
+import type { ModelInstance, NodeStatus, RuntimeEnvironment } from '../types'
 import {
   assembleDockerRuntimeParams,
   defaultDockerRuntimeFields,
@@ -195,6 +186,7 @@ import {
 const backends = ['ollama', 'llama_cpp', 'vllm', 'custom']
 const nodes = ref<NodeStatus[]>([])
 const environments = ref<RuntimeEnvironment[]>([])
+const instances = ref<ModelInstance[]>([])
 const loading = ref(false)
 const error = ref('')
 const dialogVisible = ref(false)
@@ -218,8 +210,6 @@ const form = ref({
 const dockerRt = reactive<DockerRuntimeFields>(defaultDockerRuntimeFields())
 
 const rtToggles = reactive({
-  showGpu: false,
-  showIpc: false,
   showCache: false,
   showGpuMem: false,
   showMaxModelLen: false,
@@ -247,12 +237,14 @@ async function loadData() {
   loading.value = true
   error.value = ''
   try {
-    const [nextNodes, nextEnvironments] = await Promise.all([
+    const [nextNodes, nextEnvironments, nextInstances] = await Promise.all([
       fetchNodes(),
-      fetchRuntimeEnvironments()
+      fetchRuntimeEnvironments(),
+      fetchModelInstances()
     ])
     nodes.value = nextNodes
     environments.value = nextEnvironments
+    instances.value = nextInstances
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
   } finally {
@@ -278,7 +270,7 @@ function openCreate() {
     params_json: '',
   }
   Object.assign(dockerRt, defaultDockerRuntimeFields())
-  Object.assign(rtToggles, { showGpu: false, showIpc: false, showCache: false, showGpuMem: false, showMaxModelLen: false, showMaxNumSeqs: false, showExtraBackend: false, showExtraDocker: false })
+  Object.assign(rtToggles, { showCache: false, showGpuMem: false, showMaxModelLen: false, showMaxNumSeqs: false, showExtraBackend: false, showExtraDocker: false })
   dialogVisible.value = true
 }
 
@@ -304,8 +296,6 @@ function openEdit(row: RuntimeEnvironment) {
     if (row.params_json) {
       try {
         const p = JSON.parse(row.params_json)
-        rtToggles.showGpu = !!p.gpu
-        rtToggles.showIpc = !!p.ipc
         rtToggles.showCache = !!(p.cache_host_path || p.cache_container_path)
         rtToggles.showGpuMem = !!(p.defaults?.gpu_memory_utilization != null)
         rtToggles.showMaxModelLen = !!(p.defaults?.max_model_len != null)
@@ -323,8 +313,7 @@ function validateForm(): string | null {
   if (!form.value.node_id) return '请选择节点'
   if (form.value.deploy_type === 'docker') {
     if (!dockerRt.image.trim()) return '请填写 Docker 镜像'
-    if (!dockerRt.container_port || dockerRt.container_port < 1 || dockerRt.container_port > 65535) return '容器端口无效'
-    if (!dockerRt.default_port || dockerRt.default_port < 1 || dockerRt.default_port > 65535) return '默认端口无效'
+    if (!dockerRt.container_port || dockerRt.container_port < 1 || dockerRt.container_port > 65535) return '容器内服务端口无效'
     if (rtToggles.showGpuMem && (dockerRt.gpu_memory_utilization <= 0 || dockerRt.gpu_memory_utilization > 1)) return '显存使用比例需在 0~1 之间'
     if (rtToggles.showMaxModelLen && dockerRt.max_model_len < 1) return '最大模型长度需为正整数'
     if (rtToggles.showMaxNumSeqs && dockerRt.max_num_seqs < 1) return '最大并发序列数需为正整数'
@@ -336,6 +325,15 @@ function validateForm(): string | null {
 }
 
 async function submit() {
+  if (editingId.value) {
+    const running = instances.value.filter(
+      i => i.runtime_environment_id === editingId.value && ['running', 'starting', 'stopping'].includes(i.status)
+    )
+    if (running.length > 0) {
+      ElMessage.warning(`运行环境正在被运行中的实例 ${running.map(i => i.name).join(', ')} 使用，不能修改。请先停止实例。`)
+      return
+    }
+  }
   const err = validateForm()
   if (err) { ElMessage.error(err); return }
   const payload = {

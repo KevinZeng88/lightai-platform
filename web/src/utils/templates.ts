@@ -229,19 +229,20 @@ export function assembleDockerRuntimeParams(
   extraDockerText?: string,
 ): string {
   const t = toggles || {}
+  const cp = fields.container_port || 8000
   const result: Record<string, unknown> = {
     backend,
     deploy_type: 'docker',
     image: fields.image || 'vllm/vllm-openai:latest',
-    container_port: fields.container_port || 8000,
+    container_port: cp,
+    gpu: fields.gpu || 'all',
+    ipc: fields.ipc || 'host',
     defaults: {
       host: fields.default_host || '0.0.0.0',
-      port: fields.default_port || 8000,
+      port: cp,
     } as Record<string, unknown>,
   }
 
-  if (t.showGpu) (result as any).gpu = fields.gpu || 'all'
-  if (t.showIpc) (result as any).ipc = fields.ipc || 'host'
   if (t.showCache) {
     ;(result as any).cache_host_path = fields.cache_host_path || ''
     ;(result as any).cache_container_path = fields.cache_container_path || ''
@@ -263,15 +264,16 @@ export function parseDockerRuntimeParams(paramsJson: string | null | undefined):
   try {
     const p = JSON.parse(paramsJson)
     const d = p.defaults || {}
+    const container_port = p.container_port || d.port || defaults.container_port
     return {
       image: p.image || defaults.image,
       gpu: p.gpu || defaults.gpu,
       ipc: p.ipc || defaults.ipc,
-      container_port: p.container_port || defaults.container_port,
+      container_port,
       cache_host_path: p.cache_host_path || defaults.cache_host_path,
       cache_container_path: p.cache_container_path || defaults.cache_container_path,
-      default_host: d.host || defaults.default_host,
-      default_port: d.port || defaults.default_port,
+      default_host: '0.0.0.0',
+      default_port: container_port,
       gpu_memory_utilization: d.gpu_memory_utilization ?? defaults.gpu_memory_utilization,
       max_model_len: d.max_model_len ?? defaults.max_model_len,
       max_num_seqs: d.max_num_seqs ?? defaults.max_num_seqs,

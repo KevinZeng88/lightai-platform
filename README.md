@@ -35,9 +35,10 @@ Agent (GPU 节点) ──主动连接──> Server (中央控制面) <── We
 平台核心产品模型是：**Model + Runtime Environment + Node + Instance Overrides = Model Instance**
 
 - **Model（模型）**：描述"跑什么模型"。包含模型名称、路径、路径类型（directory/file/ollama/custom）、模型格式（huggingface/gguf/ollama/custom）、支持的后端（vllm/llama.cpp/ollama/custom）、默认 served_model_name。模型元数据通过 `params_json` 保存，Web 提供模板快捷填充。
-- **Runtime Environment（运行环境）**：描述"以什么后端、什么运行形态跑"。由 **backend** + **deploy_type** 组合。backend 是推理引擎（vllm / llama_cpp / ollama / custom），deploy_type 是运行形态（local / docker）。Docker 不是 backend，它是 deploy_type。vLLM + Docker、llama.cpp + Local、llama.cpp + Docker 都是合法组合。运行环境配置默认参数（image、port、GPU、cache volume、backend defaults），Web 提供四套模板。
-- **Node（节点）**：描述"在哪台机器上跑"。当前每个 Model Instance 绑定一个 Node（单节点单副本）。Agent 离线时，该 Node 上实例显示 warning："Agent 离线，运行状态无法确认"。未来多节点部署通过 Deployment/Replica 抽象扩展，不在当前版本实现。
-- **Model Instance（实例）**：用户选择 Node + Model + Runtime，系统根据三层配置生成实例覆盖参数模板（container_name、host_port、model_container_path、资源参数），用户确认后创建。实例 params_json 只保存覆盖参数，不重复完整 runtime 配置。
+- **Runtime Environment（运行环境）**：描述"以什么后端、什么运行形态跑"。由 **backend** + **deploy_type** 组合。backend 是推理引擎（vllm / llama_cpp / ollama / custom），deploy_type 是运行形态（local / docker）。Docker 不是 backend，它是 deploy_type。Runtime 是默认运行模板，包含 image、gpu、ipc、container_port、cache 路径、vLLM 默认参数。Web 提供结构化表单。
+- **参数边界**：Runtime 是默认模板，Instance 是本次运行覆盖。Instance 保存不修改 Runtime。container_port 属于 Runtime（容器内服务端口），host_port 属于 Instance（宿主机映射端口）。Host 不在 UI 配置，容器内监听地址固定为 0.0.0.0。GPU 优先级：instance.gpu > runtime.gpu > 内部默认 "all"。
+- **Node（节点）**：描述"在哪台机器上跑"。当前每个 Model Instance 绑定一个 Node（单节点单副本）。Agent 离线时，该 Node 上实例显示 warning。未来多节点部署通过 Deployment/Replica 抽象扩展。
+- **Model Instance（实例）**：用户选择 Node + Model + Runtime，填写实例覆盖参数（container_name、host_port、model_container_path、资源参数覆盖），系统合并三层配置生成最终启动参数。实例 params_json 只保存覆盖参数，不重复完整 Runtime 配置。Instance 表单显示 Runtime 默认值的具体数值（非 "未启用"），覆盖字段可恢复默认。
 
 ### 实例生命周期
 
@@ -45,7 +46,7 @@ Agent (GPU 节点) ──主动连接──> Server (中央控制面) <── We
 - **本地实例**：绑定节点、运行环境和已验证模型文件，由 Agent 负责启动/停止/测试。
   - 支持 local（本地进程）和 docker（Docker 容器）两种 deploy_type，统一使用同一套 start/stop/check/logs 操作。
   - **local**：启动本地二进制/脚本进程，记录 pid + start_time。启动前端口占用检查。
-  - **docker**：通过 `docker run` 启动容器，记录 container_id + container_name。
+  - **docker**：通过 `docker run --detach` 启动容器（argv 方式，不通过 shell），记录 container_id + container_name。默认不加 `--rm`，便于异常退出后 inspect/logs 诊断。Agent 退出不停止容器；显式 stop 才执行 docker stop。
   - **Agent 合并三层配置**：Model（模型路径 + 模型名）+ Runtime（镜像/entrypoint + 默认参数）+ Instance Overrides（端口/名称/资源覆盖）→ 最终启动参数。Instance 覆盖优先于 Runtime 默认值。
   - Docker 容器默认不加 `--rm`，便于 Agent 在容器退出后仍能 inspect/logs 获取 OOM、退出码等诊断信息。用户显式 stop instance 才 docker stop；删除实例/清理资源时再 docker rm。
   - Docker 与 local 共用同一套 start/stop/check/test/logs 按钮和生命周期语义。
@@ -155,7 +156,7 @@ cd web && npm install && npm run dev
 
 ```bash
 cargo fmt --all --check
-cargo test --workspace          # 当前 95 项
+cargo test --workspace          # 当前 119 项（Agent 57 + Server 62）
 cargo build --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cd web && npm run build
@@ -179,7 +180,6 @@ cd web && npm run build
 
 ## 当前未实现
 
-- Docker 实例 Web 表单化配置（当前通过高级 JSON params_json 配置）
 - OpenAI-compatible API Gateway、API Key 管理
 - 使用量统计、计费、复杂报表、告警
 - 历史数据自动清理、降采样

@@ -80,14 +80,16 @@ pub(crate) struct DockerPayload {
 
 // ── Three-layer config: model + runtime + instance ──
 
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub(crate) struct DockerRuntimeConfig {
     pub backend: String,
     pub deploy_type: String,
     pub image: String,
     pub entrypoint: String,
+    #[serde(default = "default_gpu")]
     pub gpu: String,
+    #[serde(default = "default_ipc")]
     pub ipc: String,
     pub container_port: u16,
     pub cache_host_path: String,
@@ -97,6 +99,32 @@ pub(crate) struct DockerRuntimeConfig {
     pub extra_docker_args: Vec<String>,
     #[serde(alias = "extra_vllm_args")]
     pub extra_backend_args: Vec<String>,
+}
+
+fn default_gpu() -> String {
+    "all".to_string()
+}
+fn default_ipc() -> String {
+    "host".to_string()
+}
+
+impl Default for DockerRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            backend: String::new(),
+            deploy_type: String::new(),
+            image: String::new(),
+            entrypoint: String::new(),
+            gpu: default_gpu(),
+            ipc: default_ipc(),
+            container_port: 8000,
+            cache_host_path: String::new(),
+            cache_container_path: String::new(),
+            defaults: BackendDefaults::default(),
+            extra_docker_args: Vec::new(),
+            extra_backend_args: Vec::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -397,11 +425,49 @@ pub(crate) async fn start_docker_container(
 ) -> ModelInstanceTaskResult {
     let docker_args = match build_docker_run_args(payload) {
         Ok(args) => args,
-        Err(message) => return instance_failure(&message),
+        Err(message) => {
+            let _ = platform_log::append(
+                &LogPolicy::default(),
+                "agent.log",
+                "error",
+                &format!("Docker start 参数构建失败 instance_id={instance_id}: {message}"),
+            )
+            .await;
+            return instance_failure(&message);
+        }
     };
     let vllm_args = build_vllm_args(payload);
     let image = payload.docker.image.trim().to_string();
     let command_summary = docker_command_summary(&image, &docker_args, &vllm_args);
+    let container_name = payload.docker.container_name.clone();
+    let gpu = payload.docker.gpu.clone();
+    let ipc = payload.docker.ipc.clone();
+    let port_mapping = payload
+        .docker
+        .ports
+        .first()
+        .map(|p| format!("{}:{}", p.host, p.container))
+        .unwrap_or_default();
+    let volumes: Vec<String> = payload
+        .docker
+        .volumes
+        .iter()
+        .map(|v| {
+            let ro = if v.readonly { ":ro" } else { "" };
+            format!("{}:{}{}", v.host, v.container, ro)
+        })
+        .collect();
+
+    let _ = platform_log::append(
+        &LogPolicy::default(),
+        "agent.log",
+        "info",
+        &format!(
+            "Docker start instance_id={instance_id} container_name={container_name} image={image} gpu={gpu} ipc={ipc} port={port_mapping} volumes=[{}] command_summary={command_summary}",
+            volumes.join(", "),
+        ),
+    )
+    .await;
 
     let mut all_args = docker_args.clone();
     all_args.extend(vllm_args.clone());
@@ -415,6 +481,15 @@ pub(crate) async fn start_docker_container(
     let output = match timeout(Duration::from_secs(DOCKER_RUN_TIMEOUT_SECS), cmd.output()).await {
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
+            let _ = platform_log::append(
+                &LogPolicy::default(),
+                "agent.log",
+                "error",
+                &format!(
+                    "Docker run 进程启动失败 instance_id={instance_id}: {error} command_summary={command_summary}"
+                ),
+            )
+            .await;
             return instance_failure_with_details(
                 &format!("Docker run 失败：{error}"),
                 None,
@@ -422,6 +497,15 @@ pub(crate) async fn start_docker_container(
             );
         }
         Err(_) => {
+            let _ = platform_log::append(
+                &LogPolicy::default(),
+                "agent.log",
+                "error",
+                &format!(
+                    "Docker run 超时 instance_id={instance_id} command_summary={command_summary}"
+                ),
+            )
+            .await;
             return instance_failure_with_details("Docker run 超时", None, Some(command_summary));
         }
     };
@@ -437,9 +521,19 @@ pub(crate) async fn start_docker_container(
             .chars()
             .take(300)
             .collect::<String>();
+        let stderr_summary: String = stderr_text.chars().take(4096).collect();
+        let _ = platform_log::append(
+            &LogPolicy::default(),
+            "agent.log",
+            "error",
+            &format!(
+                "Docker run 失败 instance_id={instance_id} container_name={container_name} detail={detail} command_summary={command_summary}"
+            ),
+        )
+        .await;
         return instance_failure_with_details(
             &format!("Docker run 失败：{detail}"),
-            Some(stderr_text.chars().take(4096).collect()),
+            Some(stderr_summary),
             Some(command_summary),
         );
     }
@@ -451,8 +545,7 @@ pub(crate) async fn start_docker_container(
         "agent.log",
         "info",
         &format!(
-            "Docker 容器已启动 instance_id={instance_id} container_id={container_id} container_name={}",
-            payload.docker.container_name,
+            "Docker 容器已启动 instance_id={instance_id} container_id={container_id} container_name={container_name}"
         ),
     )
     .await;
@@ -507,8 +600,17 @@ pub(crate) async fn stop_docker_container(record: &ManagedProcessRecord) -> Resu
         .as_deref()
         .or(record.container_name.as_deref())
         .ok_or_else(|| "缺少容器 ID 或名称，无法停止".to_string())?;
+    let instance_id = record.instance_id.as_str();
 
-    let output = timeout(
+    let _ = platform_log::append(
+        &LogPolicy::default(),
+        "agent.log",
+        "info",
+        &format!("Docker stop 开始 instance_id={instance_id} container_ref={container_ref}"),
+    )
+    .await;
+
+    let output = match timeout(
         Duration::from_secs(DOCKER_STOP_TIMEOUT_SECS),
         Command::new("docker")
             .args(["stop", container_ref])
@@ -518,13 +620,56 @@ pub(crate) async fn stop_docker_container(record: &ManagedProcessRecord) -> Resu
             .output(),
     )
     .await
-    .map_err(|_| "Docker stop 超时".to_string())?
-    .map_err(|e| format!("Docker stop 失败：{e}"))?;
+    {
+        Ok(Ok(output)) => output,
+        Ok(Err(e)) => {
+            let _ = platform_log::append(
+                &LogPolicy::default(),
+                "agent.log",
+                "error",
+                &format!(
+                    "Docker stop 进程失败 instance_id={instance_id} container_ref={container_ref}: {e}"
+                ),
+            )
+            .await;
+            return Err(format!("Docker stop 失败：{e}"));
+        }
+        Err(_) => {
+            let _ = platform_log::append(
+                &LogPolicy::default(),
+                "agent.log",
+                "error",
+                &format!(
+                    "Docker stop 超时 instance_id={instance_id} container_ref={container_ref}"
+                ),
+            )
+            .await;
+            return Err("Docker stop 超时".to_string());
+        }
+    };
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        let _ = platform_log::append(
+            &LogPolicy::default(),
+            "agent.log",
+            "error",
+            &format!(
+                "Docker stop 失败 instance_id={instance_id} container_ref={container_ref}: {}",
+                stderr.trim()
+            ),
+        )
+        .await;
         return Err(format!("Docker stop 失败：{}", stderr.trim()));
     }
+
+    let _ = platform_log::append(
+        &LogPolicy::default(),
+        "agent.log",
+        "info",
+        &format!("Docker 容器已停止 instance_id={instance_id} container_ref={container_ref}"),
+    )
+    .await;
 
     Ok(())
 }
@@ -637,15 +782,39 @@ pub(crate) async fn check_docker_record(
             }
         }
     };
+    let instance_id = record.instance_id.as_str();
     match inspect_docker_container(container_ref).await {
-        Ok(status) => super::process::DockerCheckResult {
-            is_running: status.running,
-            message: status.message,
-        },
-        Err(error) => super::process::DockerCheckResult {
-            is_running: false,
-            message: format!("Docker 容器检查失败：{error}"),
-        },
+        Ok(status) => {
+            let _ = platform_log::append(
+                &LogPolicy::default(),
+                "agent.log",
+                "debug",
+                &format!(
+                    "Docker inspect instance_id={instance_id} container_ref={container_ref} running={} message={}",
+                    status.running, status.message,
+                ),
+            )
+            .await;
+            super::process::DockerCheckResult {
+                is_running: status.running,
+                message: status.message,
+            }
+        }
+        Err(error) => {
+            let _ = platform_log::append(
+                &LogPolicy::default(),
+                "agent.log",
+                "warn",
+                &format!(
+                    "Docker inspect 失败 instance_id={instance_id} container_ref={container_ref}: {error}"
+                ),
+            )
+            .await;
+            super::process::DockerCheckResult {
+                is_running: false,
+                message: format!("Docker 容器检查失败：{error}"),
+            }
+        }
     }
 }
 
@@ -1017,5 +1186,47 @@ mod tests {
         assert!(joined.contains("--shm-size=2g"));
         assert!(joined.contains("--ulimit"));
         assert!(joined.contains("nofile=65536"));
+    }
+
+    #[test]
+    fn runtime_has_image_instance_no_image_still_generates_args() {
+        let rt = DockerRuntimeConfig {
+            image: "vllm/vllm-openai:latest".to_string(),
+            gpu: "all".to_string(),
+            container_port: 8000,
+            ..Default::default()
+        };
+        let ov = DockerInstanceOverrides {
+            container_name: "test-no-image".to_string(),
+            host_port: 19000,
+            ..Default::default()
+        };
+        let merged =
+            merge_docker_config("/data/models/test", "test-model", Some(&rt), Some(&ov)).unwrap();
+        assert_eq!(merged.docker.image, "vllm/vllm-openai:latest");
+        let args = build_docker_run_args(&merged).unwrap();
+        let joined = args.join(" ");
+        assert!(joined.contains("vllm/vllm-openai:latest"));
+        assert!(joined.contains("--name test-no-image"));
+        assert!(joined.contains("-p 19000:8000"));
+    }
+
+    #[test]
+    fn merge_does_not_mutate_runtime_config() {
+        let rt = make_runtime();
+        let original_image = rt.image.clone();
+        let original_gpu = rt.gpu.clone();
+        let original_defaults_gmu = rt.defaults.gpu_memory_utilization;
+        let ov = DockerInstanceOverrides {
+            container_name: "override-test".to_string(),
+            host_port: 20000,
+            gpu_memory_utilization: Some(0.3),
+            ..Default::default()
+        };
+        let _merged =
+            merge_docker_config("/data/models/test", "test", Some(&rt), Some(&ov)).unwrap();
+        assert_eq!(rt.image, original_image);
+        assert_eq!(rt.gpu, original_gpu);
+        assert_eq!(rt.defaults.gpu_memory_utilization, original_defaults_gmu);
     }
 }

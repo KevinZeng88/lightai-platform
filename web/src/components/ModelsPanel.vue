@@ -217,13 +217,14 @@ import {
   deleteModel,
   deleteModelFile,
   fetchModelFiles,
+  fetchModelInstances,
   fetchModels,
   fetchNodes,
   updateModel,
   updateModelFile,
   verifyModelFile
 } from '../api'
-import type { ModelDefinition, ModelFile, NodeStatus } from '../types'
+import type { ModelDefinition, ModelFile, ModelInstance, NodeStatus } from '../types'
 import { emptyToNull, formatTime } from '../utils/instance'
 import {
   assembleModelMeta,
@@ -237,6 +238,7 @@ const modelTypes = ['llm', 'embedding', 'rerank', 'vlm', 'asr', 'tts', 'other']
 const backends = ['vllm', 'ollama', 'lmdeploy', 'mindie', 'llama_cpp', 'triton', 'custom']
 const models = ref<ModelDefinition[]>([])
 const nodes = ref<NodeStatus[]>([])
+const instances = ref<ModelInstance[]>([])
 const filesByModel = ref<Record<string, ModelFile[]>>({})
 const loading = ref(false)
 const saving = ref(false)
@@ -296,9 +298,10 @@ async function loadData() {
   loading.value = true
   error.value = ''
   try {
-    const [nextModels, nextNodes] = await Promise.all([fetchModels(), fetchNodes()])
+    const [nextModels, nextNodes, nextInstances] = await Promise.all([fetchModels(), fetchNodes(), fetchModelInstances()])
     models.value = nextModels
     nodes.value = nextNodes
+    instances.value = nextInstances
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
   } finally {
@@ -346,6 +349,15 @@ function openEdit(row: ModelDefinition) {
 }
 
 async function submit() {
+  if (editingId.value) {
+    const running = instances.value.filter(
+      i => i.model_id === editingId.value && ['running', 'starting', 'stopping'].includes(i.status)
+    )
+    if (running.length > 0) {
+      ElMessage.warning(`模型正在被运行中的实例 ${running.map(i => i.name).join(', ')} 使用，不能修改。请先停止实例。`)
+      return
+    }
+  }
   if (!form.value.name.trim()) {
     ElMessage.error('请填写模型名称')
     return

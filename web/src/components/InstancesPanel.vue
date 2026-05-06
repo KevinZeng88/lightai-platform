@@ -53,9 +53,9 @@
       <template #default="{ row }">
         <el-button v-if="row.deploy_type === 'external'" size="small" @click="check(row)">检查状态</el-button>
         <el-button v-else size="small" :disabled="row.status !== 'running'" @click="check(row)">检查状态</el-button>
-        <el-button v-if="row.deploy_type === 'local'" size="small" type="success" :disabled="row.status === 'running' || row.status === 'starting'" @click="start(row)">启动</el-button>
-        <el-button v-if="row.deploy_type === 'local'" size="small" :disabled="row.status === 'stopped' || row.status === 'stopping'" @click="stop(row)">停止</el-button>
-        <el-button v-if="row.deploy_type === 'local'" size="small" :disabled="row.status !== 'running'" @click="testLocal(row)">测试</el-button>
+        <el-button v-if="row.deploy_type === 'local'" size="small" type="success" :disabled="!['stopped', 'failed', 'created', 'unknown'].includes(row.status) || isAgentOffline(row)" @click="start(row)">启动</el-button>
+        <el-button v-if="row.deploy_type === 'local'" size="small" :disabled="row.status !== 'running' || isAgentOffline(row)" @click="stop(row)">停止</el-button>
+        <el-button v-if="row.deploy_type === 'local'" size="small" :disabled="row.status !== 'running' || isAgentOffline(row)" @click="testLocal(row)">测试</el-button>
         <el-button size="small" @click="openLogs(row)">日志</el-button>
         <el-button size="small" @click="openEdit(row)">编辑</el-button>
         <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
@@ -143,15 +143,13 @@
         <!-- Docker instance form -->
         <template v-if="isDockerRuntime">
           <el-divider content-position="left">Docker 实例参数</el-divider>
-          <el-alert title="以下为实例级覆盖参数。已启用的参数将覆盖运行环境默认值；未启用的参数使用运行环境默认值。未启用的参数不会被写入实例 params_json。image、GPU、IPC、缓存路径等通用参数来自运行环境，实例不必重复配置。" type="info" show-icon class="alert" />
+
+          <!-- Always-instance fields -->
           <el-form-item label="容器名称">
             <el-input v-model="form.container_name" placeholder="lightai-qwen3-0-6b" />
           </el-form-item>
           <el-form-item label="宿主机端口">
             <el-input-number v-model="form.host_port" :min="1024" :max="65535" />
-          </el-form-item>
-          <el-form-item label="容器端口">
-            <el-input-number v-model="form.container_port" :min="1" :max="65535" />
           </el-form-item>
           <el-form-item label="模型容器路径">
             <el-input v-model="form.model_container_path" placeholder="/models/qwen3-0.6b" />
@@ -160,66 +158,101 @@
             <el-input v-model="form.served_model_name" placeholder="qwen3-0.6b" />
           </el-form-item>
 
-          <el-divider content-position="left">可选参数（勾选后启用）</el-divider>
-
-          <el-form-item label="GPU 显存使用比例">
-            <el-switch v-model="instToggles.showGpuMem" size="small" style="margin-right:8px" />
-            <el-input-number v-if="instToggles.showGpuMem" v-model="form.gpu_memory_utilization" :min="0.1" :max="1.0" :step="0.05" />
-            <span v-else class="muted">未启用（使用 Runtime 默认值）</span>
+          <!-- container_port: read-only from Runtime -->
+          <el-form-item label="容器端口">
+            <el-input-number :model-value="runtimeDefaults.container_port" :min="1" :max="65535" disabled />
+            <el-tag size="small" type="info" style="margin-left:8px">来自运行环境</el-tag>
           </el-form-item>
 
-          <el-form-item label="最大模型长度">
-            <el-switch v-model="instToggles.showMaxModelLen" size="small" style="margin-right:8px" />
-            <el-input-number v-if="instToggles.showMaxModelLen" v-model="form.max_model_len" :min="512" :step="512" />
-            <span v-else class="muted">未启用（使用 Runtime 默认值）</span>
-          </el-form-item>
+          <el-divider content-position="left">可选参数（勾选后实例覆盖）</el-divider>
+          <el-alert title="勾选并填写 → 保存为实例覆盖。未勾选 → 默认来自运行环境（下方始终显示具体值）。" type="info" show-icon class="alert" />
 
-          <el-form-item label="最大并发序列数">
-            <el-switch v-model="instToggles.showMaxNumSeqs" size="small" style="margin-right:8px" />
-            <el-input-number v-if="instToggles.showMaxNumSeqs" v-model="form.max_num_seqs" :min="1" :max="256" />
-            <span v-else class="muted">未启用（使用 Runtime 默认值）</span>
-          </el-form-item>
-
+          <!-- gpu -->
           <el-form-item label="GPU">
-            <el-switch v-model="instToggles.showGpu" size="small" style="margin-right:8px" />
-            <el-input v-if="instToggles.showGpu" v-model="form.docker_gpu" placeholder="all" />
-            <span v-else class="muted">未启用（使用 Runtime 默认值）</span>
-          </el-form-item>
-
-          <el-form-item label="高级 Docker 参数">
-            <el-switch v-model="instToggles.showExtraDocker" size="small" style="margin-right:8px" />
-            <el-input v-if="instToggles.showExtraDocker" v-model="form.extra_docker_args_text" type="textarea" :rows="2" placeholder="一行一个参数" />
-            <span v-else class="muted">未启用</span>
-          </el-form-item>
-
-          <el-form-item label="高级后端参数">
-            <el-switch v-model="instToggles.showExtraBackend" size="small" style="margin-right:8px" />
-            <el-input v-if="instToggles.showExtraBackend" v-model="form.extra_backend_args_text" type="textarea" :rows="2" placeholder="一行一个参数" />
-            <span v-else class="muted">未启用</span>
-          </el-form-item>
-
-          <el-collapse class="advanced-fields">
-            <el-collapse-item title="实例参数 JSON（高级编辑）" name="docker-json">
-              <el-alert title="点击下方按钮根据当前表单值生成 JSON，或手动编辑。Docker 容器默认不加 --rm。" type="info" show-icon class="alert" />
-              <el-button size="small" type="primary" @click="generateDockerParamsJson" style="margin-bottom:8px">根据表单生成 JSON</el-button>
-              <el-button size="small" @click="generateDockerTemplate" :disabled="!form.model_file_id || !form.runtime_environment_id" style="margin-bottom:8px">从 Runtime 模板生成</el-button>
-              <el-form-item label="参数 JSON">
-                <el-input v-model="form.params_json" type="textarea" :rows="10" placeholder='{"container_name":"lightai-test","host_port":18000,...}' />
-              </el-form-item>
-            </el-collapse-item>
-          </el-collapse>
-
-          <el-alert type="warning" show-icon class="alert" style="margin-top: 8px">
-            <template #title>
-              <div>Docker 部署环境要求：</div>
-              <ul style="margin: 4px 0; padding-left: 16px">
-                <li>请确认目标 Node 已安装 Docker 和 NVIDIA Container Toolkit</li>
-                <li>请确认模型路径是目标 Node 上可访问的路径</li>
-                <li>host_port 可能冲突，当前需用户自行确认</li>
-                <li>Docker 容器默认不加 --rm，便于失败诊断</li>
-              </ul>
+            <el-switch :model-value="instOverrides.has('gpu')" size="small" style="margin-right:8px" @change="(val: boolean) => toggleOverride('gpu', val)" />
+            <template v-if="instOverrides.has('gpu')">
+              <el-input v-model="form.docker_gpu" placeholder="all" style="width:160px" />
+              <el-tag size="small" type="warning" style="margin-left:8px">实例覆盖</el-tag>
+              <el-button size="small" text type="primary" @click="resetOverride('gpu')">恢复默认</el-button>
             </template>
-          </el-alert>
+            <template v-else>
+              <code>{{ runtimeDefaults.gpu || 'all' }}</code>
+              <el-tag size="small" type="info" style="margin-left:8px">来自运行环境</el-tag>
+            </template>
+          </el-form-item>
+
+          <!-- gpu_memory_utilization -->
+          <el-form-item label="GPU 显存使用比例">
+            <el-switch :model-value="instOverrides.has('gpu_memory_utilization')" size="small" style="margin-right:8px" @change="(val: boolean) => toggleOverride('gpu_memory_utilization', val)" />
+            <template v-if="instOverrides.has('gpu_memory_utilization')">
+              <el-input-number v-model="form.gpu_memory_utilization" :min="0.1" :max="1.0" :step="0.05" />
+              <el-tag size="small" type="warning" style="margin-left:8px">实例覆盖</el-tag>
+              <el-button size="small" text type="primary" @click="resetOverride('gpu_memory_utilization')">恢复默认</el-button>
+            </template>
+            <template v-else>
+              <code>{{ runtimeDefaults.gpu_memory_utilization }}</code>
+              <el-tag size="small" type="info" style="margin-left:8px">来自运行环境</el-tag>
+            </template>
+          </el-form-item>
+
+          <!-- max_model_len -->
+          <el-form-item label="最大模型长度">
+            <el-switch :model-value="instOverrides.has('max_model_len')" size="small" style="margin-right:8px" @change="(val: boolean) => toggleOverride('max_model_len', val)" />
+            <template v-if="instOverrides.has('max_model_len')">
+              <el-input-number v-model="form.max_model_len" :min="512" :step="512" />
+              <el-tag size="small" type="warning" style="margin-left:8px">实例覆盖</el-tag>
+              <el-button size="small" text type="primary" @click="resetOverride('max_model_len')">恢复默认</el-button>
+            </template>
+            <template v-else>
+              <code>{{ runtimeDefaults.max_model_len }}</code>
+              <el-tag size="small" type="info" style="margin-left:8px">来自运行环境</el-tag>
+            </template>
+          </el-form-item>
+
+          <!-- max_num_seqs -->
+          <el-form-item label="最大并发序列数">
+            <el-switch :model-value="instOverrides.has('max_num_seqs')" size="small" style="margin-right:8px" @change="(val: boolean) => toggleOverride('max_num_seqs', val)" />
+            <template v-if="instOverrides.has('max_num_seqs')">
+              <el-input-number v-model="form.max_num_seqs" :min="1" :max="256" />
+              <el-tag size="small" type="warning" style="margin-left:8px">实例覆盖</el-tag>
+              <el-button size="small" text type="primary" @click="resetOverride('max_num_seqs')">恢复默认</el-button>
+            </template>
+            <template v-else>
+              <code>{{ runtimeDefaults.max_num_seqs }}</code>
+              <el-tag size="small" type="info" style="margin-left:8px">来自运行环境</el-tag>
+            </template>
+          </el-form-item>
+
+          <!-- extra_docker_args -->
+          <el-form-item label="高级 Docker 参数">
+            <el-switch :model-value="instOverrides.has('extra_docker_args')" size="small" style="margin-right:8px" @change="(val: boolean) => toggleOverride('extra_docker_args', val)" />
+            <template v-if="instOverrides.has('extra_docker_args')">
+              <el-input v-model="form.extra_docker_args_text" type="textarea" :rows="2" placeholder="一行一个参数" style="width:240px" />
+              <el-tag size="small" type="warning" style="margin-left:8px">实例覆盖</el-tag>
+              <el-button size="small" text type="primary" @click="resetOverride('extra_docker_args')">恢复默认</el-button>
+            </template>
+            <template v-else>
+              <code v-if="runtimeDefaults.extra_docker_args.length">{{ runtimeDefaults.extra_docker_args.join(', ') }}</code>
+              <span v-else class="muted">(空)</span>
+              <el-tag size="small" type="info" style="margin-left:8px">来自运行环境</el-tag>
+            </template>
+          </el-form-item>
+
+          <!-- extra_backend_args -->
+          <el-form-item label="高级后端参数">
+            <el-switch :model-value="instOverrides.has('extra_backend_args')" size="small" style="margin-right:8px" @change="(val: boolean) => toggleOverride('extra_backend_args', val)" />
+            <template v-if="instOverrides.has('extra_backend_args')">
+              <el-input v-model="form.extra_backend_args_text" type="textarea" :rows="2" placeholder="一行一个参数" style="width:240px" />
+              <el-tag size="small" type="warning" style="margin-left:8px">实例覆盖</el-tag>
+              <el-button size="small" text type="primary" @click="resetOverride('extra_backend_args')">恢复默认</el-button>
+            </template>
+            <template v-else>
+              <code v-if="runtimeDefaults.extra_backend_args.length">{{ runtimeDefaults.extra_backend_args.join(', ') }}</code>
+              <span v-else class="muted">(空)</span>
+              <el-tag size="small" type="info" style="margin-left:8px">来自运行环境</el-tag>
+            </template>
+          </el-form-item>
+
         </template>
 
         <!-- Local (non-Docker) instance form -->
@@ -265,8 +298,9 @@
       </template>
     </el-form>
     <template #footer>
+      <el-alert v-if="editingId && isInstanceRunning" title="实例正在运行中，不能修改配置。请先停止实例。" type="warning" show-icon class="alert" />
       <el-button @click="dialogVisible = false">取消</el-button>
-      <el-button type="primary" @click="submit">保存</el-button>
+      <el-button type="primary" :disabled="Boolean(editingId) && isInstanceRunning" @click="submit">保存</el-button>
     </template>
   </el-dialog>
 
@@ -309,10 +343,10 @@ import {
 } from '../api'
 import type { ModelDefinition, ModelFile, ModelInstance, NodeStatus, RuntimeEnvironment } from '../types'
 import { backendLabel, checkFailedReason, deployTypeLabel, emptyToNull, formatTime, instanceStatusLabel, isAgentOffline, runtimeDeployTypeLabel, statusLabel, statusType } from '../utils/instance'
-import { buildDockerInstanceParams, emptyForm, localParams, parseParams } from './instances/instanceParams'
-import type { InstanceForm } from './instances/instanceParams'
+import { buildDockerInstanceParams, detectOverrides, emptyForm, localParams, parseParams, parseRuntimeDefaults } from './instances/instanceParams'
+import type { DockerRuntimeDefaults, InstanceForm } from './instances/instanceParams'
 import { useInstanceRefresh } from './instances/useInstanceRefresh'
-import { checkModelRuntimeCompat, generateDockerInstanceOverrides, toTemplateJson } from '../utils/templates'
+import { checkModelRuntimeCompat } from '../utils/templates'
 
 const backends = ['ollama', 'llama_cpp', 'vllm', 'custom']
 const models = ref<ModelDefinition[]>([])
@@ -330,43 +364,46 @@ const logRefreshing = ref(false)
 const logMessage = ref('')
 const form = ref<InstanceForm>(emptyForm())
 const compatWarning = ref('')
-const instToggles = reactive({
-  showGpuMem: false,
-  showMaxModelLen: false,
-  showMaxNumSeqs: false,
-  showGpu: false,
-  showExtraDocker: false,
-  showExtraBackend: false,
+const instOverrides = reactive(new Set<string>())
+const runtimeDefaults: DockerRuntimeDefaults = reactive({
+  container_port: 8000,
+  gpu: 'all',
+  gpu_memory_utilization: 0.5,
+  max_model_len: 4096,
+  max_num_seqs: 8,
+  extra_docker_args: [],
+  extra_backend_args: [],
 })
 const isDockerRuntime = computed(() => {
   const rt = runtimeEnvironments.value.find(e => e.id === form.value.runtime_environment_id)
   return rt?.deploy_type === 'docker'
 })
 
+const isInstanceRunning = computed(() => {
+  if (!editingId.value) return false
+  const inst = instances.value.find(i => i.id === editingId.value)
+  return inst ? ['running', 'starting', 'stopping'].includes(inst.status) : false
+})
+
 function onRuntimeChange() {
   if (!isDockerRuntime.value) return
   const runtime = runtimeEnvironments.value.find(e => e.id === form.value.runtime_environment_id)
   if (!runtime?.params_json) return
-  try {
-    const rp = JSON.parse(runtime.params_json)
-    // Populate instance fields from Runtime defaults (only if instance field is empty/default)
-    const formFilled = (form.value as any).__runtime_defaults_filled
-    if (!formFilled) {
-      form.value.container_port = rp.container_port || 8000
-      form.value.docker_gpu = rp.gpu || 'all'
-      form.value.gpu_memory_utilization = rp.defaults?.gpu_memory_utilization ?? 0.5
-      form.value.max_model_len = rp.defaults?.max_model_len ?? 4096
-      form.value.max_num_seqs = rp.defaults?.max_num_seqs ?? 8
-      ;(form.value as any).__runtime_defaults_filled = true
-    }
-    // Enable toggles based on what Runtime provides
-    instToggles.showGpu = !!rp.gpu
-    instToggles.showGpuMem = rp.defaults?.gpu_memory_utilization != null
-    instToggles.showMaxModelLen = rp.defaults?.max_model_len != null
-    instToggles.showMaxNumSeqs = rp.defaults?.max_num_seqs != null
-    instToggles.showExtraDocker = Array.isArray(rp.extra_docker_args) && rp.extra_docker_args.length > 0
-    instToggles.showExtraBackend = Array.isArray(rp.extra_backend_args) && rp.extra_backend_args.length > 0
-  } catch { /* ignore */ }
+
+  const defaults = parseRuntimeDefaults(runtime.params_json)
+  Object.assign(runtimeDefaults, defaults)
+  // Update form values to Runtime defaults for display (unless overridden)
+  form.value.container_port = defaults.container_port
+  form.value.docker_gpu = defaults.gpu
+  form.value.gpu_memory_utilization = defaults.gpu_memory_utilization
+  form.value.max_model_len = defaults.max_model_len
+  form.value.max_num_seqs = defaults.max_num_seqs
+  if (defaults.extra_docker_args.length > 0) {
+    form.value.extra_docker_args_text = defaults.extra_docker_args.join('\n')
+  }
+  if (defaults.extra_backend_args.length > 0) {
+    form.value.extra_backend_args_text = defaults.extra_backend_args.join('\n')
+  }
 }
 
 function onModelChange() {
@@ -392,46 +429,36 @@ function onModelChange() {
   }
 }
 
-function generateDockerParamsJson() {
-  const overrides = buildDockerInstanceParams(form.value)
-  const modelFile = modelFiles.value.find(f => f.id === form.value.model_file_id)
-  if (modelFile) {
-    const modelDir = (modelFile.path || '').split('/').pop() || 'model'
-    ;(overrides as any).model_host_path = modelFile.path
-    if (!overrides.model_container_path) (overrides as any).model_container_path = `/models/${modelDir}`
-  }
-  if (form.value.params_json && form.value.params_json.trim()) {
-    ElMessageBox.confirm('当前已有实例参数，覆盖会丢失已填信息。是否继续？', '确认覆盖', { type: 'warning', confirmButtonText: '覆盖', cancelButtonText: '取消' }).then(() => {
-      form.value.params_json = toTemplateJson(overrides)
-      ElMessage.success('已根据表单生成实例参数 JSON')
-    }).catch(() => {})
+function toggleOverride(field: string, enabled: boolean) {
+  if (enabled) {
+    instOverrides.add(field)
   } else {
-    form.value.params_json = toTemplateJson(overrides)
-    ElMessage.success('已根据表单生成实例参数 JSON')
+    resetOverride(field)
   }
 }
 
-function generateDockerTemplate() {
-  const model = models.value.find(m => m.id === form.value.model_id)
-  const modelFile = modelFiles.value.find(f => f.id === form.value.model_file_id)
-  const runtime = runtimeEnvironments.value.find(e => e.id === form.value.runtime_environment_id)
-  if (!modelFile || !runtime) {
-    ElMessage.warning('请先选择模型文件和运行环境')
-    return
-  }
-  const modelParams = model?.params_json ? JSON.parse(model.params_json) : null
-  const runtimeParams = runtime.params_json ? JSON.parse(runtime.params_json) : null
-  const modelName = model?.name || ''
-  const modelPath = modelFile.path || ''
-  const overrides = generateDockerInstanceOverrides(modelName, modelPath, modelParams, runtimeParams)
-  if (form.value.params_json && form.value.params_json.trim()) {
-    ElMessageBox.confirm('当前已有实例参数，覆盖会丢失已填信息。是否继续？', '确认覆盖', { type: 'warning', confirmButtonText: '覆盖', cancelButtonText: '取消' }).then(() => {
-      form.value.params_json = toTemplateJson(overrides)
-      ElMessage.success('已从 Runtime 模板生成实例覆盖参数')
-    }).catch(() => {})
-  } else {
-    form.value.params_json = toTemplateJson(overrides)
-    ElMessage.success('已从 Runtime 模板生成实例覆盖参数')
+function resetOverride(field: string) {
+  instOverrides.delete(field)
+  // Restore form value to Runtime default
+  switch (field) {
+    case 'gpu':
+      form.value.docker_gpu = runtimeDefaults.gpu
+      break
+    case 'gpu_memory_utilization':
+      form.value.gpu_memory_utilization = runtimeDefaults.gpu_memory_utilization
+      break
+    case 'max_model_len':
+      form.value.max_model_len = runtimeDefaults.max_model_len
+      break
+    case 'max_num_seqs':
+      form.value.max_num_seqs = runtimeDefaults.max_num_seqs
+      break
+    case 'extra_docker_args':
+      form.value.extra_docker_args_text = runtimeDefaults.extra_docker_args.join('\n')
+      break
+    case 'extra_backend_args':
+      form.value.extra_backend_args_text = runtimeDefaults.extra_backend_args.join('\n')
+      break
   }
 }
 
@@ -477,12 +504,34 @@ async function loadData() {
 function openCreate() {
   editingId.value = ''
   form.value = emptyForm()
+  instOverrides.clear()
+  Object.assign(runtimeDefaults, {
+    container_port: 8000,
+    gpu: 'all',
+    gpu_memory_utilization: 0.5,
+    max_model_len: 4096,
+    max_num_seqs: 8,
+    extra_docker_args: [],
+    extra_backend_args: [],
+  })
   dialogVisible.value = true
 }
 
 function openEdit(row: ModelInstance) {
   editingId.value = row.id
   const params = parseParams(row.params_json)
+
+  // Load Runtime defaults
+  const rt = runtimeEnvironments.value.find(e => e.id === row.runtime_environment_id)
+  const rtDefaults = parseRuntimeDefaults(rt?.params_json)
+  Object.assign(runtimeDefaults, rtDefaults)
+
+  // Detect instance overrides
+  instOverrides.clear()
+  const overrides = detectOverrides(row.params_json)
+  for (const key of overrides) instOverrides.add(key)
+
+  // Form values: use instance overrides first, then runtime defaults
   form.value = {
     model_id: row.model_id ?? '',
     model_file_id: row.model_file_id ?? '',
@@ -505,15 +554,15 @@ function openEdit(row: ModelInstance) {
     extra_args_text: params.extra_args.join('\n'),
     container_name: params.container_name,
     host_port: params.host_port,
-    container_port: params.container_port,
+    container_port: rtDefaults.container_port,
     model_container_path: params.model_container_path,
     served_model_name: params.served_model_name,
-    gpu_memory_utilization: params.gpu_memory_utilization,
-    max_model_len: params.max_model_len,
-    max_num_seqs: params.max_num_seqs,
-    docker_gpu: params.docker_gpu,
-    extra_docker_args_text: params.extra_docker_args_text,
-    extra_backend_args_text: params.extra_backend_args_text,
+    gpu_memory_utilization: instOverrides.has('gpu_memory_utilization') ? params.gpu_memory_utilization : rtDefaults.gpu_memory_utilization,
+    max_model_len: instOverrides.has('max_model_len') ? params.max_model_len : rtDefaults.max_model_len,
+    max_num_seqs: instOverrides.has('max_num_seqs') ? params.max_num_seqs : rtDefaults.max_num_seqs,
+    docker_gpu: instOverrides.has('gpu') ? params.docker_gpu : rtDefaults.gpu,
+    extra_docker_args_text: instOverrides.has('extra_docker_args') ? params.extra_docker_args_text : rtDefaults.extra_docker_args.join('\n'),
+    extra_backend_args_text: instOverrides.has('extra_backend_args') ? params.extra_backend_args_text : rtDefaults.extra_backend_args.join('\n'),
     probe_paths_text: params.probe_paths_text,
     probe_max_attempts: params.probe_max_attempts,
     probe_interval_ms: params.probe_interval_ms,
@@ -547,6 +596,10 @@ async function refreshLogs() {
 }
 
 async function submit() {
+  if (editingId.value && isInstanceRunning.value) {
+    ElMessage.warning('实例正在运行中，不能修改配置。请先停止实例。')
+    return
+  }
   if (form.value.deploy_type === 'external' && (!form.value.name || !form.value.model_name || !form.value.base_url)) {
     error.value = '请填写实例名称、服务模型名和基础地址'
     return
@@ -571,7 +624,7 @@ async function submit() {
     description: emptyToNull(form.value.description),
     params_json: form.value.deploy_type === 'local'
       ? (isDockerRuntime.value
-          ? (form.value.params_json.trim() || JSON.stringify(buildDockerInstanceParams(form.value)))
+          ? JSON.stringify(buildDockerInstanceParams(form.value, instOverrides))
           : JSON.stringify(localParams(form.value)))
       : null,
     status: 'unknown'

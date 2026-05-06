@@ -124,6 +124,19 @@ pub async fn update_runtime_environment(
     )?;
     validate_json_field("config_json", request.config_json.as_deref())?;
 
+    let running_instances: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM model_instances WHERE runtime_environment_id = ? AND status IN ('running', 'starting', 'stopping')",
+    )
+    .bind(id)
+    .fetch_all(pool)
+    .await?;
+    if !running_instances.is_empty() {
+        return Err(Stage3Error::Conflict(format!(
+            "运行环境正在被运行中的实例 {} 使用，不能修改。请先停止实例。",
+            running_instances.join(", ")
+        )));
+    }
+
     let now = now_unix_secs();
     let result = sqlx::query(
         r#"
