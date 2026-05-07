@@ -479,3 +479,223 @@ async fn heartbeat_rejects_invalid_token() {
 
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+// ── Collector registry tests ──
+
+#[tokio::test]
+async fn collector_registry_table_exists_after_migrate() {
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    db::migrate(&pool).await.unwrap();
+
+    // Verify the table exists by querying it.
+    let rows: Vec<(String,)> = sqlx::query_as("SELECT id FROM collector_registry")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn collector_registry_empty_list_on_fresh_db() {
+    let (_pool, app) = test_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/collector-registry")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 10_000).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let collectors = payload["collectors"].as_array().unwrap();
+    assert!(collectors.is_empty());
+}
+
+#[tokio::test]
+async fn collector_registry_register_and_list() {
+    let (_pool, app) = test_app().await;
+
+    let inspect_json = json!({
+        "id": "nvidia-r535",
+        "vendor": "nvidia",
+        "name": "NVIDIA R535 Collector",
+        "version": "1.0.0",
+        "description": "test",
+        "discover_sha256": "abc123",
+        "metrics_sha256": "def456"
+    });
+
+    // Register.
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/collector-registry")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&inspect_json).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 10_000).await.unwrap();
+    let entry: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(entry["id"], "nvidia-r535");
+    assert_eq!(entry["version"], "1.0.0");
+    assert_eq!(entry["enabled"], true);
+
+    // List.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/collector-registry")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 10_000).await.unwrap();
+    let payload: Value = serde_json::from_slice(&body).unwrap();
+    let collectors = payload["collectors"].as_array().unwrap();
+    assert_eq!(collectors.len(), 1);
+    assert_eq!(collectors[0]["id"], "nvidia-r535");
+}
+
+#[tokio::test]
+async fn collector_registry_get_by_id_version() {
+    let (_pool, app) = test_app().await;
+
+    let inspect_json = json!({
+        "id": "nvidia-r550",
+        "vendor": "nvidia",
+        "name": "NVIDIA R550 Collector",
+        "version": "2.0.0",
+        "description": "test",
+        "discover_sha256": "abc123",
+        "metrics_sha256": "def456"
+    });
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/collector-registry")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&inspect_json).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/collector-registry/nvidia-r550/2.0.0")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn collector_registry_update_enabled_by_upsert() {
+    let (_pool, app) = test_app().await;
+
+    let inspect_json = json!({
+        "id": "nvidia-r535",
+        "vendor": "nvidia",
+        "name": "NVIDIA R535 Collector",
+        "version": "1.0.0",
+        "description": "test",
+        "discover_sha256": "abc123",
+        "metrics_sha256": "def456",
+        "enabled": false
+    });
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/collector-registry")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_string(&inspect_json).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 10_000).await.unwrap();
+    let entry: Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(entry["enabled"], false);
+}
+
+#[tokio::test]
+async fn collector_registry_repeat_init_idempotent() {
+    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
+    // Call migrate twice — second call should be idempotent.
+    db::migrate(&pool).await.unwrap();
+    db::migrate(&pool).await.unwrap();
+
+    let rows: Vec<(String,)> = sqlx::query_as("SELECT id FROM collector_registry")
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+    assert!(rows.is_empty());
+}
+
+#[tokio::test]
+async fn collector_registry_heartbeat_includes_registry() {
+    let (_pool, app) = test_app().await;
+    let node = register_node(app.clone()).await;
+
+    let heartbeat = json!({
+        "node_id": node["node_id"],
+        "sampled_at": 1700000000i64,
+        "metrics": {
+            "cpu_usage_percent": 10.0,
+            "memory_total_bytes": 8000000000i64,
+            "memory_used_bytes": 4000000000i64,
+            "disk_total_bytes": 100000000000i64,
+            "disk_used_bytes": 50000000000i64
+        },
+        "gpus": [],
+        "collector_errors": [],
+        "agent_config": {
+            "config_version": 1,
+            "heartbeat_interval_secs": 15,
+            "metrics_sample_interval_secs": 15,
+            "command_timeout_secs": 5,
+            "environment_check_timeout_secs": 5
+        },
+        "managed_instances": []
+    });
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/agent/heartbeat")
+                .header(header::CONTENT_TYPE, "application/json")
+                .header(
+                    header::AUTHORIZATION,
+                    format!("Bearer {}", node["agent_token"].as_str().unwrap()),
+                )
+                .body(Body::from(serde_json::to_string(&heartbeat).unwrap()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = to_bytes(response.into_body(), 10_000).await.unwrap();
+    let resp: Value = serde_json::from_slice(&body).unwrap();
+    // Heartbeat response must include collector_registry field (empty or populated).
+    assert!(resp.get("collector_registry").is_some());
+}

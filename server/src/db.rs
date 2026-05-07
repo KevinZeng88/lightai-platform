@@ -81,6 +81,8 @@ async fn migrate_stage3a_corrections(pool: &SqlitePool) -> anyhow::Result<()> {
     add_node_status_column_if_missing(pool, "collector_timeout_secs", "INTEGER").await?;
     add_node_status_column_if_missing(pool, "collector_max_output_bytes", "INTEGER").await?;
     add_node_status_column_if_missing(pool, "last_config_updated_at", "INTEGER").await?;
+    add_gpu_status_column_if_missing(pool, "status", "TEXT").await?;
+    add_gpu_status_column_if_missing(pool, "last_error", "TEXT").await?;
 
     let columns = table_columns(pool, "model_instances").await?;
     let needs_rebuild = columns
@@ -100,6 +102,7 @@ async fn migrate_stage3a_corrections(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_agent_config_tables(pool).await?;
     ensure_audit_tables(pool).await?;
     ensure_platform_settings(pool).await?;
+    ensure_collector_registry(pool).await?;
 
     Ok(())
 }
@@ -193,6 +196,19 @@ async fn add_node_status_column_if_missing(
     let columns = table_columns(pool, "node_status").await?;
     if !columns.iter().any(|existing| existing.name == column) {
         pool.execute(format!("ALTER TABLE node_status ADD COLUMN {column} {column_type}").as_str())
+            .await?;
+    }
+    Ok(())
+}
+
+async fn add_gpu_status_column_if_missing(
+    pool: &SqlitePool,
+    column: &str,
+    column_type: &str,
+) -> anyhow::Result<()> {
+    let columns = table_columns(pool, "gpu_status").await?;
+    if !columns.iter().any(|existing| existing.name == column) {
+        pool.execute(format!("ALTER TABLE gpu_status ADD COLUMN {column} {column_type}").as_str())
             .await?;
     }
     Ok(())
@@ -332,5 +348,92 @@ async fn rebuild_model_instances_table(pool: &SqlitePool) -> anyhow::Result<()> 
         "CREATE INDEX IF NOT EXISTS idx_model_instances_node_environment ON model_instances(node_id, runtime_environment_id)",
     )
     .await?;
+
+    Ok(())
+}
+
+async fn ensure_collector_registry(pool: &SqlitePool) -> anyhow::Result<()> {
+    let columns = table_columns(pool, "collector_registry")
+        .await
+        .unwrap_or_default();
+
+    // Fresh DB: create table with correct schema.
+    if columns.is_empty() {
+        pool.execute(
+            r#"
+            CREATE TABLE IF NOT EXISTS collector_registry (
+                id TEXT NOT NULL,
+                version TEXT NOT NULL,
+                vendor TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                discover_sha256 TEXT NOT NULL,
+                metrics_sha256 TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (id, version)
+            )
+            "#,
+        )
+        .await?;
+        return Ok(());
+    }
+
+    // Existing DB: check if the PK is the old id-only schema.
+    let pk_info: Vec<String> = sqlx::query_scalar(
+        "SELECT name FROM pragma_table_info('collector_registry') WHERE pk > 0 ORDER BY pk",
+    )
+    .fetch_all(pool)
+    .await
+    .unwrap_or_default();
+
+    if pk_info == vec!["id"] {
+        // Old schema (id-only PK): migrate to id+version PK safely.
+        // 1. Create new table.
+        // 2. Copy data (keep latest per id+version, grouping by id+version since
+        //    the old schema couldn't have duplicate versions anyway).
+        // 3. Drop old table.
+        // 4. Rename new table.
+        pool.execute(
+            r#"
+            CREATE TABLE collector_registry_new (
+                id TEXT NOT NULL,
+                version TEXT NOT NULL,
+                vendor TEXT NOT NULL,
+                name TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                discover_sha256 TEXT NOT NULL,
+                metrics_sha256 TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (id, version)
+            )
+            "#,
+        )
+        .await?;
+        pool.execute(
+            r#"INSERT INTO collector_registry_new
+               SELECT id, version, vendor, name, description,
+                      discover_sha256, metrics_sha256, enabled,
+                      created_at, updated_at
+               FROM collector_registry"#,
+        )
+        .await?;
+        pool.execute("DROP TABLE collector_registry").await?;
+        pool.execute("ALTER TABLE collector_registry_new RENAME TO collector_registry")
+            .await?;
+    }
+
+    // Ensure `version` column exists (for DBs that have the correct PK but
+    // were created before the column was added).
+    if !columns.iter().any(|c| c.name == "version") {
+        pool.execute(
+            "ALTER TABLE collector_registry ADD COLUMN version TEXT NOT NULL DEFAULT '0.0.0'",
+        )
+        .await?;
+    }
+
     Ok(())
 }

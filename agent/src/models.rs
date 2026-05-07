@@ -22,6 +22,8 @@ pub struct RegisterResponse {
 #[derive(Debug, Deserialize)]
 pub struct HeartbeatResponse {
     pub agent_config: Option<AgentConfig>,
+    #[serde(default)]
+    pub collector_registry: Vec<crate::collector::registry::RegistryEntry>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

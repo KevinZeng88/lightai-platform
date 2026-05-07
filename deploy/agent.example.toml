@@ -5,3 +5,25 @@ listen_addr = "0.0.0.0:8081"
 server_url = "http://127.0.0.1:8080"
 node_name = "gpu-node-1"
 state_path = "data/agent-state.toml"
+
+# ── GPU 采集器配置（可选）──
+# 未配置 [gpu_collectors] 时（默认），Agent 使用内置 NVIDIA/custom 采集路径（legacy）。
+# 配置 root 后，Agent 切换到脚本化 collector 框架，legacy 路径不再执行。
+#
+# 启用流程：
+#   1. 将 collector 目录放到 Agent 本地，例如 /opt/lightai/collectors/gpu/nvidia
+#   2. 执行 lightai-agent collector inspect /opt/lightai/collectors/gpu/nvidia
+#   3. 将输出 JSON 粘贴到 Web 的「采集器登记」页面
+#   4. 在下方 [gpu_collectors] 中设置 root 和 enabled
+#   5. 启动 Agent
+#
+# 安全约定：
+#   - collector_root 已配置时，必须先在 Web 登记 registry，否则 fail-closed（不执行任何脚本）
+#   - registry 为空时，collector_errors 会提示"registry is empty"
+#   - inspect 命令只计算 hash 和输出 JSON，不自动信任脚本
+#
+# [gpu_collectors]
+# root = "/opt/lightai/collectors/gpu"
+# mode = "explicit"         # "explicit" 只执行 enabled 列表；"auto" 扫描 root 下所有
+# enabled = ["nvidia"]
+# disabled = []

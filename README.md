@@ -79,7 +79,7 @@ server/src/          # HTTP API、业务域、SQLite 访问、任务调度、日
 agent/src/           # 心跳、指标/GPU 采集、任务执行、受管进程/容器恢复
 web/src/             # Vue 控制台、API client、页面组件
 migrations/          # SQLite 初始迁移；部分幂等 schema 修正在 server/src/db.rs
-deploy/              # 配置和 systemd 示例
+deploy/              # 配置、systemd 示例、collector 脚本（collectors/gpu/nvidia/）
 docs/                # 架构、交接、实现细节和本地验证说明
 ```
 
@@ -88,7 +88,7 @@ docs/                # 架构、交接、实现细节和本地验证说明
 - 未实现 OpenAI-compatible API Gateway、API Key 管理、用量统计、计费、复杂报表和告警。
 - 未实现多节点调度、自动 GPU 调度、Kubernetes、高可用、IAM/SSO。
 - 未实现历史指标自动清理、降采样或聚合后台任务。
-- 未内置国产 GPU 厂商 SDK collector，目前通过 custom collector 适配。
+- 未内置国产 GPU 厂商 SDK collector；已实现脚本化 collector 框架，可通过新增 collector 目录接入（无需改 Rust 代码），详见 [实现细节](docs/IMPLEMENTATION_NOTES.md)。
 - Docker/vLLM 已有代码路径和单元测试覆盖，但未在真实 GPU 环境完成完整验收。
 
 ## 文档

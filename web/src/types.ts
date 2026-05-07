@@ -19,6 +19,8 @@ export interface GpuStatus {
   temperature_celsius?: number | null
   power_watts?: number | null
   collector: string
+  status?: string | null
+  last_error?: string | null
   updated_at: number
 }
 

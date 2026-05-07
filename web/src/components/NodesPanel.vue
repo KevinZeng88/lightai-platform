@@ -3,7 +3,7 @@
     <div>
       <p class="eyebrow">LightAI Platform</p>
       <h1>节点与 GPU 运行状态</h1>
-      <p class="summary">节点、GPU、Agent 配置和趋势分区展示。</p>
+      <p class="summary">选择一个节点后查看其 Agent 配置、趋势和 GPU 详情。</p>
     </div>
     <el-button :loading="loading" type="primary" @click="refreshAll">刷新</el-button>
   </section>
@@ -27,25 +27,25 @@
     </el-card>
   </section>
 
-  <section class="toolbar">
-    <el-segmented v-model="selectedRange" :options="rangeOptions" @change="refreshMetrics" />
-    <el-date-picker
-      v-if="selectedRange === 'custom'"
-      v-model="customRange"
-      type="datetimerange"
-      range-separator="至"
-      start-placeholder="开始时间"
-      end-placeholder="结束时间"
-      value-format="x"
-      @change="refreshMetrics"
-    />
-  </section>
-
   <el-alert v-if="error" :title="error" type="error" show-icon class="alert" />
 
+  <!-- 节点列表 -->
   <el-card shadow="never" class="section-card">
-    <template #header>节点信息</template>
-    <el-table :data="nodes" row-key="id" border highlight-current-row @current-change="selectNode">
+    <template #header>
+      <div class="card-header-row">
+        <span>节点列表</span>
+        <span v-if="!selectedNode" class="muted">点击"查看"选择一个节点以查看监控详情</span>
+        <span v-else class="muted">当前选中：{{ selectedNode.name }}</span>
+      </div>
+    </template>
+    <el-table
+      :data="nodes"
+      row-key="id"
+      border
+      highlight-current-row
+      :current-row-key="selectedNodeId || undefined"
+      @current-change="selectNode"
+    >
       <el-table-column prop="name" label="节点" min-width="150" fixed="left" />
       <el-table-column label="状态" width="100">
         <template #default="{ row }">
@@ -82,14 +82,15 @@
           <el-tag :type="syncType(row.config_sync_status)">{{ syncLabel(row.config_sync_status) }}</el-tag>
         </template>
       </el-table-column>
-      <el-table-column label="选择" width="90" fixed="right">
+      <el-table-column label="操作" width="90" fixed="right">
         <template #default="{ row }">
-          <el-button size="small" @click.stop="selectNode(row)">查看</el-button>
+          <el-button size="small" type="primary" @click.stop="selectNode(row)">查看</el-button>
         </template>
       </el-table-column>
     </el-table>
   </el-card>
 
+  <!-- Agent 生效配置 -->
   <el-card v-if="selectedNode" shadow="never" class="section-card">
     <template #header>Agent 生效配置 · {{ selectedNode.name }}</template>
     <div class="detail-grid">
@@ -147,9 +148,32 @@
       class="history-alert"
     />
   </el-card>
+  <el-card v-else shadow="never" class="section-card">
+    <template #header>Agent 生效配置</template>
+    <el-empty description="请选择节点查看 Agent 生效配置" :image-size="80" />
+  </el-card>
 
+  <!-- 节点趋势 -->
   <el-card v-if="selectedNode" shadow="never" class="section-card">
-    <template #header>节点趋势 · {{ selectedNode.name }}</template>
+    <template #header>
+      <div class="card-header-row">
+        <span>节点趋势 · {{ selectedNode.name }}</span>
+        <div class="trend-toolbar">
+          <el-segmented v-model="selectedRange" :options="rangeOptions" @change="refreshMetrics" size="small" />
+          <el-date-picker
+            v-if="selectedRange === 'custom'"
+            v-model="customRange"
+            type="datetimerange"
+            range-separator="至"
+            start-placeholder="开始时间"
+            end-placeholder="结束时间"
+            value-format="x"
+            size="small"
+            @change="refreshMetrics"
+          />
+        </div>
+      </div>
+    </template>
     <div class="trend-meta">
       <span>范围：{{ selectedRangeLabel }}</span>
       <span>请求：{{ formatRange(nodeMetrics) }}</span>
@@ -165,7 +189,12 @@
     />
     <TrendChart title="CPU / 内存 / 磁盘趋势" :series="nodeSeries" />
   </el-card>
+  <el-card v-else shadow="never" class="section-card">
+    <template #header>节点趋势</template>
+    <el-empty description="请选择节点查看节点趋势" :image-size="80" />
+  </el-card>
 
+  <!-- GPU 列表 -->
   <el-card v-if="selectedNode" shadow="never" class="section-card">
     <template #header>
       <div class="card-header-row">
@@ -173,7 +202,16 @@
         <span v-if="selectedGpu" class="muted">当前趋势：{{ selectedGpu.name }}</span>
       </div>
     </template>
-    <el-table :data="selectedNode.gpus" row-key="gpu_key" size="small" border highlight-current-row @current-change="selectGpu">
+    <el-table
+      v-if="selectedNode.gpus.length > 0"
+      :data="selectedNode.gpus"
+      row-key="gpu_key"
+      size="small"
+      border
+      highlight-current-row
+      :current-row-key="selectedGpuKey || undefined"
+      @current-change="selectGpu"
+    >
       <el-table-column prop="name" label="GPU" min-width="180" fixed="left" />
       <el-table-column prop="vendor" label="厂商" width="110" />
       <el-table-column label="利用率" width="110">
@@ -191,14 +229,37 @@
         <template #default="{ row }">{{ row.power_watts == null ? '-' : `${row.power_watts.toFixed(0)}W` }}</template>
       </el-table-column>
       <el-table-column prop="collector" label="采集器" width="110" />
-      <el-table-column label="选择" width="90" fixed="right">
+      <el-table-column label="状态" width="140">
         <template #default="{ row }">
-          <el-button size="small" @click.stop="selectGpu(row)">趋势</el-button>
+          <template v-if="row.status === 'missing'">
+            <el-tooltip :content="row.last_error ?? '设备曾被发现，但最近一次成功采集中未出现'">
+              <el-tag type="danger" size="small">设备消失</el-tag>
+            </el-tooltip>
+          </template>
+          <template v-else-if="row.last_error">
+            <el-tooltip :content="row.last_error">
+              <el-tag type="warning" size="small">异常</el-tag>
+            </el-tooltip>
+          </template>
+          <template v-else>
+            <el-tag type="success" size="small">正常</el-tag>
+          </template>
+        </template>
+      </el-table-column>
+      <el-table-column label="操作" width="90" fixed="right">
+        <template #default="{ row }">
+          <el-button size="small" type="primary" @click.stop="selectGpu(row)">趋势</el-button>
         </template>
       </el-table-column>
     </el-table>
+    <el-empty v-else description="当前节点无 GPU 数据" :image-size="80" />
+  </el-card>
+  <el-card v-else shadow="never" class="section-card">
+    <template #header>GPU 列表</template>
+    <el-empty description="请选择节点查看 GPU 列表" :image-size="80" />
   </el-card>
 
+  <!-- GPU 趋势 -->
   <el-card v-if="selectedNode && selectedGpu" shadow="never" class="section-card">
     <template #header>GPU 趋势 · {{ selectedGpu.name }}</template>
     <el-alert
@@ -221,6 +282,14 @@
       class="history-alert"
     />
     <TrendChart :title="`${selectedGpu.name} 利用率 / 显存趋势`" :series="gpuSeries" />
+  </el-card>
+  <el-card v-else-if="selectedNode" shadow="never" class="section-card">
+    <template #header>GPU 趋势</template>
+    <el-empty description="请选择一个 GPU 查看趋势" :image-size="80" />
+  </el-card>
+  <el-card v-else shadow="never" class="section-card">
+    <template #header>GPU 趋势</template>
+    <el-empty description="请选择节点后选择一个 GPU 查看趋势" :image-size="80" />
   </el-card>
 </template>
 
@@ -320,13 +389,16 @@ async function refreshAll() {
   error.value = ''
   try {
     nodes.value = await fetchNodes()
-    if (!selectedNodeId.value || !selectedNode.value) {
-      selectedNodeId.value = nodes.value[0]?.id ?? ''
+    // 如果当前已选中节点，重新加载指标；否则不自动选择
+    if (selectedNodeId.value && selectedNode.value) {
+      await refreshMetrics()
+    } else {
+      // 节点列表变更后，之前选中的节点可能已不存在，清除选中
+      selectedNodeId.value = ''
+      selectedGpuKey.value = ''
+      nodeMetrics.value = undefined
+      gpuMetrics.value = undefined
     }
-    if (!selectedGpuKey.value || !selectedGpu.value) {
-      selectedGpuKey.value = selectedNode.value?.gpus[0]?.gpu_key ?? ''
-    }
-    await refreshMetrics()
   } catch (err) {
     error.value = err instanceof Error ? err.message : '加载失败'
   } finally {
@@ -348,7 +420,9 @@ async function refreshMetrics() {
 async function selectNode(row?: NodeStatus) {
   if (!row) return
   selectedNodeId.value = row.id
-  selectedGpuKey.value = row.gpus[0]?.gpu_key ?? ''
+  // 切换节点时重置 GPU 选择
+  selectedGpuKey.value = ''
+  gpuMetrics.value = undefined
   await refreshMetrics()
 }
 

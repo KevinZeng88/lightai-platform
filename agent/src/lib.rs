@@ -1,4 +1,5 @@
 pub mod client;
+pub mod collector;
 pub mod config;
 pub mod gpu;
 pub mod heartbeat;

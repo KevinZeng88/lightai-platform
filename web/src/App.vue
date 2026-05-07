@@ -23,6 +23,9 @@
         <el-tab-pane label="日志审计" name="logs">
           <LogsAuditPanel ref="logsPanel" />
         </el-tab-pane>
+        <el-tab-pane label="采集器登记" name="collectors">
+          <CollectorRegistryPanel ref="collectorsPanel" />
+        </el-tab-pane>
       </el-tabs>
     </main>
   </el-config-provider>
@@ -38,6 +41,7 @@ import NodesPanel from './components/NodesPanel.vue'
 import RuntimeEnvironmentsPanel from './components/RuntimeEnvironmentsPanel.vue'
 import TrashPanel from './components/TrashPanel.vue'
 import LogsAuditPanel from './components/LogsAuditPanel.vue'
+import CollectorRegistryPanel from './components/CollectorRegistryPanel.vue'
 
 const activeTab = ref('nodes')
 const nodesPanel = ref<InstanceType<typeof NodesPanel> | null>(null)
@@ -47,6 +51,7 @@ const modelsPanel = ref<InstanceType<typeof ModelsPanel> | null>(null)
 const instancesPanel = ref<InstanceType<typeof InstancesPanel> | null>(null)
 const trashPanel = ref<InstanceType<typeof TrashPanel> | null>(null)
 const logsPanel = ref<InstanceType<typeof LogsAuditPanel> | null>(null)
+const collectorsPanel = ref<InstanceType<typeof CollectorRegistryPanel> | null>(null)
 
 function refreshActiveTab(name: string | number) {
   const refreshers: Record<string, (() => void | Promise<void>) | undefined> = {
@@ -56,7 +61,8 @@ function refreshActiveTab(name: string | number) {
     models: modelsPanel.value?.refresh,
     instances: instancesPanel.value?.refresh,
     trash: trashPanel.value?.refresh,
-    logs: logsPanel.value?.refresh
+    logs: logsPanel.value?.refresh,
+    collectors: collectorsPanel.value?.refresh
   }
   void refreshers[String(name)]?.()
 }

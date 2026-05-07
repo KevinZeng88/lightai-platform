@@ -8,9 +8,10 @@ use sqlx::SqlitePool;
 use crate::domain;
 use crate::models::{
     AgentConfigPolicy, AgentTaskPollRequest, AgentTaskResultRequest, AuditQuery,
-    FrontendErrorReport, GpuMetricsQuery, HeartbeatRequest, HeartbeatResponse, LogQuery,
-    MetricsQuery, ModelFileRequest, ModelFileTrashRequest, ModelInstanceCreateRequest,
-    ModelInstanceUpdateRequest, ModelRequest, RegisterRequest, RuntimeEnvironmentRequest,
+    CollectorRegistryEntry, FrontendErrorReport, GpuMetricsQuery, HeartbeatRequest,
+    HeartbeatResponse, LogQuery, MetricsQuery, ModelFileRequest, ModelFileTrashRequest,
+    ModelInstanceCreateRequest, ModelInstanceUpdateRequest, ModelRequest, RegisterCollectorRequest,
+    RegisterRequest, RuntimeEnvironmentRequest,
 };
 use crate::platform_log::LogPolicy;
 use crate::repository;
@@ -59,6 +60,14 @@ pub fn app(pool: SqlitePool) -> Router {
         .route(
             "/api/runtime-environments/{id}/check",
             post(check_runtime_environment),
+        )
+        .route(
+            "/api/collector-registry",
+            get(list_collector_registry_entries).post(register_collector_entry),
+        )
+        .route(
+            "/api/collector-registry/{id}/{version}",
+            get(get_collector_entry).put(update_collector_entry),
         )
         .route("/api/models", get(list_models).post(create_model))
         .route(
@@ -167,9 +176,13 @@ async fn agent_heartbeat(
 
     let node_id = request.node_id.clone();
     repository::record_heartbeat(&pool, request).await?;
+    let collector_registry = repository::list_collector_registry(&pool)
+        .await
+        .unwrap_or_default();
     Ok(Json(HeartbeatResponse {
         status: "ok",
         agent_config: repository::effective_agent_config(&pool, &node_id).await?,
+        collector_registry,
     }))
 }
 
@@ -971,6 +984,44 @@ impl IntoResponse for ApiError {
             }
         }
     }
+}
+
+// ── Collector registry ──
+
+async fn list_collector_registry_entries(
+    State(pool): State<SqlitePool>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let entries = repository::list_collector_registry(&pool).await?;
+    Ok(Json(serde_json::json!({ "collectors": entries })))
+}
+
+async fn register_collector_entry(
+    State(pool): State<SqlitePool>,
+    Json(request): Json<RegisterCollectorRequest>,
+) -> Result<Json<CollectorRegistryEntry>, ApiError> {
+    let entry = repository::register_collector(&pool, &request).await?;
+    Ok(Json(entry))
+}
+
+async fn get_collector_entry(
+    State(pool): State<SqlitePool>,
+    Path((id, version)): Path<(String, String)>,
+) -> Result<Json<CollectorRegistryEntry>, ApiError> {
+    let entries = repository::list_collector_registry(&pool).await?;
+    let entry = entries
+        .into_iter()
+        .find(|e| e.id == id && e.version == version)
+        .ok_or_else(|| ApiError::NotFound("collector registry entry not found".to_string()))?;
+    Ok(Json(entry))
+}
+
+async fn update_collector_entry(
+    State(pool): State<SqlitePool>,
+    Path((_id, _version)): Path<(String, String)>,
+    Json(request): Json<RegisterCollectorRequest>,
+) -> Result<Json<CollectorRegistryEntry>, ApiError> {
+    let entry = repository::register_collector(&pool, &request).await?;
+    Ok(Json(entry))
 }
 
 #[derive(Debug, Serialize)]

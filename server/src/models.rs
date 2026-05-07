@@ -172,6 +172,41 @@ pub struct GpuMetrics {
 pub struct HeartbeatResponse {
     pub status: &'static str,
     pub agent_config: AgentConfig,
+    #[serde(default)]
+    pub collector_registry: Vec<CollectorRegistryEntry>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CollectorRegistryEntry {
+    pub id: String,
+    pub vendor: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    pub discover_sha256: String,
+    pub metrics_sha256: String,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RegisterCollectorRequest {
+    pub id: String,
+    pub vendor: String,
+    pub name: String,
+    pub version: String,
+    #[serde(default)]
+    pub description: String,
+    pub discover_sha256: String,
+    pub metrics_sha256: String,
+    #[serde(default = "default_enabled")]
+    pub enabled: bool,
+}
+
+fn default_enabled() -> bool {
+    true
 }
 
 #[derive(Debug, Serialize)]
@@ -212,6 +247,8 @@ pub struct GpuView {
     pub temperature_celsius: Option<f64>,
     pub power_watts: Option<f64>,
     pub collector: String,
+    pub status: Option<String>,
+    pub last_error: Option<String>,
     pub updated_at: i64,
 }
 

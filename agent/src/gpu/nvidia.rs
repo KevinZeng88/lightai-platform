@@ -1,10 +1,36 @@
+use std::pin::Pin;
+
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
+use super::GpuCollector;
 use crate::models::GpuMetrics;
 
 const QUERY_FIELDS: &str = "index,name,uuid,driver_version,memory.total,memory.used,utilization.gpu,temperature.gpu,power.draw";
 
+/// NVIDIA GPU collector using `nvidia-smi`.
+///
+/// Runs `nvidia-smi --query-gpu=... --format=csv,noheader,nounits` and parses the
+/// CSV output. Prefers UUID for `gpu_key` (`nvidia:<uuid>`), falls back to index
+/// (`nvidia:<index>`) when UUID is unavailable.
+pub struct NvidiaCollector;
+
+impl GpuCollector for NvidiaCollector {
+    fn name(&self) -> &'static str {
+        "nvidia"
+    }
+
+    fn collect(
+        &self,
+        timeout_secs: u64,
+        max_output_bytes: usize,
+    ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<GpuMetrics>>> + Send + '_>>
+    {
+        Box::pin(collect(timeout_secs, max_output_bytes))
+    }
+}
+
+/// Standalone collection function maintained for direct callers and tests.
 pub async fn collect(
     timeout_secs: u64,
     max_output_bytes: usize,
@@ -32,6 +58,7 @@ pub async fn collect(
     parse_nvidia_smi_csv(&stdout)
 }
 
+/// Parse `nvidia-smi` CSV output into [`GpuMetrics`] list.
 pub fn parse_nvidia_smi_csv(output: &str) -> anyhow::Result<Vec<GpuMetrics>> {
     let mut gpus = Vec::new();
     for line in output.lines().filter(|line| !line.trim().is_empty()) {

@@ -240,9 +240,139 @@ managed store 路径由 Agent state path 派生，形如 `agent-state.toml.manag
 - Runtime 的 `params_json` 在 Server 内部存入 `runtime_environments.config_json`，返回时映射为 `params_json`；这是当前兼容实现。
 - Web Runtime 下拉只筛选 `check_status === "available"`，Server 对 `version_unavailable` 也认为可用。
 
+## GPU Collector 架构（脚本化）
+
+### 概述
+
+Agent 支持两套 GPU/加速卡采集路径：
+
+| 路径 | 触发条件 | 说明 |
+|------|----------|------|
+| **Legacy** | `collector_root` 未配置 | 内置 `nvidia-smi` + custom script，无需 registry |
+| **Collector 框架** | `collector_root` 已配置 | 脚本化 collector 目录，需要 Server registry 登记 |
+
+### Agent 配置
+
+Agent 本地 TOML 配置文件支持 `[gpu_collectors]` 节：
+
+```toml
+[gpu_collectors]
+root = “/opt/lightai/collectors/gpu”
+mode = “explicit”         # “explicit” | “auto”
+enabled = [“nvidia”]
+disabled = []
+```
+
+配置加载优先级：
+1. `--config <PATH>` 命令行参数
+2. `LIGHTAI_AGENT_CONFIG` 环境变量
+3. 程序目录 `agent.toml`
+4. 程序目录 `lightai-agent.toml`
+5. 内嵌默认值
+
+生成配置模板：
+```bash
+lightai-agent config init ./agent.toml
+```
+
+### 启用流程
+
+1. 将 collector 目录放到 Agent 本地，例如 `/opt/lightai/collectors/gpu/nvidia`
+2. 运行 `lightai-agent collector inspect /opt/lightai/collectors/gpu/nvidia`
+3. 将输出的 JSON 粘贴到 Web「采集器登记」页面
+4. 在 Agent 配置中设置 `[gpu_collectors]` root + enabled
+5. 启动 Agent
+
+### collector 目录结构
+
+```
+/opt/lightai/collectors/gpu/
+  nvidia/                  # 示例：deploy/collectors/gpu/nvidia/
+    collector.toml
+    discover.sh
+    metrics.sh
+```
+
+每套 collector 一个独立目录，固定包含三个文件：
+- `collector.toml` — id, vendor, name, version, discover, metrics
+- `discover.sh` — 设备发现（输出 STATUS + DEVICE TSV 行）
+- `metrics.sh` — 指标采集（输出 STATUS + METRIC TSV 行）
+
+### 安全机制（fail-closed）
+
+Collector 脚本执行前必须通过所有校验：
+
+1. 本地 collector 目录存在且包含三个必需文件
+2. Agent 配置启用（enabled 列表 / disabled 不排除）
+3. Server registry 中存在匹配的 `(id, version)` 且 `enabled=true`
+4. `discover_sha256` 与 registry 一致
+5. `metrics_sha256` 与 registry 一致
+
+任一条件不满足 → 脚本不执行，错误原因写入 `collector_errors`：
+- `collector not registered`
+- `collector disabled in Server registry`
+- `discover.sh hash mismatch`
+- `metrics.sh hash mismatch`
+- `collector registry is empty`
+
+registry 为空时所有 collector 不执行。
+
+### inspect 命令
+
+```bash
+lightai-agent collector inspect /opt/lightai/collectors/gpu/nvidia
+```
+
+- 读取 `collector.toml`
+- 计算 `discover.sh` / `metrics.sh` 的 SHA-256（进程内，不依赖系统 sha256sum）
+- 输出 JSON 供 Web 登记
+- **不登记、不批准、不执行脚本**
+
+### Server registry
+
+Agent 通过 heartbeat 从 Server 拉取 `collector_registry` 列表（`id + version` 唯一键）。
+Web「采集器登记」页面支持粘贴 inspect JSON 并启用/禁用。
+
+### 当前 NVIDIA 实现
+
+**示例目录**：`deploy/collectors/gpu/nvidia/`
+
+- `collector.toml`：id=”nvidia”, vendor=”nvidia”, version=”1.0.0”
+- `discover.sh`：通过 `nvidia-smi --query-gpu=index,name,uuid,pci.bus_id,driver_version` 输出 DEVICE TSV 行
+- `metrics.sh`：通过 `nvidia-smi --query-gpu=uuid,memory.total,...` 输出 METRIC TSV 行
+
+**Legacy 路径**（`collector_root` 未配置时）：
+- 保留内置 `nvidia-smi` CSV 解析（`agent/src/gpu/nvidia.rs`）
+- 保留 custom script JSON 解析（`agent/src/gpu/custom.rs`）
+- 不做 registry 校验
+
+### 后续支持国产卡
+
+**不写 Rust Collector。** 新增厂商只需新增 collector 目录：
+
+1. 创建 `deploy/collectors/gpu/<vendor>/` 目录
+2. 编写 `collector.toml` + `discover.sh` + `metrics.sh`（TSV 输出）
+3. `lightai-agent collector inspect` → Web 登记 → 配置 enabled
+4. **不需要修改 Rust 代码，不需要重新编译 Agent**
+
+| 厂商 | 预期命令 | 状态 |
+|------|----------|------|
+| NVIDIA | `nvidia-smi` | 已实现（脚本+legacy） |
+| 沐曦 | `mx-smi` | 未实现，需真实硬件 |
+| 昇腾 | `npu-smi` | 未实现，需真实硬件 |
+| 海光 | `hy-smi` | 未实现，需真实硬件 |
+
+所有未验证的 collector 不得默认启用，不得在文档中宣称已支持。未接入真实硬件前，可通过 custom script 适配。
+
+### GPU key 约定
+
+- 优先使用设备稳定唯一标识（NVIDIA: UUID）
+- 格式：`<vendor>:<stable_id>`
+- 不长期依赖 index（重启可能漂移）
+
 ## systemd 注意事项
 
-Agent systemd 示例应使用 `KillMode=process`。如果使用默认 `control-group`，停止 Agent service 可能向整个 cgroup 发送信号，破坏“Agent 退出不终止模型实例”的约束。
+Agent systemd 示例应使用 `KillMode=process`。如果使用默认 `control-group`，停止 Agent service 可能向整个 cgroup 发送信号，破坏”Agent 退出不终止模型实例”的约束。
 
 ## 后续开发注意
 
@@ -251,3 +381,5 @@ Agent systemd 示例应使用 `KillMode=process`。如果使用默认 `control-g
 - 不要让 Server 直接删除节点文件。
 - 不要在 Agent 离线时把运行中实例自动改为 failed。
 - 修改 schema 前先处理 migration ledger 缺失问题，至少保持启动时幂等。
+- 新增 GPU collector 时，创建 collector 目录 + 脚本（collector.toml + discover.sh + metrics.sh），通过 Web 登记 registry。**不要写 Rust Collector**。
+- 未经验证的厂商 collector 不默认启用，不在文档中宣称已支持。

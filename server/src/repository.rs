@@ -6,9 +6,10 @@ use uuid::Uuid;
 use crate::auth;
 use crate::models::{
     AgentConfig, AgentConfigPoliciesResponse, AgentConfigPolicy, AgentConfigPolicyView,
-    AuditEventView, AuditListResponse, AuditQuery, GpuMetricSample, GpuMetricSamplesResponse,
-    GpuMetrics, GpuView, HeartbeatRequest, NodeListResponse, NodeMetricSample,
-    NodeMetricSamplesResponse, NodeMetrics, NodeView, RegisterRequest, RegisterResponse,
+    AuditEventView, AuditListResponse, AuditQuery, CollectorRegistryEntry, GpuMetricSample,
+    GpuMetricSamplesResponse, GpuMetrics, GpuView, HeartbeatRequest, NodeListResponse,
+    NodeMetricSample, NodeMetricSamplesResponse, NodeMetrics, NodeView, RegisterCollectorRequest,
+    RegisterRequest, RegisterResponse,
 };
 use crate::platform_log;
 use crate::platform_log::LogPolicy;
@@ -485,6 +486,15 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
         upsert_gpu_status(&mut tx, &request.node_id, request.sampled_at, &gpu).await?;
         insert_gpu_sample(&mut tx, &request.node_id, request.sampled_at, &gpu).await?;
     }
+
+    // ── Device disappearance detection ──
+    // Only run when collectors succeeded (no errors). If any collector failed,
+    // we conservatively skip disappearance marking — a failed collector means
+    // we can't distinguish "device gone" from "collector broken".
+    if request.collector_errors.is_empty() {
+        mark_missing_gpus(&mut tx, &request.node_id, request.sampled_at).await?;
+    }
+
     reconcile_managed_instances(&mut tx, &request.node_id, &managed_instances, now).await?;
 
     tx.commit().await?;
@@ -632,6 +642,8 @@ async fn upsert_gpu_status(
             power_watts = excluded.power_watts,
             collector = excluded.collector,
             raw_json = excluded.raw_json,
+            status = NULL,
+            last_error = NULL,
             updated_at = excluded.updated_at
         "#,
     )
@@ -649,6 +661,32 @@ async fn upsert_gpu_status(
     .bind(gpu.power_watts)
     .bind(&gpu.collector)
     .bind(&gpu.raw_json)
+    .bind(sampled_at)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+/// Mark GPUs for a node that were not present in the current heartbeat as missing.
+///
+/// Only call when `collector_errors` is empty — a failed collector should not
+/// cause its devices to be marked disappeared.
+async fn mark_missing_gpus(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    node_id: &str,
+    sampled_at: i64,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        UPDATE gpu_status
+        SET status = 'missing',
+            last_error = 'device not found in latest discovery',
+            updated_at = ?
+        WHERE node_id = ? AND updated_at < ?
+        "#,
+    )
+    .bind(sampled_at)
+    .bind(node_id)
     .bind(sampled_at)
     .execute(&mut **tx)
     .await?;
@@ -812,7 +850,7 @@ async fn list_gpus(pool: &SqlitePool, node_id: &str) -> anyhow::Result<Vec<GpuVi
         r#"
         SELECT gpu_key, gpu_index, vendor, name, uuid, driver_version,
                memory_total_bytes, memory_used_bytes, utilization_percent,
-               temperature_celsius, power_watts, collector, updated_at
+               temperature_celsius, power_watts, collector, status, last_error, updated_at
         FROM gpu_status
         WHERE node_id = ?
         ORDER BY gpu_index, gpu_key
@@ -837,6 +875,8 @@ async fn list_gpus(pool: &SqlitePool, node_id: &str) -> anyhow::Result<Vec<GpuVi
             temperature_celsius: row.get("temperature_celsius"),
             power_watts: row.get("power_watts"),
             collector: row.get("collector"),
+            status: row.get("status"),
+            last_error: row.get("last_error"),
             updated_at: row.get("updated_at"),
         })
         .collect())
@@ -1278,4 +1318,114 @@ pub fn default_agent_config(updated_at: i64) -> AgentConfig {
         last_config_updated_at: Some(updated_at),
         ..AgentConfig::default()
     }
+}
+
+// ── Collector registry ──
+
+pub async fn list_collector_registry(
+    pool: &SqlitePool,
+) -> anyhow::Result<Vec<CollectorRegistryEntry>> {
+    let rows = sqlx::query(
+        "SELECT id, vendor, name, version, description, discover_sha256, metrics_sha256, enabled, created_at, updated_at FROM collector_registry ORDER BY id",
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .iter()
+        .map(|row| CollectorRegistryEntry {
+            id: row.get("id"),
+            vendor: row.get("vendor"),
+            name: row.get("name"),
+            version: row.get("version"),
+            description: row.get("description"),
+            discover_sha256: row.get("discover_sha256"),
+            metrics_sha256: row.get("metrics_sha256"),
+            enabled: row.get::<i64, _>("enabled") != 0,
+            created_at: row.get("created_at"),
+            updated_at: row.get("updated_at"),
+        })
+        .collect())
+}
+
+pub async fn register_collector(
+    pool: &SqlitePool,
+    req: &RegisterCollectorRequest,
+) -> anyhow::Result<CollectorRegistryEntry> {
+    let now = now_unix_secs();
+    sqlx::query(
+        r#"
+        INSERT INTO collector_registry (id, version, vendor, name, description, discover_sha256, metrics_sha256, enabled, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id, version) DO UPDATE SET
+            vendor = excluded.vendor,
+            name = excluded.name,
+            description = excluded.description,
+            discover_sha256 = excluded.discover_sha256,
+            metrics_sha256 = excluded.metrics_sha256,
+            enabled = excluded.enabled,
+            updated_at = excluded.updated_at
+        "#,
+    )
+    .bind(&req.id)
+    .bind(&req.version)
+    .bind(&req.vendor)
+    .bind(&req.name)
+    .bind(&req.description)
+    .bind(&req.discover_sha256)
+    .bind(&req.metrics_sha256)
+    .bind(req.enabled as i64)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    Ok(CollectorRegistryEntry {
+        id: req.id.clone(),
+        vendor: req.vendor.clone(),
+        name: req.name.clone(),
+        version: req.version.clone(),
+        description: req.description.clone(),
+        discover_sha256: req.discover_sha256.clone(),
+        metrics_sha256: req.metrics_sha256.clone(),
+        enabled: req.enabled,
+        created_at: now,
+        updated_at: now,
+    })
+}
+
+pub async fn update_collector_enabled(
+    pool: &SqlitePool,
+    id: &str,
+    version: &str,
+    enabled: bool,
+) -> anyhow::Result<Option<CollectorRegistryEntry>> {
+    let now = now_unix_secs();
+    let result = sqlx::query(
+        "UPDATE collector_registry SET enabled = ?, updated_at = ? WHERE id = ? AND version = ?",
+    )
+    .bind(enabled as i64)
+    .bind(now)
+    .bind(id)
+    .bind(version)
+    .execute(pool)
+    .await?;
+    if result.rows_affected() == 0 {
+        return Ok(None);
+    }
+    let row = sqlx::query("SELECT * FROM collector_registry WHERE id = ? AND version = ?")
+        .bind(id)
+        .bind(version)
+        .fetch_one(pool)
+        .await?;
+    Ok(Some(CollectorRegistryEntry {
+        id: row.get("id"),
+        vendor: row.get("vendor"),
+        name: row.get("name"),
+        version: row.get("version"),
+        description: row.get("description"),
+        discover_sha256: row.get("discover_sha256"),
+        metrics_sha256: row.get("metrics_sha256"),
+        enabled: row.get::<i64, _>("enabled") != 0,
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }))
 }

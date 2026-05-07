@@ -388,3 +388,32 @@ export async function fetchServerLogPolicy(): Promise<LogPolicy> {
 export async function updateServerLogPolicy(payload: LogPolicy): Promise<LogPolicy> {
   return sendJson('/api/config/server-logs', 'PUT', payload)
 }
+
+// ── Collector registry ──
+
+export interface CollectorRegistryEntry {
+  id: string
+  vendor: string
+  name: string
+  version: string
+  description: string
+  discover_sha256: string
+  metrics_sha256: string
+  enabled: boolean
+  created_at: number
+  updated_at: number
+}
+
+export async function fetchCollectorRegistry(): Promise<CollectorRegistryEntry[]> {
+  const payload = await sendJson<{ collectors: CollectorRegistryEntry[] }>(
+    '/api/collector-registry',
+    'GET'
+  )
+  return payload.collectors
+}
+
+export async function registerCollector(
+  payload: Omit<CollectorRegistryEntry, 'created_at' | 'updated_at'>
+): Promise<CollectorRegistryEntry> {
+  return sendJson('/api/collector-registry', 'POST', payload)
+}

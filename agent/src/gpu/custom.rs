@@ -1,7 +1,10 @@
+use std::pin::Pin;
+
 use serde::Deserialize;
 use tokio::process::Command;
 use tokio::time::{timeout, Duration};
 
+use super::GpuCollector;
 use crate::models::GpuMetrics;
 
 #[derive(Debug, Deserialize)]
@@ -23,6 +26,42 @@ struct CustomGpu {
     power_watts: Option<f64>,
 }
 
+/// User-supplied script collector.
+///
+/// Runs a user-provided script that must output JSON on stdout with the structure
+/// `{ "gpus": [...] }`. Each GPU object can supply: `index`, `vendor`, `name`,
+/// `uuid`, `memory_total_bytes`, `memory_used_bytes`, `utilization_percent`,
+/// `temperature_celsius`, `power_watts`.
+///
+/// Primary use cases:
+/// - Domestic / non-NVIDIA GPU adapters that don't yet have a built-in collector.
+/// - Custom monitoring setups.
+pub struct CustomCollector {
+    script: String,
+}
+
+impl CustomCollector {
+    pub fn new(script: String) -> Self {
+        Self { script }
+    }
+}
+
+impl GpuCollector for CustomCollector {
+    fn name(&self) -> &'static str {
+        "custom"
+    }
+
+    fn collect(
+        &self,
+        timeout_secs: u64,
+        max_output_bytes: usize,
+    ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<GpuMetrics>>> + Send + '_>>
+    {
+        Box::pin(collect(&self.script, timeout_secs, max_output_bytes))
+    }
+}
+
+/// Standalone collection function maintained for direct callers and tests.
 pub async fn collect(
     script_path: &str,
     timeout_secs: u64,

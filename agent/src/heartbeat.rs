@@ -22,9 +22,12 @@ pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
     loop {
         let snapshot = runtime_config.read().await.clone();
         let sleep_secs = match run_once(&config, &snapshot, &mut metrics_collector).await {
-            Ok(next_config) => {
+            Ok((next_config, new_registry)) => {
                 let mut runtime = runtime_config.write().await;
                 runtime.apply_server_config(next_config);
+                if let Some(reg) = new_registry {
+                    runtime.collector_registry = reg;
+                }
                 runtime.heartbeat_interval_secs
             }
             Err(error) => {
@@ -40,7 +43,10 @@ async fn run_once(
     config: &Config,
     runtime_config: &RuntimeConfig,
     metrics_collector: &mut MetricsCollector,
-) -> anyhow::Result<Option<AgentConfig>> {
+) -> anyhow::Result<(
+    Option<AgentConfig>,
+    Option<Vec<crate::collector::registry::RegistryEntry>>,
+)> {
     let client = ServerClient::new(config.server_url.clone());
     let mut next_config = None;
     // 重启恢复边界：仅恢复 managed store 中持久化的受管进程记录。
@@ -117,8 +123,12 @@ async fn run_once(
         managed_instances,
     };
 
+    let mut new_registry: Option<Vec<crate::collector::registry::RegistryEntry>> = None;
     match client.heartbeat(&agent_state.agent_token, &request).await {
         Ok(response) => {
+            if !response.collector_registry.is_empty() {
+                new_registry = Some(response.collector_registry);
+            }
             if let Some(ref agent_config) = response.agent_config {
                 if agent_config.config_version
                     > runtime_config
@@ -137,7 +147,7 @@ async fn run_once(
                     .await;
                 }
             }
-            Ok(response.agent_config.or(next_config))
+            Ok((response.agent_config.or(next_config), new_registry))
         }
         Err(error) if is_unauthorized(&error) => {
             let _ = platform_log::append(
@@ -155,7 +165,12 @@ async fn run_once(
                 ..request
             };
             let response = client.heartbeat(&agent_state.agent_token, &request).await?;
-            Ok(response.agent_config.or(next_config))
+            let registry = if response.collector_registry.is_empty() {
+                None
+            } else {
+                Some(response.collector_registry)
+            };
+            Ok((response.agent_config.or(next_config), registry))
         }
         Err(error) => {
             let _ = platform_log::append(
@@ -227,6 +242,11 @@ pub struct RuntimeConfig {
     pub custom_collector_script: Option<String>,
     pub collector_timeout_secs: u64,
     pub collector_max_output_bytes: usize,
+    pub collector_root: Option<String>,
+    pub collector_mode: String,
+    pub collector_enabled: Vec<String>,
+    pub collector_disabled: Vec<String>,
+    pub collector_registry: Vec<crate::collector::registry::RegistryEntry>,
     pub log_policy: LogPolicy,
     pub last_config_updated_at: Option<i64>,
 }
@@ -244,13 +264,23 @@ impl RuntimeConfig {
             custom_collector_script: None,
             collector_timeout_secs: 5,
             collector_max_output_bytes: 1024 * 1024,
+            collector_root: None,
+            collector_mode: "explicit".to_string(),
+            collector_enabled: Vec::new(),
+            collector_disabled: Vec::new(),
+            collector_registry: Vec::new(),
             log_policy: LogPolicy::default(),
             last_config_updated_at: None,
         }
     }
 
-    pub fn from_config(_config: &Config) -> Self {
-        Self::default_effective()
+    pub fn from_config(config: &Config) -> Self {
+        let mut cfg = Self::default_effective();
+        cfg.collector_root = config.collector_root.clone();
+        cfg.collector_mode = config.collector_mode.clone();
+        cfg.collector_enabled = config.collector_enabled.clone();
+        cfg.collector_disabled = config.collector_disabled.clone();
+        cfg
     }
 
     pub fn apply_server_config(&mut self, config: Option<AgentConfig>) {
@@ -294,6 +324,11 @@ impl RuntimeConfig {
 
     pub fn to_collector_config(&self) -> gpu::CollectorConfig {
         gpu::CollectorConfig {
+            collector_root: self.collector_root.as_ref().map(std::path::PathBuf::from),
+            collector_mode: self.collector_mode.clone(),
+            collector_enabled: self.collector_enabled.clone(),
+            collector_disabled: self.collector_disabled.clone(),
+            collector_registry: self.collector_registry.clone(),
             nvidia_collector_enabled: self.nvidia_collector_enabled,
             custom_collector_script: self.custom_collector_script.clone(),
             collector_timeout_secs: self.collector_timeout_secs,

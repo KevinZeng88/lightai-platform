@@ -2,8 +2,52 @@ use std::net::SocketAddr;
 
 use lightai_server::{config::Config, db, platform_log, routes};
 
+const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+const SERVER_HELP: &str = r#"lightai-server — LightAI GPU 模型管理平台 Server
+
+USAGE:
+    lightai-server [OPTIONS]
+
+OPTIONS:
+    --help       Show this help message
+    --version    Show version information
+    --config <PATH>  Path to server config TOML file (env: LIGHTAI_SERVER_CONFIG)
+
+DESCRIPTION:
+    LightAI Server 是平台的中央控制面，负责：
+    - Agent 注册、心跳鉴权、配置下发
+    - 节点/GPU 状态管理和历史指标存储
+    - Runtime / Model / Model File / Instance / Trash 管理
+    - 平台日志和审计
+
+CONFIGURATION:
+    Environment variable: LIGHTAI_SERVER_CONFIG=<path>
+    Default: embedded defaults (listen 127.0.0.1:8080, SQLite data/server.db)
+"#;
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // ── CLI argument handling ──
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 2 {
+        match args[1].as_str() {
+            "--help" | "-h" => {
+                println!("{SERVER_HELP}");
+                return Ok(());
+            }
+            "--version" | "-V" => {
+                println!("lightai-server {SERVER_VERSION}");
+                return Ok(());
+            }
+            other => {
+                eprintln!("unknown option: {other}");
+                eprintln!("try: lightai-server --help");
+                std::process::exit(1);
+            }
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
