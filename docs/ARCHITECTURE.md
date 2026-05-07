@@ -1,235 +1,138 @@
 # Architecture
 
-## 整体架构
+## 总览
 
-```
-Agent (GPU node) ──主动连接──> Server <── Web (console)
-```
-
-- Agent 主动向 Server 注册、心跳、拉取任务。Server 不主动直连 Agent。
-- Web 只调用 Server HTTP API。
-- 所有本地动作（模型验证、进程启停、文件清理）由 Agent 执行，通过平台定义的任务类型下发。
-
-## 代码结构
-
-```
-lightai-platform/
-  server/src/
-    main.rs            # 启动入口
-    lib.rs             # 模块声明
-    routes.rs          # HTTP API 路由（~990 行）
-    domain.rs          # 轻量 facade（43 行），re-export 业务模块
-    domain/
-      runtimes.rs        # 运行环境 CRUD + 检查（402 行）
-      instances.rs       # 实例 CRUD + start/stop/test/check（682 行）
-      model_catalog.rs   # 模型 CRUD（246 行）
-      model_files.rs     # 模型文件 CRUD + 验证（426 行）
-      model_trash.rs     # 模型文件垃圾箱 + 清理（264 行）
-      instance_logs.rs   # 日志读取 + 错误摘要（253 行）
-      support.rs         # 共享类型（Stage3Error）、验证函数、常量（238 行）
-    agent_tasks.rs     # Agent 任务生命周期（494 行）
-    repository.rs      # 数据库访问、节点注册、心跳、reconcile（~1260 行）
-    models.rs          # 请求/响应/视图类型
-    db.rs              # SQLite 迁移、schema 修正
-    auth.rs            # token 生成与验证
-    config.rs          # Server 配置加载
-    http_check.rs      # HTTP 可达性检查
-    platform_log.rs    # 日志写入/读取/脱敏/轮转
-    util.rs            # now_unix_secs() 等共享函数
-
-  agent/src/
-    main.rs            # 启动入口
-    tasks/
-      mod.rs              # facade：re-export + run/run_once 调度 + 共享类型与 helper（535 行）
-      process.rs          # 实例启停（start/stop）、受管进程监控、日志缓冲
-      probe.rs            # 就绪探测配置、测试 URL 构建、失败摘要
-      verify_model.rs     # 模型文件验证
-      cleanup.rs          # 受控模型文件清理
-      logs.rs             # 实例日志读取
-      docker_backend.rs  # Docker 容器后端（run/stop/inspect/logs/check）
-    heartbeat.rs       # 心跳、指标采集、配置同步
-    managed_process.rs # 受管进程持久化记录与恢复
-    platform_log.rs    # 日志写入/读取/脱敏/轮转
-    client.rs          # Server HTTP 客户端
-    models.rs          # Agent 侧请求/响应类型
-    state.rs           # Agent 状态文件读写
-    config.rs          # Agent 配置加载
-    gpu.rs             # GPU 采集（nvidia-smi + custom collector）
-    metrics.rs         # CPU/内存/磁盘指标采集
-
-  web/src/
-    utils/
-      instance.ts         # 共享状态/标签/格式化 helper（61 行）
-    main.ts            # Vue 应用入口，全局错误捕获
-    api.ts             # Server API 客户端
-    components/
-      InstancesPanel.vue   # 实例管理（616 行，已提取 utils/instance.ts）
-      LogsAuditPanel.vue   # 日志与审计
-      NodesPanel.vue       # 节点监控
-      ModelsPanel.vue      # 模型管理
-      ...
+```text
+Agent (GPU node) ──register / heartbeat / poll tasks──> Server <── Web
 ```
 
-## 关键模块职责
+LightAI Platform 当前是单控制面、单节点单副本实例管理模型：
 
-### server/src/agent_tasks.rs
+- **Server** 是唯一 HTTP API 入口和状态持久化位置。
+- **Agent** 是节点本地事实采集和本地动作执行者。
+- **Web** 是 Server API 的前端控制台，不直接访问 Agent 或节点本地服务。
+- **SQLite** 保存节点、指标采样、运行环境、模型、模型文件、实例、Agent 任务、配置策略、日志策略和审计记录。
 
-Agent 任务生命周期的**唯一实现**。包含：
-- `poll_agent_task` — Agent 长轮询获取任务
-- `record_agent_task_result` — 记录任务结果并更新关联状态
-- `mark_timed_out_tasks` / `mark_task_timed_out` — 超时标记
-- `notify_agent_tasks` — 唤醒等待中的 Agent 长连接
+## 通信边界
 
-### server/src/domain.rs + server/src/domain/
+- Agent 主动注册、心跳、轮询任务和上报任务结果；Server 不主动直连 Agent。
+- 所有节点本地动作都通过 `agent_tasks` 表和任务轮询执行，包括模型文件验证、Runtime 检查、实例启停/测试/日志读取、文件清理。
+- Web 只调用 Server API；节点离线时 Web 展示状态不可确认，而不是绕过 Server 直连节点。
 
-`domain.rs` 已变为 43 行轻量 facade，仅含 `mod` 声明和 `pub use` re-export。业务逻辑已拆入 7 个子模块：
+## 安全边界
 
-| 模块 | 职责 | 行数 |
-|------|------|------|
-| `runtimes.rs` | 运行环境 CRUD、Agent 检查 | 402 |
-| `instances.rs` | 实例 CRUD、start/stop/test/check、任务创建 | 682 |
-| `model_catalog.rs` | 模型 CRUD | 246 |
-| `model_files.rs` | 模型文件 CRUD、验证、路径检查 | 426 |
-| `model_trash.rs` | 模型文件垃圾箱、清理 | 264 |
-| `instance_logs.rs` | 实例日志读取、刷新、错误摘要 | 253 |
-| `support.rs` | Stage3Error、验证函数、常量、guard helpers | 238 |
+- Agent 只执行平台定义的任务类型，不接受任意 shell 命令。
+- 本地程序、脚本、Docker 均使用 argv 方式执行，不拼接 shell 命令字符串。
+- 路径需要校验；模型文件物理删除只能由 Agent 在 Server 下发的 allowed dirs 内执行。
+- 日志写入和读取做敏感信息脱敏，不允许前端指定任意日志文件路径。
+- Agent 是管理进程，不是模型进程宿主；Agent 退出不主动 kill 受管实例。
 
-routes.rs 继续通过 `domain::function()` 调用（由 facade re-export 透明转发）。
+## 产品模型
 
-### server/src/repository.rs
+```text
+Model + Runtime Environment + Node + Instance Overrides = Model Instance
+```
 
-数据库访问层：
-- `register_node` — 节点注册（事务 + 身份冲突检查 + 并发重试）
-- `reconcile_managed_instances` — 心跳 reconcile 实例状态
-- `record_heartbeat` — 心跳写入
-- `effective_agent_config` — 配置策略合成
-- `list_nodes` / `list_audit_events` — 查询
+| 概念 | 当前实现 |
+|------|----------|
+| Model | 模型定义，含名称、类型、默认后端、描述和配置 JSON |
+| Model File | 某节点上的模型文件或目录路径，需由 Agent 验证 |
+| Runtime Environment | 某节点上的运行模板，含 backend 与 `deploy_type`（`binary` / `script` / `docker`） |
+| Node | Agent 注册后的节点身份和心跳状态 |
+| Model Instance | `external` 外部服务，或 `local` 受 Agent 管理实例 |
 
-### server/src/routes.rs
+关键边界：
 
-Axum HTTP 路由定义和请求处理器。所有 handler 委托给 `domain::` 或 `repository::` 的具体函数。
+- `external` 实例只记录 HTTP 地址并做可达性检查，不由平台启动/停止。
+- `local` 实例绑定 Node、Runtime Environment 和 verified Model File。
+- Runtime 是默认模板；Instance 只保存本次覆盖参数，不修改 Runtime。
+- Docker 不是实例顶层类型，而是 Runtime 的一种 `deploy_type`。
 
-### agent/src/tasks/mod.rs + agent/src/tasks/ 子模块
-
-Agent 侧任务执行。包含：
-- `start_model_instance_with_store` — 启动本地实例
-- `stop_model_instance_with_store` — 停止本地实例
-- `test_model_instance` — 测试实例
-- `verify_model_file` — 模型文件验证
-- `cleanup_model_file` — 受控文件清理
-- `read_instance_log` — 读取实例日志
-
-### web/src/components/InstancesPanel.vue
-
-实例管理 UI（616 行）。包含：
-- 实例列表、创建/编辑表单
-- start / stop / test / check 操作 + 自动刷新
-- Agent 离线自动检测：周期刷新时基于 `node_online` / `last_heartbeat_at` 展示 warning 标签
-- 过渡态轮询（pollInstanceUntilStable）
-- 周期刷新（15s）
-- 探测配置面板
-- 日志查看对话框 + 刷新按钮
-
-辅助模块 `web/src/utils/instance.ts`（61 行）：statusType / statusLabel / instanceStatusLabel / isAgentOffline / formatTime 等。
-
-### server/src/models.rs — ModelInstanceView
-
-`ModelInstanceView` 包含 `node_online: bool` 和 `last_heartbeat_at: Option<i64>` 字段，从实例节点的心跳时间推算。Agent 离线时 `node_online=false`，但实例状态保持原值（不误改为 failed）。
-
-## 数据流
+## 主要数据流
 
 ### Agent 注册与心跳
 
-```
-Agent 启动 → POST /api/agent/register → Server 返回 node_id + token
-Agent loop → POST /api/agent/heartbeat → Server reconcile 实例状态
+```text
+Agent 启动
+  -> POST /api/agent/register
+  -> Server 返回 node_id、agent_token、有效配置
+Agent 循环
+  -> POST /api/agent/heartbeat (Bearer token)
+  -> Server 保存节点/GPU/指标/受管实例状态并返回最新配置
 ```
 
-### 本地实例启动
+Server 用 name 和 hostname 的唯一约束维护节点身份。Agent token 失效时，Agent 会重新注册并更新本地 state。
 
+### Runtime 检查
+
+```text
+Web 创建/检查 Runtime
+  -> Server 创建 check_runtime_environment 任务
+  -> Agent 检查二进制/脚本路径或 Docker 镜像
+  -> Server 保存 check_status / check_message
 ```
-Web 点击启动 → POST /api/model-instances/{id}/start
-  → domain::start_model_instance → 创建 agent_task
-  → agent_tasks::notify_agent_tasks
-  → Agent poll 获取任务 → tasks::start_model_instance_with_store
-  → 端口检查 → spawn 进程 → 就绪探测 → 持久化 managed store
-  → 上报结果 → agent_tasks::record_agent_task_result → 更新实例状态
+
+Runtime 必须绑定在线节点。`binary`/`script` 需要受控入口路径，`docker` 需要镜像配置。
+
+### 本地实例生命周期
+
+```text
+Web start/stop/test/check
+  -> Server 校验实例、节点、Runtime、Model File
+  -> Server 创建 Agent 任务并设置 starting/stopping 等过渡态
+  -> Agent 执行本地程序、脚本或 Docker 操作
+  -> Agent 上报结果
+  -> Server 更新实例状态、地址、进程/容器引用、日志摘要和错误信息
 ```
+
+`running` / `starting` / `stopping` 的 Instance 不能修改配置或删除。被运行中实例引用的 Runtime 和 Model 也不能修改。
 
 ### 状态恢复
 
-```
-Agent 重启 → managed_process::load → 逐条 /proc/{pid}/stat 校验
-  → reports() → heartbeat managed_instances
-  → Server reconcile_managed_instances → running 实例保持 running
-  → 已退出实例标记为 failed + 原因
-```
+- Agent 启动后读取 managed store，只恢复平台曾启动并持久化的受管记录。
+- local 进程通过 pid + start_time 校验，降低 PID 复用误判。
+- Docker 容器通过 `docker inspect` 校验。
+- Server 重启后依赖下一次 Agent 心跳 reconcile 实例状态。
+- Agent 离线不等于实例失败；Server 保留原实例状态，Web 使用 `node_online=false` 展示 warning。
 
-### Agent 离线检测（Web 自动感知）
+## Docker 原则
 
-```
-Server list_model_instances → 查询 n.last_heartbeat_at
-  → 计算 node_online（now - last_heartbeat_at <= 60s）
-  → 返回 ModelInstanceView { node_online, last_heartbeat_at, status, last_error }
-Web 周期刷新（15s）→ 检查 node_online
-  → 离线 + running → warning 标签 "Agent 离线，运行状态无法确认"
-  → 在线 + running → success 标签 "运行中"
-  → 不误改 instance status 为 failed
-```
+- Docker 容器由 Agent 通过 `docker run --detach` 启动，不默认加 `--rm`，保留异常退出后的 inspect/logs 诊断能力。
+- Agent 退出不停止容器；用户显式 stop 才执行 `docker stop`。
+- Docker 参数由 Model File 路径、Runtime `params_json` 和 Instance `params_json` 合并得到。
+- Docker 操作写入 agent.log 的 command summary，并进行脱敏。
 
-### 进程隔离（Agent 退出不终止实例）
+## 配置模型
 
-```
-Agent 启动实例 → std::process::Command
-  → stdin(Stdio::null())       # 脱离 Agent 控制终端
-  → stdout/stderr → piped      # 写入受控日志文件
-  → Unix: process_group(0)     # 独立进程组，不接收 Agent 进程组信号
-  → spawn                      # 子进程独立于 Agent 存活
-Agent 退出 → main.rs 日志"正在退出，不会终止受管实例"
-  → managed store 保留 N 条记录
-  → 不遍历、不 kill 受管进程
-Agent 重启 → managed_process::load → reports()
-  → 存活实例上报 running，已退出上报 failed
+Agent 本地 TOML 主要是 bootstrap：Server 地址、节点名、监听地址、state 路径等。运行期策略由 Server 合成：
+
+```text
+内置默认 + 全局策略 + 节点覆盖 -> effective_agent_config
 ```
 
-> **systemd 部署**：必须设置 `KillMode=process`（非默认的 `control-group`），否则 systemd 停止 Agent service 时会向整个 cgroup 发送 SIGTERM，导致模型实例进程也被终止。示例 service 文件见 `deploy/lightai-agent.service`。
+当前在线下发字段包括心跳/采样间隔、命令和检查超时、allowed dirs、GPU collector、日志策略等。
 
-### Docker 容器启动（三层配置合并）
+## MVP 范围
 
-```
-Web 点击启动 → POST /api/model-instances/{id}/start
-  → domain::start_model_instance → 创建 agent_task（payload 含 runtime_params + params + model_path + model_name）
-  → Agent poll 获取任务 → tasks::start_model_instance_with_store
-  → deploy_type == "docker" → resolve_docker_payload
-    → 解析 runtime_params → DockerRuntimeConfig（image, gpu="all", ipc="host", container_port, defaults）
-    → 解析 params → DockerInstanceOverrides（container_name, host_port, gpu?, ...）
-    → merge_docker_config(model_path, model_name, runtime, overrides)
-      → docker.gpu = instance.gpu ?? runtime.gpu
-      → docker.image = runtime.image
-      → port mapping = instance.host_port : runtime.container_port
-      → vllm.port = runtime.defaults.port (= container_port)
-    → build_docker_run_args → ["run", "--name", ..., "--gpus", ..., "--ipc", ..., "-p", ..., "-v", ..., "--detach", image]
-    → build_vllm_args → ["--model", ..., "--served-model-name", ..., "--host", "0.0.0.0", "--port", ...]
-    → agent.log 记录完整 command_summary（image, gpu, ipc, port, volumes）
-    → docker run (argv-style, no shell) → container_id
-    → ManagedProcessRecord { container_id, container_name, deploy_type: "docker", command }
-    → upsert managed store
-  → 上报结果 → running + base_url + command_summary
-```
+已实现：
 
-GPU 默认 "all"，ipc 默认 "host"（来自 `DockerRuntimeConfig` 自定义 Default）。Host 固定 "0.0.0.0"，不在 UI 配置。
+- Server / Agent / Web 基础闭环。
+- 单节点单副本模型实例管理。
+- 外部服务接入和本地实例生命周期。
+- Runtime、Model、Model File、Trash、日志审计和基础配置页面。
+- 系统/GPU 指标当前状态和历史趋势。
 
-### Docker 实例恢复
+部分完成：
 
-```
-Agent 重启 → managed_process::load → 逐条 check_record
-  → deploy_type == "docker" → docker_backend::check_docker_record
-    → docker inspect <container> → parse State.Running/ExitCode/Error
-    → running → 保持 running，清空 last_error
-    → exited/not found → 上报 failed + 退出原因
-  → deploy_type == "local" | None → 现有 pid + start_time 校验
-```
+- Docker/vLLM 后端已有实现和测试，但仍缺真实 GPU 环境端到端验证。
+- 模型元数据 UI 已有表单，但前后端字段尚未统一，兼容性判断不能作为强约束依据。
+- SQLite schema 有迁移 SQL 和代码内幂等修正，但还没有正式 migration ledger。
 
-> **Docker 部署验证**：本机使用 `vllm/vllm-openai:latest` 镜像 + `/data/models/qwen3-0.6b` 模型目录。Docker 容器默认不加 `--rm`，便于 Agent 在容器异常退出后仍能通过 `docker inspect` 获取 OOM、退出码等诊断信息。用户显式 stop instance 时才 `docker stop`；后续清理资源时才 `docker rm`。
->
-> **Docker 日志审计**：Docker start/stop/inspect 操作均通过 `platform_log::append` 写入 agent.log（ISO 8601 时间戳、脱敏），记录 container_name, image, gpu, ipc, 端口映射, volumes, command_summary。失败时额外记录 stderr 摘要。Web 日志页面可见 command_summary。
+未完成：
+
+- OpenAI-compatible API Gateway、API Key、用量统计和计费。
+- 多节点调度、自动 GPU 调度、高可用、IAM/SSO。
+- 指标清理/聚合/降采样后台任务。
+- 厂商 GPU SDK collector。
+
+更多 API、表结构、任务类型和参数合并细节见 [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md)。

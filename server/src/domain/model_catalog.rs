@@ -19,7 +19,8 @@ pub async fn create_model(
     if let Some(model_path) = request.model_path.as_deref() {
         validate_path("model_path", model_path)?;
     }
-    validate_json_field("config_json", request.config_json.as_deref())?;
+    let model_params = request.params_json.or(request.config_json);
+    validate_json_field("params_json", model_params.as_deref())?;
     let initial_file = request
         .initial_file
         .ok_or_else(|| Stage3Error::BadRequest("initial_file is required".to_string()))?;
@@ -64,7 +65,7 @@ pub async fn create_model(
     .bind(request.model_path)
     .bind(request.description)
     .bind(request.default_backend)
-    .bind(request.config_json)
+    .bind(model_params)
     .bind(now)
     .bind(now)
     .execute(&mut *tx)
@@ -128,7 +129,8 @@ pub async fn update_model(
     if let Some(model_path) = request.model_path.as_deref() {
         validate_path("model_path", model_path)?;
     }
-    validate_json_field("config_json", request.config_json.as_deref())?;
+    let model_params = request.params_json.or(request.config_json);
+    validate_json_field("params_json", model_params.as_deref())?;
 
     let running_instances: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM model_instances WHERE model_id = ? AND status IN ('running', 'starting', 'stopping')",
@@ -158,7 +160,7 @@ pub async fn update_model(
     .bind(request.model_path)
     .bind(request.description)
     .bind(request.default_backend)
-    .bind(request.config_json)
+    .bind(model_params)
     .bind(now)
     .bind(id)
     .execute(pool)
@@ -247,6 +249,7 @@ async fn model_from_row(
         description: row.get("description"),
         default_backend: row.get("default_backend"),
         config_json: row.get("config_json"),
+        params_json: row.get("config_json"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         deleted_at: row.get("deleted_at"),

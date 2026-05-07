@@ -364,7 +364,7 @@ function openEdit(row: ModelDefinition) {
   }
   modelBackendsTouched.value = false
   initMeta = true
-  Object.assign(modelMeta, parseModelMeta(row.params_json))
+  Object.assign(modelMeta, parseModelMeta(row.params_json ?? row.config_json))
   initMeta = false
   // If saved data has no supported_backends, auto-fill from current format
   applyDefaultBackendsForFormat()

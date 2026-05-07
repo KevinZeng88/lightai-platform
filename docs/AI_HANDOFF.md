@@ -1,119 +1,107 @@
 # AI Handoff
 
-## 当前状态
+## 当前真实状态
 
-- 仓库是 Rust workspace + Vue/Vite Web 的 monorepo，包含 `server/`、`agent/`、`web/`、`migrations/`、`deploy/`、`docs/` 等目录。
-- 当前交接时，工作区状态以 git status 为准。
-- Server 是 Rust 服务，提供健康检查、Agent 注册、Bearer token 心跳鉴权、节点/GPU 当前状态、历史指标、配置策略、运行环境、模型、模型文件、实例、模型垃圾箱、日志和审计能力。Server 自身写入受控操作日志（server.log），支持可配置的日志级别、轮转和保留。
-- Server 使用 SQLite 保存状态，启动时由 `server/src/db.rs` 执行当前内置迁移和幂等 schema 修正。
-- Agent 是 Rust 服务，运行在 GPU 节点上，提供本地健康检查，主动注册 Server，发送心跳，上报 CPU、内存、磁盘、GPU 指标和受管本地实例状态。
-- Agent GPU 采集支持内置 NVIDIA `nvidia-smi` collector 和受控 custom collector 脚本。
-- Agent 通过主动任务控制通道接收受控任务，包括模型文件验证、运行环境检查、本地实例启动/停止/测试、模型文件清理、Agent 日志读取和实例日志刷新。Agent 启动本地实例前检查端口占用，启动后按 ProbeConfig 执行服务就绪探测。
-- Agent 本地配置主要是 bootstrap；运行参数、采样、collector、日志、受控模型目录等由 Server/Web 配置策略下发。
-- Web 是 Vue 3 + Vite + Element Plus 控制台，页面包括节点监控、配置、运行环境、模型、实例、模型垃圾箱、日志审计。
-- Web 只调用 Server，不直接连接 Agent 或节点本地服务。
+- 仓库是 Rust workspace + Vue/Vite Web monorepo，主要目录为 `server/`、`agent/`、`web/`、`migrations/`、`deploy/`、`docs/`。
+- Server 使用 Axum + SQLite，提供 Agent 注册/心跳、节点与 GPU 指标、配置策略、Runtime、Model、Model File、Instance、Trash、日志、前端错误和审计 API。
+- Agent 运行在 GPU 节点，主动注册 Server，按心跳上报 CPU/内存/磁盘/GPU 指标和受管实例状态，并通过任务轮询执行受控动作。
+- Web 是 Vue 3 + Vite + Element Plus 控制台，包含节点监控、Agent 配置、运行环境、模型、实例、垃圾箱、日志审计页面。
+- Instance 顶层类型是 `external` 或 `local`；`local` 实例的启动方式来自 Runtime 的 `deploy_type`：`binary`、`script` 或 `docker`。
+- Docker 代码路径已实现，包括三层参数合并、`docker run --detach`、`docker stop`、`docker inspect`、`docker logs` 和 managed store 恢复；仍需真实 GPU 环境端到端验证。
+- 平台日志已实现脱敏、级别过滤、轮转和保留策略；Server 日志策略可在 Web 更新，Agent 日志策略通过 Agent 配置下发。
 
-## 架构说明
+## 必守开发约束
 
-- Agent 主动连接 Server；Server 不主动直连 Agent 端口。
-- Web 只访问 Server；节点本地动作必须由 Agent 执行。
-- 本地动作走平台定义的任务类型，不接受前端传入任意 shell 命令。
-- Agent 执行本地程序或脚本时使用 argv 方式，不通过 shell 拼接。
-- Server 负责状态保存、任务创建、任务结果入库、配置合成和 Web API。
-- Agent 负责节点本地事实采集、路径验证、运行环境检查、进程启动/停止、日志读取和受控文件删除。
-- 安全边界保持保守：路径校验、受控目录、软链接检查、日志脱敏，以及 Server 不直接删除远端节点文件。
+1. Agent 是唯一节点本地执行者；Server 不直连 Agent，Web 不直连 Agent 或节点服务。
+2. 本地执行必须使用 argv，不构造 shell 命令字符串，不接受前端任意命令。
+3. Agent 退出不终止模型实例；只有用户显式 stop 才能停止受管进程或容器。
+4. Agent 离线不能把 running 实例误标为 failed；只展示“运行状态无法确认”。
+5. running / starting / stopping 的 Instance 及其引用的 Runtime、Model 不能修改。
+6. 文档和代码都应保持小改动、低抽象、无不必要依赖。
 
-## 关键概念
+## 代码地图
 
-- 产品模型：**Model + Runtime + Node + Instance Overrides = Model Instance**
-- Runtime：描述"以什么后端、什么运行形态跑"。backend (vllm/llama_cpp/ollama/custom) × deploy_type (local/docker)。Runtime 是默认运行模板，包含 image、gpu、ipc、container_port、cache 路径、vLLM 默认参数。
-- Instance：用户选择 Model + Runtime + Node，填写实例覆盖参数（container_name、host_port、model_container_path、served_model_name、资源参数覆盖）。Instance params_json 只保存覆盖参数，不重复完整 Runtime 配置。
-- 参数边界：Runtime 是默认模板，Instance 是本次运行覆盖。Instance 保存不修改 Runtime。container_port 属于 Runtime（容器内服务端口），host_port 属于 Instance（宿主机映射端口）。Host 不在 UI 配置，容器内监听地址固定为 0.0.0.0。
-- External 实例：已有外部模型服务，平台只记录和 HTTP 可达性检查，不负责启动/停止。
-- 运行中资源锁定：running/starting/stopping 的 Instance 不能编辑配置，被此类 Instance 引用的 Runtime 和 Model 也不能修改。Server 返回 409，Web 显示警告。
-- 三层配置合并：Agent 启动时 Model（模型路径+模型名）+ Runtime（image/entrypoint+默认参数）+ Instance Overrides（端口/名称/资源覆盖）→ 最终 docker run 参数。Instance 覆盖优先于 Runtime 默认。
+```text
+server/src/
+  routes.rs              # Axum 路由和 HTTP handler
+  models.rs              # API 请求/响应类型
+  repository.rs          # 节点注册、心跳、指标、配置、审计、reconcile
+  agent_tasks.rs         # Agent task poll/result/timeout/notify
+  db.rs                  # SQLite 连接、SQL 迁移、幂等 schema 修正
+  domain/
+    runtimes.rs          # Runtime CRUD 和 Agent 检查
+    instances.rs         # Instance CRUD、start/stop/test/check
+    model_catalog.rs     # Model CRUD
+    model_files.rs       # Model File CRUD 和验证任务
+    model_trash.rs       # Trash 和受控物理删除任务
+    instance_logs.rs     # Agent/实例日志读取和错误摘要
 
-## Docker 运行语义
+agent/src/
+  main.rs                # Agent HTTP health、heartbeat loop、task loop 并行启动
+  heartbeat.rs           # 注册、心跳、指标/GPU/managed report 上报、配置应用
+  managed_process.rs     # 受管进程/容器记录持久化和恢复检查
+  gpu/                   # NVIDIA nvidia-smi 和 custom collector
+  metrics.rs             # CPU/内存/磁盘采集
+  tasks/
+    mod.rs               # 任务分发
+    runtime_check.rs     # Runtime 检查
+    process*.rs          # 本地程序/脚本启停、日志、命令构造
+    docker_backend.rs    # Docker 启停、inspect、logs、参数合并
+    verify_model.rs      # 模型路径验证
+    cleanup.rs           # 受控文件删除
+    logs.rs              # 实例日志读取
 
-- Docker 容器默认不加 `--rm`，便于 Agent 在容器退出后 inspect/logs 获取 OOM、退出码等诊断信息。
-- 用户显式 stop instance 才 docker stop；删除实例/清理资源时再 docker rm。
-- Agent 退出不停止容器；Agent 是管理进程，不是宿主进程。
-- Agent 重启后通过 managed store 记录检查容器状态（docker inspect），存活则保持 running。
-- Docker start/stop/inspect 操作均记录 command summary 到 agent.log（ISO 8601 时间戳、脱敏），便于审计和排错。
-- docker run 使用 argv 方式（不通过 shell），参数始终包含 `--gpus`、`--ipc`（来自 Runtime 默认值）。
-- GPU 优先级：instance.gpu > runtime.gpu > 内部默认 "all"。
+web/src/
+  api.ts                 # Server API client
+  types.ts               # 前端 API 类型
+  components/            # Nodes/Config/Runtime/Models/Instances/Trash/LogsAudit
+  components/instances/  # 实例参数和刷新 helper
+  utils/templates.ts     # Runtime/Model 模板和兼容性 helper
+  utils/instance.ts      # 实例状态、标签和格式化 helper
+```
 
-## 当前验证重点
+## 数据库与迁移
 
-- 真实 Docker vLLM 端到端验证：
-  - image: `vllm/vllm-openai:latest`
-  - model path: `/data/models/qwen3-0.6b`（容器内 `/models/qwen3-0.6b`）
-  - cache path: `/data/vllm-cache`
-  - host_port: 18000, container_port: 8000
-  - gpu_memory_utilization: 0.5, max_model_len: 4096, max_num_seqs: 8
-- Docker start 前 agent.log 记录完整 command summary（image、--gpus、--ipc、端口、volume、backend args）
-- Agent 重启后容器存活实例自动恢复 running
-- Agent 离线时 Web 实例显示 warning 不误改为 failed
+- `migrations/0001_init.sql` 是占位。
+- `0002_stage2_nodes.sql` 创建节点、当前指标和历史指标表。
+- `0003_stage3a_models.sql` 创建 Runtime、Model、Model Instance、Model File、Agent Task、Trash 基础表。
+- `0004_stage3a_corrections.sql` 是历史修正参考，不由 `db.rs` 自动执行。
+- `server/src/db.rs` 启动时执行 0001-0003，并用代码内幂等逻辑补齐后续表/列、唯一索引、审计表、配置策略表和平台设置表。
+- 当前没有正式 migration ledger，新增 schema 变更需要谨慎设计幂等升级路径。
 
-## 当前边界
+## 已知限制和风险
 
-- 当前 Instance 是单节点单副本；未来多节点通过 Deployment/Replica 抽象扩展。
-- 不做自动 GPU 调度；GPU 参数是 Docker/vLLM 运行参数，不是平台级资源配额。
-- 模型路径必须在目标 Node 上可访问。
-- 不做 OpenAI-compatible API Gateway、API Key 管理、使用量统计、计费、高可用。
+- Docker/vLLM 未在真实 GPU 环境完成完整验收。
+- 模型文件验证只证明路径存在并可读基础信息，不证明模型格式正确或推理服务可用。
+- Runtime 列表只把 `check_status === "available"` 作为本地实例可选项，Server 也接受 `version_unavailable`；这里存在前端选择范围偏窄。
+- 手工 kill local 受管进程后，状态同步到 Web 最坏约 33 秒（Agent monitor 3s + heartbeat 15s + Web refresh 15s）。
+- 模型垃圾箱不支持批量清理、定时清理或目录递归删除。
+- 前端错误上报是 fire-and-forget，网络失败时静默丢失。
+- 审计页面是基础列表和筛选，没有分页、详情展开或导出。
+- 历史指标没有自动清理、聚合或降采样。
 
-## 最近完成
+## 后续建议优先级
 
-- Docker 后端完整实现：`agent/src/tasks/docker_backend.rs`（~1060 行）
-  - 三层配置合并 `merge_docker_config()`：Model + Runtime + Instance Overrides → DockerPayload
-  - docker run/stop/inspect/logs 全生命周期
-  - GPU/IPC 默认值修复（gpu 默认 "all"，ipc 默认 "host"）
-  - Docker start/stop/inspect 操作日志记录 command summary
-- Docker 与 local 统一生命周期（start/stop/check/test/logs/recover）
-- Web 产品模型落地：Runtime 结构化表单、Instance Docker 参数覆盖表单
-  - Runtime 默认值在 Instance 表单中显示具体值 + 来源标识
-  - Instance 覆盖字段可 "恢复默认"，保存时不写 Runtime 默认值
-  - container_port 只读来自 Runtime，host_port 为 Instance 可编辑
-  - Runtime 表单端口统一为 "容器内服务端口"，Host 不在 UI 配置
-- 运行中资源锁定：运行中 Instance 不能修改配置；被引用 Runtime/Model 不能修改
-- 平台日志时间 ISO 8601；命令摘要脱敏
-- 旧完整 JSON 兼容
+1. 在真实 NVIDIA GPU 环境验证 Docker vLLM 端到端：创建 Runtime、模型目录、实例启动、健康检查、日志、停止、Agent 重启恢复、异常退出诊断。
+2. 引入正式 migration ledger 或明确 schema 版本策略，减少 `db.rs` 中不断追加的修正逻辑。
+3. 缩短受管进程异常退出到 Server/Web 的同步延迟，例如心跳携带更明确的退出事件或任务结果。
+4. 增加历史指标清理和基础聚合，避免 SQLite 长期膨胀。
+5. 在本地运行层稳定后，再推进 OpenAI-compatible Gateway、API Key 和用量统计。
 
-## 已知限制
-
-- 运行状态监控周期（3s）仍为 Agent 内部常量，不进入配置。
-- 进程守护、自动重启和完整日志流式查看仍是扩展点。
-- 手工 kill 进程后，状态同步到 Web 的最坏延迟约 33 秒（monitor 3s + heartbeat 15s + Web refresh 15s）。
-- Docker 实例尚未在真实 GPU 环境完成端到端验证。
-- OpenAI-compatible API Gateway 尚未实现。
-- API Key 管理尚未实现。
-- 使用量统计和计费规则尚未实现。
-- 复杂报表、聚合、降采样和告警尚未实现。
-- 历史数据自动清理后台任务尚未实现。
-- Kubernetes、GPU virtualization、IAM/SSO、高可用部署尚未实现。
-- 国产 GPU 当前推荐通过 custom collector 适配；尚未内置厂商 SDK collector。
-- 模型文件验证只证明路径存在且基础信息可读，不证明模型格式正确或服务可用。
-- 模型垃圾箱不支持批量清理、定时清理或删除目录。
-- SQLite migration ledger 尚未正式化，部分幂等 schema 修正仍在代码中。
-- 前端错误上报是 fire-and-forget 模式，网络失败时静默丢失。
-
-## 下一步建议
-
-1. Docker vLLM 端到端真实环境验证（vllm/vllm-openai:latest + qwen3-0.6b GPU 推理）
-2. 增加历史指标保留清理、基础聚合和降采样
-3. 本地运行层稳定后，再做 OpenAI-compatible Gateway、API Key、路由和用量统计
-4. 根据实际硬件需求增加厂商 GPU collector adapter
-5. 评估引入正式 migration ledger，减少代码里的 schema 修正逻辑
-6. 完善审计记录的 Web 展示（分页、详情展开、导出）
-7. 缩短手工 kill 后的状态同步延迟（例如 Agent 心跳携带退出事件而非仅依赖 store 轮询）
-
-## 验证命令
+## 常用验证
 
 ```bash
 cargo fmt --all --check
 cargo test --workspace
 cargo build --workspace
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cd web && npm run build
-
-本地 NVIDIA 验证可使用： scripts/dev_check_nvidia.sh
 ```
+
+本地 GPU 环境额外运行：
+
+```bash
+bash scripts/dev_check_nvidia.sh
+```
+
+实现细节见 [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md)；真实环境步骤见 [LOCAL_TEST_ENV.md](LOCAL_TEST_ENV.md)。

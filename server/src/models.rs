@@ -331,6 +331,8 @@ pub struct ModelRequest {
     pub description: Option<String>,
     pub default_backend: Option<String>,
     pub config_json: Option<String>,
+    #[serde(default)]
+    pub params_json: Option<String>,
     pub initial_file: Option<ModelFileRequest>,
 }
 
@@ -344,6 +346,7 @@ pub struct ModelView {
     pub description: Option<String>,
     pub default_backend: Option<String>,
     pub config_json: Option<String>,
+    pub params_json: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub deleted_at: Option<i64>,
