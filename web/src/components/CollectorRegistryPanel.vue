@@ -20,7 +20,7 @@
     <template #header>
       <div class="card-header-row">
         <span>已登记采集器</span>
-        <el-button type="primary" @click="openRegister">登记新采集器</el-button>
+        <el-button v-if="role === 'admin'" type="primary" @click="openRegister">登记新采集器</el-button>
       </div>
     </template>
     <el-table :data="entries" row-key="id" border size="small">
@@ -28,7 +28,7 @@
       <el-table-column prop="vendor" label="厂商" width="100" />
       <el-table-column prop="name" label="名称" min-width="180" />
       <el-table-column prop="version" label="版本" width="90" />
-      <el-table-column label="enabled" width="90">
+      <el-table-column v-if="role === 'admin'" label="enabled" width="90">
         <template #default="{ row }">
           <el-switch
             :model-value="row.enabled"
@@ -44,6 +44,12 @@
       <el-table-column label="metrics SHA256" min-width="140">
         <template #default="{ row }">
           <code class="hash-cell">{{ row.metrics_sha256.slice(0, 16) }}…</code>
+        </template>
+      </el-table-column>
+      <el-table-column v-if="role === 'admin'" label="操作" width="80" fixed="right">
+        <template #default="{ row }">
+          <el-button size="small" @click="openEdit(row)">修改</el-button>
+          <el-button size="small" type="danger" @click="removeEntry(row)">删除</el-button>
         </template>
       </el-table-column>
     </el-table>
@@ -69,12 +75,48 @@
       <el-button type="primary" :loading="saving" @click="submitRegister">登记</el-button>
     </template>
   </el-dialog>
+
+  <el-dialog v-model="editDialogVisible" title="修改采集器" width="640px">
+    <el-form label-width="110px">
+      <el-form-item label="ID">
+        <el-input :model-value="editForm.id" disabled />
+      </el-form-item>
+      <el-form-item label="厂商">
+        <el-input v-model="editForm.vendor" />
+      </el-form-item>
+      <el-form-item label="名称">
+        <el-input v-model="editForm.name" />
+      </el-form-item>
+      <el-form-item label="版本">
+        <el-input v-model="editForm.version" />
+      </el-form-item>
+      <el-form-item label="描述">
+        <el-input v-model="editForm.description" />
+      </el-form-item>
+      <el-form-item label="discover SHA256">
+        <el-input v-model="editForm.discover_sha256" />
+      </el-form-item>
+      <el-form-item label="metrics SHA256">
+        <el-input v-model="editForm.metrics_sha256" />
+      </el-form-item>
+      <el-form-item label="启用">
+        <el-switch v-model="editForm.enabled" />
+      </el-form-item>
+    </el-form>
+    <template #footer>
+      <el-button @click="editDialogVisible = false">取消</el-button>
+      <el-button type="primary" :loading="saving" @click="submitEdit">保存</el-button>
+    </template>
+  </el-dialog>
 </template>
 
 <script setup lang="ts">
-import { ElMessage } from 'element-plus'
+defineProps<{ role: string }>()
+
+import { ElMessage, ElMessageBox } from 'element-plus'
 import { onMounted, ref } from 'vue'
 import {
+  deleteCollector,
   fetchCollectorRegistry,
   registerCollector,
   type CollectorRegistryEntry
@@ -150,6 +192,72 @@ async function toggleEnabled(row: CollectorRegistryEntry, enabled: boolean) {
     row.enabled = enabled
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '更新失败')
+  }
+}
+
+// ── Edit dialog ──
+
+const editDialogVisible = ref(false)
+const editForm = ref({
+  id: '',
+  vendor: '',
+  name: '',
+  version: '',
+  description: '',
+  discover_sha256: '',
+  metrics_sha256: '',
+  enabled: true
+})
+
+function openEdit(row: CollectorRegistryEntry) {
+  editForm.value = {
+    id: row.id,
+    vendor: row.vendor,
+    name: row.name,
+    version: row.version,
+    description: row.description ?? '',
+    discover_sha256: row.discover_sha256,
+    metrics_sha256: row.metrics_sha256,
+    enabled: row.enabled
+  }
+  editDialogVisible.value = true
+}
+
+async function submitEdit() {
+  saving.value = true
+  try {
+    await registerCollector({
+      id: editForm.value.id,
+      vendor: editForm.value.vendor,
+      name: editForm.value.name,
+      version: editForm.value.version,
+      description: editForm.value.description,
+      discover_sha256: editForm.value.discover_sha256,
+      metrics_sha256: editForm.value.metrics_sha256,
+      enabled: editForm.value.enabled
+    })
+    ElMessage.success('采集器已更新')
+    editDialogVisible.value = false
+    await load()
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '更新失败')
+  } finally {
+    saving.value = false
+  }
+}
+
+async function removeEntry(row: CollectorRegistryEntry) {
+  await ElMessageBox.confirm(
+    `确认删除采集器 ${row.id} v${row.version}？删除后 Agent 将无法执行该采集器脚本。`,
+    '确认删除',
+    { type: 'warning', confirmButtonText: '确认删除', cancelButtonText: '取消' }
+  )
+  try {
+    await deleteCollector(row.id, row.version)
+    ElMessage.success('采集器已删除')
+    await load()
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '删除失败')
   }
 }
 

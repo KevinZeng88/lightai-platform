@@ -1,15 +1,15 @@
 [server]
-listen_addr = "0.0.0.0:8080"
+# Listen address.  Use 0.0.0.0 to accept external connections.
+# This is the control-plane port — deploy behind firewall/VPN/HTTPS reverse proxy in production.
+listen_addr = "0.0.0.0:10080"
 
 [database]
-url = "sqlite://data/lightai.db"
+# SQLite database path.  Relative paths are resolved against the process CWD.
+# With systemd WorkingDirectory=/opt/lightai, this becomes /opt/lightai/data/lightai.db.
+url = "sqlite://./data/lightai.db"
 
 [metrics]
 retention_days = 7
-
-[auth]
-# First admin is created through the Web setup page when the database has no users.
-# Do not put production admin passwords in this file.
 
 [auth.password]
 min_length = 12

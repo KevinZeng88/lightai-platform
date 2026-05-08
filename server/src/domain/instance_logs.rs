@@ -15,7 +15,7 @@ pub async fn read_agent_log(
 ) -> Result<String, Stage3Error> {
     if !node_online(pool, node_id).await? {
         return Err(Stage3Error::Conflict(
-            "节点 Agent 离线，无法查看 Agent 日志".to_string(),
+            "Node Agent offline, cannot read Agent log".to_string(),
         ));
     }
     let task_id = Uuid::new_v4().to_string();
@@ -62,14 +62,16 @@ pub async fn read_agent_log(
             "failed" => {
                 return Err(Stage3Error::Conflict(
                     row.get::<Option<String>, _>("error_message")
-                        .unwrap_or_else(|| "Agent 日志读取失败".to_string()),
+                        .unwrap_or_else(|| "Agent log read failed".to_string()),
                 ));
             }
             _ => {}
         }
         if Instant::now() >= deadline {
             agent_tasks::mark_task_timed_out(pool, &task_id).await?;
-            return Err(Stage3Error::Conflict("Agent 日志读取超时".to_string()));
+            return Err(Stage3Error::Conflict(
+                "Agent log read timed out".to_string(),
+            ));
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -79,23 +81,22 @@ pub async fn refresh_instance_logs(pool: &SqlitePool, id: &str) -> Result<String
     let instance = model_instance(pool, id).await?;
     if instance.deploy_type != "local" {
         return Err(Stage3Error::BadRequest(
-            "仅本地实例支持刷新日志".to_string(),
+            "Only local instances support log refresh".to_string(),
         ));
     }
     let node_id = instance
         .node_id
         .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("本地实例缺少节点".to_string()))?;
+        .ok_or_else(|| Stage3Error::BadRequest("Local instance missing node".to_string()))?;
     if !node_online(pool, node_id).await? {
         return Err(Stage3Error::Conflict(
-            "节点 Agent 离线，无法刷新实例日志".to_string(),
+            "Node Agent offline, cannot refresh instance log".to_string(),
         ));
     }
 
-    let runtime_environment_id = instance
-        .runtime_environment_id
-        .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("本地实例缺少运行环境".to_string()))?;
+    let runtime_environment_id = instance.runtime_environment_id.as_deref().ok_or_else(|| {
+        Stage3Error::BadRequest("Local instance missing runtime environment".to_string())
+    })?;
     let env = runtime_environment(pool, runtime_environment_id).await?;
 
     let task_id = Uuid::new_v4().to_string();
@@ -163,14 +164,16 @@ pub async fn refresh_instance_logs(pool: &SqlitePool, id: &str) -> Result<String
             "failed" => {
                 return Err(Stage3Error::Conflict(
                     row.get::<Option<String>, _>("error_message")
-                        .unwrap_or_else(|| "实例日志读取失败".to_string()),
+                        .unwrap_or_else(|| "Instance log read failed".to_string()),
                 ));
             }
             _ => {}
         }
         if Instant::now() >= deadline {
             agent_tasks::mark_task_timed_out(pool, &task_id).await?;
-            return Err(Stage3Error::Conflict("实例日志读取超时".to_string()));
+            return Err(Stage3Error::Conflict(
+                "Instance log read timed out".to_string(),
+            ));
         }
         sleep(Duration::from_millis(100)).await;
     }
@@ -189,7 +192,7 @@ pub async fn frontend_error_summary(pool: &SqlitePool) -> Result<String, Stage3E
     .fetch_all(pool)
     .await?;
     if rows.is_empty() {
-        return Ok("暂无前端错误".to_string());
+        return Ok("No frontend errors".to_string());
     }
     Ok(rows
         .into_iter()
@@ -204,9 +207,9 @@ pub async fn frontend_error_summary(pool: &SqlitePool) -> Result<String, Stage3E
                 .map(|u| format!(" [URL: {u}]"))
                 .unwrap_or_default();
             format!(
-                "{} 前端错误：{}{}",
+                "{} Frontend error: {}{}",
                 ts,
-                message.as_deref().unwrap_or("无详情"),
+                message.as_deref().unwrap_or("no details"),
                 url_info
             )
         })
@@ -217,15 +220,15 @@ pub async fn frontend_error_summary(pool: &SqlitePool) -> Result<String, Stage3E
 pub async fn recent_error_summary(pool: &SqlitePool) -> Result<String, Stage3Error> {
     let rows = sqlx::query(
         r#"
-        SELECT '实例' AS source, name AS target, last_error AS message, updated_at AS ts
+        SELECT 'instance' AS source, name AS target, last_error AS message, updated_at AS ts
         FROM model_instances
         WHERE last_error IS NOT NULL AND TRIM(last_error) != ''
         UNION ALL
-        SELECT '模型文件' AS source, path AS target, last_error AS message, updated_at AS ts
+        SELECT 'model_file' AS source, path AS target, last_error AS message, updated_at AS ts
         FROM model_files
         WHERE last_error IS NOT NULL AND TRIM(last_error) != ''
         UNION ALL
-        SELECT '垃圾箱' AS source, path AS target, last_error AS message, updated_at AS ts
+        SELECT 'trash' AS source, path AS target, last_error AS message, updated_at AS ts
         FROM model_file_trash
         WHERE last_error IS NOT NULL AND TRIM(last_error) != ''
         ORDER BY ts DESC
@@ -235,7 +238,7 @@ pub async fn recent_error_summary(pool: &SqlitePool) -> Result<String, Stage3Err
     .fetch_all(pool)
     .await?;
     if rows.is_empty() {
-        return Ok("暂无错误摘要".to_string());
+        return Ok("No error summary available".to_string());
     }
     Ok(rows
         .into_iter()

@@ -66,12 +66,12 @@ async fn model_file_create_fails_when_agent_verification_fails_and_does_not_inse
         "/models/missing.gguf",
         "missing",
         None,
-        "文件不存在",
+        "file does not exist",
     )
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["message"], "文件不存在");
+    assert_eq!(json["message"], "file does not exist");
     let (status, files) = request(
         app.clone(),
         "GET",
@@ -267,7 +267,7 @@ async fn agent_task_verifies_model_file_and_updates_model_file_status() {
                         "result": {
                             "file_status": "verified",
                             "size_bytes": 1234,
-                            "message": "文件已验证"
+                            "message": "file verified"
                         }
                     })
                     .to_string(),
@@ -335,7 +335,7 @@ async fn verification_task_timeout_updates_model_file_status_when_no_agent_repor
     assert_eq!(status, StatusCode::OK);
     let timed_out = &files["files"].as_array().unwrap()[0];
     assert_eq!(timed_out["status"], "verify_timeout");
-    assert_eq!(timed_out["last_error"], "验证超时");
+    assert_eq!(timed_out["last_error"], "verification timed out");
 }
 
 #[tokio::test]
@@ -397,7 +397,7 @@ async fn failed_model_file_verification_keeps_error_and_marks_model_unverified()
                         "status": "failed",
                         "result": {
                             "file_status": "missing",
-                            "message": "文件不存在"
+                            "message": "file does not exist"
                         }
                     })
                     .to_string(),
@@ -418,7 +418,7 @@ async fn failed_model_file_verification_keeps_error_and_marks_model_unverified()
     assert_eq!(status, StatusCode::OK);
     let missing = &files["files"].as_array().unwrap()[0];
     assert_eq!(missing["status"], "missing");
-    assert_eq!(missing["last_error"], "文件不存在");
+    assert_eq!(missing["last_error"], "file does not exist");
 
     let (status, model) = request(app, "GET", &format!("/api/models/{model_id}"), None).await;
     assert_eq!(status, StatusCode::OK);
@@ -561,7 +561,8 @@ async fn trash_cleanup_file_is_executed_by_matching_agent_and_updates_status() {
         assert_eq!(task["task"]["payload"]["trash_id"], trash_id);
         assert_eq!(task["task"]["payload"]["path"], model_file["path"]);
         let task_id = task["task"]["id"].as_str().unwrap();
-        report_cleanup_task_result(app, node_id, token, task_id, "deleted", "文件已清理").await;
+        report_cleanup_task_result(app, node_id, token, task_id, "deleted", "file cleaned up")
+            .await;
     };
     let ((status, cleaned), _) = tokio::join!(cleanup_request, agent);
 
@@ -613,12 +614,15 @@ async fn trash_cleanup_file_fails_when_agent_is_offline_and_keeps_record() {
     .await;
 
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(json["message"], "节点 Agent 离线，无法清理文件");
+    assert_eq!(json["message"], "Node Agent offline, cannot clean up file");
     let (status, trash_list) = request(app, "GET", "/api/model-file-trash", None).await;
     assert_eq!(status, StatusCode::OK);
     let item = &trash_list["items"].as_array().unwrap()[0];
     assert_eq!(item["status"], "cleanup_failed");
-    assert_eq!(item["last_error"], "节点 Agent 离线，无法清理文件");
+    assert_eq!(
+        item["last_error"],
+        "Node Agent offline, cannot clean up file"
+    );
 }
 
 #[tokio::test]
@@ -655,18 +659,25 @@ async fn trash_cleanup_file_failure_keeps_record_and_error() {
     let agent = async {
         let task = poll_agent_task(app.clone(), node_id, token).await;
         let task_id = task["task"]["id"].as_str().unwrap();
-        report_cleanup_task_result(app.clone(), node_id, token, task_id, "failed", "文件不存在")
-            .await;
+        report_cleanup_task_result(
+            app.clone(),
+            node_id,
+            token,
+            task_id,
+            "failed",
+            "file does not exist",
+        )
+        .await;
     };
     let ((status, json), _) = tokio::join!(cleanup_request, agent);
 
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(json["message"], "文件不存在");
+    assert_eq!(json["message"], "file does not exist");
     let (status, trash_list) = request(app, "GET", "/api/model-file-trash", None).await;
     assert_eq!(status, StatusCode::OK);
     let item = &trash_list["items"].as_array().unwrap()[0];
     assert_eq!(item["status"], "cleanup_failed");
-    assert_eq!(item["last_error"], "文件不存在");
+    assert_eq!(item["last_error"], "file does not exist");
 }
 
 #[tokio::test]

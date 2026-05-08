@@ -1,11 +1,15 @@
 # AI Handoff
+Language convention:
+- CLI help, CLI operational output, server logs, and agent logs must be English.
+- Web UI text should be Chinese.
+- Documentation may be Chinese, but command examples, config keys, status values, and log examples should remain English.
 
 ## 当前真实状态
 
 - 仓库是 Rust workspace + Vue/Vite Web monorepo，主要目录为 `server/`、`agent/`、`web/`、`migrations/`、`deploy/`、`docs/`。
 - 产品最终目标是企业级模型服务与 GPU 资源调度平台，不是单纯 GPU 服务器管理工具。当前代码处于第一阶段：GPU 服务器统一纳管、Agent 心跳/GPU 状态上报、基础模型/Runtime/实例管理、Web 控制台、本地用户、用户组和基础权限。
 - Server 使用 Axum + SQLite，提供本地用户/用户组登录与权限基础、Agent 注册/心跳、节点与 GPU 指标、配置策略、Runtime、Model、Model File、Instance、Trash、日志、前端错误和审计 API。
-- 控制面 API 使用本地用户会话保护；除 `/health`、`/api/setup/*`、`/api/auth/login` 与 `/api/agent/*` 外，所有 `/api/*` 请求都需要登录 cookie。空库首次访问 Web 进入 setup 页面，生产配置不支持 `initial_admin_password` 或 `LIGHTAI_ADMIN_PASSWORD`。可选 emergency control token 默认关闭，只用于测试、自动化或本机应急，审计 actor 标记为 `system-emergency`。
+- 控制面 API 使用本地用户会话保护；除 `/health`、`/api/setup/*`、`/api/auth/login` 与 `/api/agent/*` 外，所有 `/api/*` 请求都需要登录 cookie。空库首次访问 Web 进入 setup 页面，生产配置不支持 `initial_admin_password` 或 `LIGHTAI_ADMIN_PASSWORD`。
 - Agent 运行在 GPU 节点，主动注册 Server，按心跳上报 CPU/内存/磁盘/GPU 指标和受管实例状态，并通过任务轮询执行受控动作。
 - Web 是 Vue 3 + Vite + Element Plus 控制台，包含节点监控、Agent 配置、运行环境、模型、实例、垃圾箱、日志审计、用户与组页面。
 - Instance 顶层类型是 `external` 或 `local`；`local` 实例的启动方式来自 Runtime 的 `deploy_type`：`binary`、`script` 或 `docker`。
@@ -81,7 +85,7 @@ web/src/
 - 手工 kill local 受管进程后，状态同步到 Web 最坏约 33 秒（Agent monitor 3s + heartbeat 15s + Web refresh 15s）。
 - 模型垃圾箱不支持批量清理、定时清理或目录递归删除。
 - 前端错误上报是 fire-and-forget，网络失败时静默丢失。
-- 审计页面是基础列表和筛选，没有分页、详情展开或导出。
+- 审计页面是基础列表和筛选，有默认 limit 500（最大 1000）和 offset 分页，但没有详情展开或导出。
 - 历史指标没有自动清理、聚合或降采样。
 - 统一模型调用 API、API Key、额度、计量、调用延迟/错误率/吞吐统计、GPU 调度优先级、自动扩缩容、降级和费用归集仍未实现。
 

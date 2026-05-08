@@ -21,7 +21,7 @@ async fn register_node_reuses_node_id_for_same_name_and_hostname() {
     assert_eq!(second["node_id"].as_str().unwrap(), first_id);
     assert_ne!(second["agent_token"].as_str().unwrap(), first_token);
 
-    // 确保 DB 只有一条记录
+    // Ensure DB has exactly one record
     let count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM nodes WHERE id = ? AND name = 'node-a'")
             .bind(first_id)
@@ -54,31 +54,31 @@ async fn register_with_name_hostname(
 #[tokio::test]
 async fn register_node_rejects_same_name_different_hostname() {
     let (_pool, app) = stage2_test_app().await;
-    // 先注册 node-a @ gpu-node-a
+    // Register node-a @ gpu-node-a
     let (status1, _) = register_with_name_hostname(app.clone(), "node-a", "gpu-node-a").await;
     assert_eq!(status1, StatusCode::OK);
-    // 相同 name 不同 hostname → 拒绝
+    // Same name different hostname → rejected
     let (status2, body) = register_with_name_hostname(app.clone(), "node-a", "gpu-node-b").await;
     assert_eq!(status2, StatusCode::BAD_REQUEST);
     assert!(body["message"]
         .as_str()
         .unwrap_or("")
-        .contains("相同名称不允许用于不同主机"));
+        .contains("same name cannot be used for different hosts"));
 }
 
 #[tokio::test]
 async fn register_node_rejects_different_name_same_hostname() {
     let (_pool, app) = stage2_test_app().await;
-    // 先注册 node-a @ gpu-node-a
+    // Register node-a @ gpu-node-a
     let (status1, _) = register_with_name_hostname(app.clone(), "node-a", "gpu-node-a").await;
     assert_eq!(status1, StatusCode::OK);
-    // 不同 name 相同 hostname → 拒绝
+    // Different name same hostname → rejected
     let (status2, body) = register_with_name_hostname(app.clone(), "node-b", "gpu-node-a").await;
     assert_eq!(status2, StatusCode::BAD_REQUEST);
     assert!(body["message"]
         .as_str()
         .unwrap_or("")
-        .contains("相同主机不允许用于不同名称"));
+        .contains("same host cannot be used for different names"));
 }
 
 #[tokio::test]
@@ -89,20 +89,20 @@ async fn register_node_creates_new_node_for_different_name() {
     assert_ne!(second["node_id"], first["node_id"]);
 }
 
-// ── check_model_instance 在 Agent 离线时返回 last_error ──
+// ── check_model_instance returns last_error when Agent is offline ──
 
 #[tokio::test]
 async fn nodes_name_unique_constraint_rejects_duplicate_name() {
     let (_pool, app) = stage2_test_app().await;
     let (s1, _) = register_with_name_hostname(app.clone(), "agent-1", "host-a").await;
     assert_eq!(s1, StatusCode::OK);
-    // 相同 name 不同 hostname → 被 UNIQUE(name) 约束拒绝
+    // Same name different hostname → rejected by UNIQUE(name) constraint
     let (s2, body) = register_with_name_hostname(app, "agent-1", "host-b").await;
     assert_eq!(s2, StatusCode::BAD_REQUEST);
     assert!(body["message"]
         .as_str()
         .unwrap_or("")
-        .contains("相同名称不允许"));
+        .contains("same name cannot"));
 }
 
 #[tokio::test]
@@ -110,13 +110,13 @@ async fn nodes_hostname_unique_constraint_rejects_duplicate_hostname() {
     let (_pool, app) = stage2_test_app().await;
     let (s1, _) = register_with_name_hostname(app.clone(), "agent-1", "host-a").await;
     assert_eq!(s1, StatusCode::OK);
-    // 相同 hostname 不同 name → 被 UNIQUE(hostname) 约束拒绝
+    // Same hostname different name → rejected by UNIQUE(hostname) constraint
     let (s2, body) = register_with_name_hostname(app, "agent-2", "host-a").await;
     assert_eq!(s2, StatusCode::BAD_REQUEST);
     assert!(body["message"]
         .as_str()
         .unwrap_or("")
-        .contains("相同主机不允许"));
+        .contains("same host cannot"));
 }
 
 #[tokio::test]
@@ -124,12 +124,12 @@ async fn register_node_idempotent_same_name_and_hostname() {
     let (_pool, app) = stage2_test_app().await;
     let (s1, first) = register_with_name_hostname(app.clone(), "agent-1", "host-a").await;
     assert_eq!(s1, StatusCode::OK);
-    // 重复注册 → 复用 node_id，更新 token
+    // Re-registration → reuse node_id, update token
     let (s2, second) = register_with_name_hostname(app.clone(), "agent-1", "host-a").await;
     assert_eq!(s2, StatusCode::OK);
     assert_eq!(second["node_id"], first["node_id"]);
     assert_ne!(second["agent_token"], first["agent_token"]);
-    // 三次注册也幂等
+    // Idempotent across three registrations
     let (s3, third) = register_with_name_hostname(app, "agent-1", "host-a").await;
     assert_eq!(s3, StatusCode::OK);
     assert_eq!(third["node_id"], first["node_id"]);
@@ -138,7 +138,7 @@ async fn register_node_idempotent_same_name_and_hostname() {
 #[tokio::test]
 async fn register_node_recovers_from_unique_constraint_on_concurrent_same_node() {
     let (pool, app) = stage2_test_app().await;
-    // 模拟并发：直接插入一行占用 name+hostname，然后 register_node 应复用该 node_id
+    // Simulate concurrency: insert row occupying name+hostname, then register_node should reuse that node_id
     let preexisting_id = uuid::Uuid::new_v4().to_string();
     sqlx::query(
         "INSERT INTO nodes (id, name, hostname, token_hash, token_prefix, registered_at, updated_at) VALUES (?, 'agent-c', 'host-c', 'old_hash', 'old_pre', 1, 1)",
@@ -152,7 +152,7 @@ async fn register_node_recovers_from_unique_constraint_on_concurrent_same_node()
     assert_eq!(status, StatusCode::OK);
     assert_eq!(response["node_id"], preexisting_id);
 
-    // DB 中仍只有一条记录
+    // DB still has exactly one record
     let count: i64 = sqlx::query_scalar(
         "SELECT COUNT(*) FROM nodes WHERE name = 'agent-c' AND hostname = 'host-c'",
     )
@@ -162,7 +162,7 @@ async fn register_node_recovers_from_unique_constraint_on_concurrent_same_node()
     assert_eq!(count, 1);
 }
 
-// ── 磁盘 SQLite 持久化：重启后状态恢复与 reconcile ──
+// ── Disk SQLite persistence: state recovery and reconcile after restart ──
 
 #[tokio::test]
 async fn disk_sqlite_persistence_survives_restart_and_reconciles() {
@@ -170,7 +170,7 @@ async fn disk_sqlite_persistence_survives_restart_and_reconciles() {
     std::fs::create_dir_all(&dir).unwrap();
     let db_path = dir.join("test.db");
 
-    // 第一段：创建 node 和 instance，写入 DB
+    // Phase 1: create node and instance, write to DB
     let (node_id, token, instance_id) = {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(&db_path)
@@ -182,7 +182,8 @@ async fn disk_sqlite_persistence_survives_restart_and_reconciles() {
             .await
             .unwrap();
         db::migrate(&pool).await.unwrap();
-        let app = routes::app_with_emergency_token(pool.clone(), TEST_EMERGENCY_TOKEN.to_string());
+        common::ensure_initial_admin(&pool, "admin", "test-admin-pw-123").await;
+        let app = routes::app(pool.clone());
         let registered = register_node_json(app.clone()).await;
         let nid = registered["node_id"].as_str().unwrap().to_string();
         let tok = registered["agent_token"].as_str().unwrap().to_string();
@@ -223,7 +224,7 @@ async fn disk_sqlite_persistence_survives_restart_and_reconciles() {
         (nid, tok, iid)
     };
 
-    // 第二段：重新打开 DB（模拟 Server 重启），需显式处理 create_if_missing
+    // Phase 2: reopen DB (simulate Server restart), must handle create_if_missing
     let pool = {
         let opts = sqlx::sqlite::SqliteConnectOptions::new()
             .filename(&db_path)
@@ -236,9 +237,10 @@ async fn disk_sqlite_persistence_survives_restart_and_reconciles() {
             .unwrap()
     };
     db::migrate(&pool).await.unwrap();
-    let app = routes::app_with_emergency_token(pool.clone(), TEST_EMERGENCY_TOKEN.to_string());
+    common::ensure_initial_admin(&pool, "admin", "test-admin-pw-123").await;
+    let app = routes::app(pool.clone());
 
-    // 确认 node 和 instance 仍存在
+    // Verify node and instance still exist
     let (status, fetched) = request(
         app.clone(),
         "GET",
@@ -250,7 +252,7 @@ async fn disk_sqlite_persistence_survives_restart_and_reconciles() {
     assert_eq!(fetched["status"], "running");
     assert_eq!(fetched["process_id"], 77777);
 
-    // 模拟 Agent 心跳 reconcile：上报同一实例仍存活
+    // Simulate Agent heartbeat reconcile: report same instance still alive
     heartbeat_node_with_managed_instances(
         app.clone(),
         &node_id,
@@ -280,4 +282,4 @@ async fn disk_sqlite_persistence_survives_restart_and_reconciles() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-// ── 离线 Agent 上 running 实例保持 running，但 node_online=false ──
+// ── Running instances on offline Agent stay running, but node_online=false ──

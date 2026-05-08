@@ -32,8 +32,8 @@ pub(crate) struct DockerCheckResult {
     pub(crate) message: String,
 }
 
-/// 运行状态监控：检查周期（秒）。Agent 后台持续检查受管进程是否存活，
-/// 与启动就绪探测无关。本轮不进入配置。
+/// Runtime monitoring: check interval (seconds). Agent background checks managed process liveness.
+/// Independent of startup readiness probe. Not configurable in this phase.
 const PROCESS_MONITOR_INTERVAL_SECS: u64 = 3;
 
 #[derive(Debug)]
@@ -64,14 +64,14 @@ impl InstanceLaunchParams {
             .trim()
             .to_string();
         if !is_safe_host(&host) {
-            return Err("监听地址非法".to_string());
+            return Err("invalid listen address".to_string());
         }
         let port = parsed
             .get("port")
             .and_then(|value| value.as_u64())
             .unwrap_or(8080);
         if port == 0 || port > u16::MAX as u64 {
-            return Err("监听端口非法".to_string());
+            return Err("invalid listen port".to_string());
         }
         let extra_args = parsed
             .get("extra_args")
@@ -128,7 +128,7 @@ pub async fn start_model_instance_with_store(
         .and_then(|value| value.as_str())
         .unwrap_or_default();
     if verify_model_file(model_path).await.file_status != "verified" {
-        return instance_failure("模型文件或目录不可用，实例未启动");
+        return instance_failure("model file or directory unavailable; instance not started");
     }
     let Some(binary_path) = payload
         .get("binary_path")
@@ -136,10 +136,10 @@ pub async fn start_model_instance_with_store(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return instance_failure("运行环境缺少受控入口路径");
+        return instance_failure("runtime is missing managed entry path");
     };
     if verify_controlled_entrypoint(binary_path).await.check_status != "available" {
-        return instance_failure("运行环境入口不可用，实例未启动");
+        return instance_failure("runtime entry unavailable; instance not started");
     }
     let params = match InstanceLaunchParams::from_payload(payload) {
         Ok(params) => params,
@@ -174,7 +174,7 @@ pub async fn start_model_instance_with_store(
         Ok(child) => child,
         Err(error) => {
             return instance_failure_with_details(
-                &format!("启动进程失败：{error}"),
+                &format!("process start failed: {error}"),
                 None,
                 Some(command_summary),
             );
@@ -196,7 +196,7 @@ pub async fn start_model_instance_with_store(
             Ok(path) => Some(path),
             Err(message) => {
                 return instance_failure_with_details(
-                    &format!("日志目录不可用：{message}"),
+                    &format!("log directory unavailable: {message}"),
                     None,
                     Some(command_summary),
                 );
@@ -223,7 +223,7 @@ pub async fn start_model_instance_with_store(
             let log_tail = log_tail(&log_buffer).await;
             let detail = first_log_line(log_tail.as_deref()).unwrap_or_else(|| status.to_string());
             return instance_failure_with_details(
-                &format!("启动进程已退出：{detail}"),
+                &format!("process exited: {detail}"),
                 log_tail,
                 Some(command_summary),
             );
@@ -231,7 +231,7 @@ pub async fn start_model_instance_with_store(
         Ok(None) => {}
         Err(error) => {
             return instance_failure_with_details(
-                &format!("确认进程状态失败：{error}"),
+                &format!("failed to verify process status: {error}"),
                 log_tail(&log_buffer).await,
                 Some(command_summary),
             );
@@ -254,9 +254,9 @@ pub async fn start_model_instance_with_store(
         sleep(Duration::from_millis(POST_KILL_LOG_WAIT_MS)).await;
         let log_tail = log_tail(&log_buffer).await;
         let detail = first_log_line(log_tail.as_deref())
-            .unwrap_or_else(|| "端口或健康接口未就绪".to_string());
+            .unwrap_or_else(|| "port or health endpoint not ready".to_string());
         return instance_failure_with_details(
-            &format!("本地进程已启动但服务不可用：{detail}"),
+            &format!("local process started but service unavailable: {detail}"),
             log_tail,
             Some(command_summary),
         );
@@ -267,7 +267,7 @@ pub async fn start_model_instance_with_store(
             let log_tail = log_tail(&log_buffer).await;
             let detail = first_log_line(log_tail.as_deref()).unwrap_or_else(|| status.to_string());
             return instance_failure_with_details(
-                &format!("本地进程在服务就绪后异常退出：{detail}"),
+                &format!("local process exited unexpectedly after service became ready: {detail}"),
                 log_tail,
                 Some(command_summary),
             );
@@ -276,7 +276,7 @@ pub async fn start_model_instance_with_store(
         Err(error) => {
             let _ = child.kill().await;
             return instance_failure_with_details(
-                &format!("确认进程状态失败：{error}"),
+                &format!("failed to verify process status: {error}"),
                 log_tail(&log_buffer).await,
                 Some(command_summary),
             );
@@ -308,7 +308,7 @@ pub async fn start_model_instance_with_store(
         {
             let _ = child.kill().await;
             return instance_failure_with_details(
-                &format!("受管进程记录写入失败，实例已停止：{error}"),
+                &format!("failed to write managed process record; instance stopped: {error}"),
                 log_tail(&log_buffer).await,
                 Some(command_summary),
             );
@@ -328,7 +328,7 @@ pub async fn start_model_instance_with_store(
     );
     ModelInstanceTaskResult {
         instance_status: "running".to_string(),
-        message: format!("本地实例已启动，监听地址 {base_url}"),
+        message: format!("local instance started, listening at {base_url}"),
         base_url: Some(base_url.clone()),
         endpoint_url: Some(base_url),
         process_id,
@@ -362,25 +362,31 @@ pub async fn stop_model_instance_with_store(
 
     let Some(mut handle) = process_registry().lock().await.remove(instance_id) else {
         let Some(store_path) = managed_store_path else {
-            return instance_failure("未找到本地进程引用，且未配置受管进程记录，拒绝停止");
+            return instance_failure("no local process reference found and no managed process record configured; refusing to stop");
         };
         let record = match managed_process::find(store_path, instance_id).await {
             Ok(Some(record)) => record,
-            Ok(None) => return instance_failure("未找到平台受管进程记录，拒绝停止该实例"),
+            Ok(None) => {
+                return instance_failure(
+                    "no platform managed process record found; refusing to stop this instance",
+                )
+            }
             Err(error) => {
-                return instance_failure(&format!("读取受管进程记录失败，拒绝停止：{error}"));
+                return instance_failure(&format!(
+                    "failed to read managed process record; refusing to stop: {error}"
+                ));
             }
         };
         match managed_process::kill_managed(&record).await {
             Ok(()) => {
                 if let Err(error) = managed_process::remove(store_path, instance_id).await {
                     return instance_failure(&format!(
-                        "实例进程已停止，但清理受管记录失败：{error}"
+                        "instance process stopped but failed to clean managed record: {error}"
                     ));
                 }
                 return ModelInstanceTaskResult {
                     instance_status: "stopped".to_string(),
-                    message: "已根据平台受管进程记录停止实例".to_string(),
+                    message: "instance stopped using platform managed process record".to_string(),
                     base_url: None,
                     endpoint_url: None,
                     process_id: None,
@@ -411,13 +417,13 @@ pub async fn stop_model_instance_with_store(
             if let Some(store_path) = managed_store_path {
                 if let Err(error) = managed_process::remove(store_path, instance_id).await {
                     return instance_failure(&format!(
-                        "本地实例进程已停止，但清理受管记录失败：{error}"
+                        "local instance process stopped but failed to clean managed record: {error}"
                     ));
                 }
             }
             ModelInstanceTaskResult {
                 instance_status: "stopped".to_string(),
-                message: "本地实例进程已停止".to_string(),
+                message: "local instance process stopped".to_string(),
                 base_url: None,
                 endpoint_url: None,
                 process_id: None,
@@ -427,7 +433,7 @@ pub async fn stop_model_instance_with_store(
                 command: Some(handle.command),
             }
         }
-        Err(error) => instance_failure(&format!("停止进程失败：{error}")),
+        Err(error) => instance_failure(&format!("failed to stop process: {error}")),
     }
 }
 
@@ -453,10 +459,10 @@ pub(crate) async fn run_controlled_script_action(
         .map(str::trim)
         .filter(|value| !value.is_empty())
     else {
-        return instance_failure("custom 脚本路径未配置");
+        return instance_failure("custom script path not configured");
     };
     if verify_controlled_entrypoint(binary_path).await.check_status != "available" {
-        return instance_failure("custom 脚本入口不可用");
+        return instance_failure("custom script entry unavailable");
     }
     let args = vec![action.to_string()];
     let command = command_summary(binary_path, &args);
@@ -470,18 +476,24 @@ pub(crate) async fn run_controlled_script_action(
         Ok(Ok(output)) => output,
         Ok(Err(error)) => {
             return instance_failure_with_details(
-                &format!("custom 脚本执行失败：{error}"),
+                &format!("custom script execution failed: {error}"),
                 None,
                 Some(command),
             );
         }
-        Err(_) => return instance_failure_with_details("custom 脚本执行超时", None, Some(command)),
+        Err(_) => {
+            return instance_failure_with_details(
+                "custom script execution timed out",
+                None,
+                Some(command),
+            )
+        }
     };
     let log_tail = combined_output_log(&output.stdout, &output.stderr);
     if output.status.success() {
         ModelInstanceTaskResult {
             instance_status: success_status.to_string(),
-            message: format!("custom 脚本 {action} 执行成功"),
+            message: format!("custom script {action} completed successfully"),
             base_url: None,
             endpoint_url: None,
             process_id: None,
@@ -494,7 +506,7 @@ pub(crate) async fn run_controlled_script_action(
         let detail =
             first_log_line(log_tail.as_deref()).unwrap_or_else(|| output.status.to_string());
         instance_failure_with_details(
-            &format!("custom 脚本 {action} 执行失败：{detail}"),
+            &format!("custom script {action} failed: {detail}"),
             log_tail,
             Some(command),
         )
@@ -513,10 +525,10 @@ pub(crate) async fn running_instance_log_tail(
 
 fn validate_arg(arg: &str) -> Result<(), String> {
     if arg.trim().is_empty() {
-        return Err("高级参数不能为空".to_string());
+        return Err("extra args must not be empty".to_string());
     }
     if arg.len() > 256 || arg.chars().any(|ch| ch.is_control()) {
-        return Err("高级参数包含非法字符".to_string());
+        return Err("extra args contain invalid characters".to_string());
     }
     Ok(())
 }
@@ -610,7 +622,7 @@ async fn start_docker_instance(
             );
             if let Err(error) = managed_process::upsert(store_path, record).await {
                 return instance_failure_with_details(
-                    &format!("Docker 受管记录写入失败：{error}"),
+                    &format!("failed to write Docker managed record: {error}"),
                     None,
                     Some(command_summary),
                 );
@@ -681,7 +693,7 @@ async fn stop_docker_instance(
             let _ = managed_process::remove(managed_store_path, instance_id).await;
             ModelInstanceTaskResult {
                 instance_status: "stopped".to_string(),
-                message: "Docker 容器已停止".to_string(),
+                message: "Docker container stopped".to_string(),
                 base_url: None,
                 endpoint_url: None,
                 process_id: None,
@@ -724,9 +736,9 @@ async fn check_port_available(host: &str, port: u16) -> Result<(), String> {
         }
         Err(error) => {
             if error.kind() == std::io::ErrorKind::AddrInUse {
-                Err(format!("端口 {addr} 已被占用，无法启动实例"))
+                Err(format!("port {addr} already in use; instance cannot start"))
             } else {
-                Err(format!("端口 {addr} 不可用：{error}"))
+                Err(format!("port {addr} unavailable: {error}"))
             }
         }
     }
@@ -766,17 +778,17 @@ fn spawn_process_monitor(instance_id: String, _managed_store_path: Option<PathBu
                         .child
                         .id()
                         .map(|p| p.to_string())
-                        .unwrap_or_else(|| "未知".to_string());
+                        .unwrap_or_else(|| "unknown".to_string());
                     guard.remove(&instance_id);
                     drop(guard);
-                    // 不移除 managed store 记录：下次心跳 reports() 会检查到进程不存在，
-                    // 报告 status="failed" 并附带具体原因，Server 据此更新实例状态。
+                    // Do not remove managed store record: next heartbeat reports() will detect
+                    // Report status="failed" with specific reason; Server updates instance state accordingly.
                     let _ = platform_log::append(
                         &LogPolicy::default(),
                         "agent.log",
                         "warn",
                         &format!(
-                            "受管实例进程异常退出 instance_id={instance_id} pid={pid} exit_status={status}；managed store 保留记录等待下次心跳上报，最近日志：{}",
+                            "managed instance process exited unexpectedly instance_id={instance_id} pid={pid} exit_status={status}; managed store retains record for next heartbeat reconcile, recent log: {}",
                             &log_tail.chars().take(300).collect::<String>()
                         ),
                     )

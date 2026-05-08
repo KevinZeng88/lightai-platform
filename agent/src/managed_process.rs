@@ -139,20 +139,20 @@ async fn check_record(record: &ManagedProcessRecord) -> ProcessCheck {
     let Some(current_start_time) = process_start_time(record.process_id).await else {
         return ProcessCheck {
             is_running: false,
-            message: "受管进程不存在，可能已异常退出".to_string(),
+            message: "Managed process not found; may have exited abnormally".to_string(),
         };
     };
     if let Some(expected_start_time) = record.process_start_time {
         if current_start_time != expected_start_time {
             return ProcessCheck {
                 is_running: false,
-                message: "PID 已被其它进程复用，无法确认是平台受管实例，已停止管理".to_string(),
+                message: "PID reused by another process; cannot confirm as platform managed instance; management stopped".to_string(),
             };
         }
     }
     ProcessCheck {
         is_running: true,
-        message: "Agent 重启后已恢复受管进程状态：受管进程仍在运行".to_string(),
+        message: "Agent restarted and recovered managed process: still running".to_string(),
     }
 }
 
@@ -176,17 +176,19 @@ async fn platform_kill_process(pid: i64) -> Result<(), String> {
         .arg(pid.to_string())
         .status()
         .await
-        .map_err(|error| format!("停止受管进程失败：{error}"))?;
+        .map_err(|error| format!("Failed to stop managed process: {error}"))?;
     if status.success() {
         Ok(())
     } else {
-        Err(format!("停止受管进程失败：kill 退出状态 {status}"))
+        Err(format!(
+            "Failed to stop managed process: kill exit status {status}"
+        ))
     }
 }
 
 #[cfg(not(target_os = "linux"))]
 async fn platform_kill_process(_pid: i64) -> Result<(), String> {
-    Err("当前平台不支持通过持久 PID 记录停止受管进程".to_string())
+    Err("Platform does not support stopping managed processes via persisted PID".to_string())
 }
 
 #[cfg(target_os = "linux")]

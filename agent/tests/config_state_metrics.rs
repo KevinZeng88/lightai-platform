@@ -32,7 +32,7 @@ state_path = "data/test-agent-state.toml"
 }
 
 #[test]
-fn rejects_removed_legacy_agent_config_fields() {
+fn rejects_removed_agent_config_fields() {
     let path = unique_temp_path("agent-bootstrap-only.toml");
     fs::write(
         &path,

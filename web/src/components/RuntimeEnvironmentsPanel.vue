@@ -6,7 +6,7 @@
     </div>
     <div class="toolbar compact">
       <el-button :loading="loading" @click="loadData">刷新</el-button>
-      <el-button type="primary" @click="openCreate">新增环境</el-button>
+      <el-button v-if="role !== 'viewer'" type="primary" @click="openCreate">新增环境</el-button>
     </div>
   </section>
 
@@ -49,7 +49,7 @@
         {{ formatTime(row.last_checked_at) }}
       </template>
     </el-table-column>
-    <el-table-column label="操作" width="230" fixed="right">
+    <el-table-column v-if="role !== 'viewer'" label="操作" width="230" fixed="right">
       <template #default="{ row }">
         <el-button size="small" @click="check(row)">检查</el-button>
         <el-button size="small" @click="openEdit(row)">编辑</el-button>
@@ -162,6 +162,8 @@
 </template>
 
 <script setup lang="ts">
+defineProps<{ role: string }>()
+
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { ElNotification } from 'element-plus/es/components/notification/index'

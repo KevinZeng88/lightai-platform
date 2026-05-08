@@ -240,7 +240,24 @@
         </template>
       </el-table-column>
     </el-table>
-    <el-empty v-else description="当前节点无 GPU 数据" :image-size="80" />
+    <el-empty v-else :image-size="80">
+      <template #description>
+        <div class="gpu-empty">
+          <p v-if="selectedNode.collector_status === 'no_collector_configured'" class="gpu-empty-reason">
+            未配置 GPU 采集器（collector_root 未设置）
+          </p>
+          <p v-else-if="selectedNode.collector_status === 'collector_configured_but_failed'" class="gpu-empty-reason">
+            采集器执行失败：{{ selectedNode.collector_errors?.join('；') || '未知错误' }}
+          </p>
+          <p v-else-if="selectedNode.collector_status === 'collector_ok_no_devices'" class="gpu-empty-reason">
+            采集器执行成功但未发现 GPU 设备
+          </p>
+          <p v-else class="gpu-empty-reason">
+            当前节点无 GPU 数据
+          </p>
+        </div>
+      </template>
+    </el-empty>
   </el-card>
   <el-card v-else shadow="never" class="section-card">
     <template #header>GPU 列表</template>
@@ -282,6 +299,8 @@
 </template>
 
 <script setup lang="ts">
+defineProps<{ role: string }>()
+
 import { computed, onMounted, ref } from 'vue'
 import TrendChart from './TrendChart.vue'
 import { fetchGpuMetrics, fetchNodeMetrics, fetchNodes } from '../api'
@@ -499,3 +518,12 @@ function syncType(status: string) {
 onMounted(refreshAll)
 defineExpose({ refresh: refreshAll })
 </script>
+
+<style scoped>
+.gpu-empty-reason {
+  font-size: 13px;
+  color: #909399;
+  max-width: 480px;
+  margin: 0 auto;
+}
+</style>

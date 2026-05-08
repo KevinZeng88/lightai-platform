@@ -28,7 +28,7 @@
     <el-form label-width="170px" class="config-form">
       <PolicyFields v-model="globalForm" :allow-inherit="false" />
       <el-form-item>
-        <el-button type="primary" :loading="savingGlobal" @click="saveGlobal">保存全局策略</el-button>
+        <el-button v-if="role === 'admin'" type="primary" :loading="savingGlobal" @click="saveGlobal">保存全局策略</el-button>
         <span class="muted">版本：{{ policies?.global.version ?? '-' }}</span>
       </el-form-item>
     </el-form>
@@ -46,7 +46,7 @@
     <el-form label-width="170px" class="config-form">
       <PolicyFields v-model="nodeForm" :allow-inherit="true" />
       <el-form-item>
-        <el-button type="primary" :loading="savingNode" @click="saveNode">保存节点覆盖</el-button>
+        <el-button v-if="role === 'admin'" type="primary" :loading="savingNode" @click="saveNode">保存节点覆盖</el-button>
         <span class="muted">留空表示继承全局默认；保存后 Agent 会通过主动控制通道获取最新有效配置。</span>
       </el-form-item>
     </el-form>
@@ -69,6 +69,8 @@
 </template>
 
 <script setup lang="ts">
+defineProps<{ role: string }>()
+
 import { computed, defineComponent, h, onMounted, ref, watch } from 'vue'
 import { ElFormItem } from 'element-plus/es/components/form/index'
 import { ElInput } from 'element-plus/es/components/input/index'

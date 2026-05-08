@@ -19,7 +19,6 @@ url = "sqlite://data/test.db"
 retention_days = 14
 
 [auth]
-emergency_control_token = "emergency-control-token-123"
 
 [auth.password]
 min_length = 12
@@ -35,10 +34,6 @@ ttl_secs = 43200
     assert_eq!(config.listen_addr, "127.0.0.1:18080");
     assert_eq!(config.database_url, "sqlite://data/test.db");
     assert_eq!(config.metrics_retention_days, 14);
-    assert_eq!(
-        config.emergency_control_token.as_deref(),
-        Some("emergency-control-token-123")
-    );
 
     let _ = fs::remove_file(path);
 }
@@ -89,7 +84,7 @@ async fn server_platform_log_uses_controlled_files_and_filters_sensitive_lines()
         log_retention_days: 7,
     };
 
-    platform_log::append(&policy, "server.log", "info", "正常日志")
+    platform_log::append(&policy, "server.log", "info", "normal log")
         .await
         .unwrap();
     platform_log::append(&policy, "server.log", "info", "authorization: bearer token")
@@ -99,7 +94,7 @@ async fn server_platform_log_uses_controlled_files_and_filters_sensitive_lines()
         .await
         .unwrap();
 
-    assert!(content.contains("正常日志"));
+    assert!(content.contains("normal log"));
     assert!(!content.contains("bearer token"));
     assert!(platform_log::read_tail(&policy, "../secret", 128)
         .await

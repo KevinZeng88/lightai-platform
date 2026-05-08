@@ -6,7 +6,7 @@
     </div>
     <div class="toolbar compact">
       <el-button :loading="loading" @click="loadData">刷新</el-button>
-      <el-button type="primary" @click="openCreate">新增实例</el-button>
+      <el-button v-if="role !== 'viewer'" type="primary" @click="openCreate">新增实例</el-button>
     </div>
   </section>
 
@@ -49,7 +49,7 @@
         <div v-if="row.process_id" class="muted tiny-text">PID: {{ row.process_id }}</div>
       </template>
     </el-table-column>
-    <el-table-column label="操作" width="360" fixed="right">
+    <el-table-column v-if="role !== 'viewer'" label="操作" width="360" fixed="right">
       <template #default="{ row }">
         <el-button v-if="row.deploy_type === 'external'" size="small" @click="check(row)">检查状态</el-button>
         <el-button v-else size="small" :disabled="row.status !== 'running'" @click="check(row)">检查状态</el-button>
@@ -312,7 +312,7 @@
         <div class="wide-detail"><span class="muted">启动命令</span><p>{{ selectedLogInstance.command ?? '暂无命令摘要' }}</p></div>
       </div>
       <div class="log-toolbar">
-        <el-button size="small" :loading="logRefreshing" @click="refreshLogs">刷新日志</el-button>
+        <el-button v-if="role !== 'viewer'" size="small" :loading="logRefreshing" @click="refreshLogs">刷新日志</el-button>
         <span v-if="logMessage" class="muted">{{ logMessage }}</span>
       </div>
       <pre class="log-box">{{ selectedLogInstance.log_tail ?? selectedLogInstance.last_error ?? '暂无日志' }}</pre>
@@ -321,6 +321,8 @@
 </template>
 
 <script setup lang="ts">
+defineProps<{ role: string }>()
+
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { ElNotification } from 'element-plus/es/components/notification/index'

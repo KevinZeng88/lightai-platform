@@ -113,8 +113,8 @@ pub async fn delete_model_file(pool: &SqlitePool, id: &str) -> Result<(), Stage3
     super::model_trash::ensure_model_file_trash(
         pool,
         id,
-        Some("从模型中删除节点文件路径".to_string()),
-        Some("该操作只移除模型与节点文件路径的关联；真实文件未删除。".to_string()),
+        Some("Remove node file path from model".to_string()),
+        Some("Only removes the model-file association; actual files are not deleted.".to_string()),
     )
     .await?;
     let now = now_unix_secs();
@@ -138,9 +138,9 @@ pub async fn queue_model_file_verification(
     let task_id = Uuid::new_v4().to_string();
     let now = now_unix_secs();
     let wait_message = if node_online(pool, &file.node_id).await? {
-        "等待节点 Agent 执行验证"
+        "Waiting for node Agent to verify"
     } else {
-        "等待节点 Agent 上线后执行验证"
+        "Waiting for node Agent to come online for verification"
     };
     let payload = serde_json::json!({
         "model_file_id": file.id,
@@ -187,7 +187,7 @@ pub(crate) async fn verify_model_file_before_save(
 ) -> Result<VerifiedModelFile, Stage3Error> {
     if !node_online(pool, node_id).await? {
         return Err(Stage3Error::Conflict(
-            "节点 Agent 离线，无法验证模型文件".to_string(),
+            "Node Agent offline, cannot verify model file".to_string(),
         ));
     }
 
@@ -257,12 +257,13 @@ async fn wait_for_model_file_verification(
                     .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
                     .map(|value| verification_error_message(&value))
                     .or_else(|| row.get::<Option<String>, _>("error_message"))
-                    .unwrap_or_else(|| "模型文件验证失败".to_string());
+                    .unwrap_or_else(|| "Model file verification failed".to_string());
                 return Err(Stage3Error::BadRequest(message));
             }
             "timed_out" => {
                 return Err(Stage3Error::Conflict(
-                    "模型文件验证超时，请确认 Agent 在线并重试".to_string(),
+                    "Model file verification timed out; confirm Agent is online and retry"
+                        .to_string(),
                 ));
             }
             _ => {}
@@ -271,7 +272,7 @@ async fn wait_for_model_file_verification(
         if Instant::now() >= deadline {
             agent_tasks::mark_task_timed_out(pool, task_id).await?;
             return Err(Stage3Error::Conflict(
-                "模型文件验证超时，请确认 Agent 在线并重试".to_string(),
+                "Model file verification timed out; confirm Agent is online and retry".to_string(),
             ));
         }
         sleep(Duration::from_millis(100)).await;
@@ -283,7 +284,7 @@ fn verification_error_message(result: &serde_json::Value) -> String {
         .get("message")
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or("模型文件验证失败")
+        .unwrap_or("Model file verification failed")
         .to_string()
 }
 
@@ -385,7 +386,7 @@ async fn model_file_rows(
         let task_status: Option<String> = row.get("verify_task_status");
         if status == "verifying" && task_status.as_deref() == Some("timed_out") {
             sqlx::query(
-                "UPDATE model_files SET status = 'verify_timeout', last_error = '验证超时', updated_at = ? WHERE id = ?",
+                "UPDATE model_files SET status = 'verify_timeout', last_error = 'verification timed out', updated_at = ? WHERE id = ?",
             )
             .bind(now)
             .bind(row.get::<String, _>("id"))

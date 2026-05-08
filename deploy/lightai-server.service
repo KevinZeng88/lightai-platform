@@ -10,16 +10,16 @@ Group=lightai
 WorkingDirectory=/opt/lightai
 # Put LIGHTAI_SERVER_CONFIG and optional non-secret runtime settings here.
 # First admin creation should use the Web setup flow.
-EnvironmentFile=/etc/lightai/server.env
-ExecStart=/opt/lightai/bin/lightai-server
+EnvironmentFile=/etc/lightai/lightai-server.env
+ExecStart=/opt/lightai/bin/lightai-server --config /opt/lightai/lightai-server.toml
 Restart=always
 RestartSec=3
 
-# Server 不管理子进程，KillMode=process 或 control-group 均安全。
-# 此处显式设为 process 以保持与 Agent 配置一致。
+# Server manages no child processes; KillMode=process or control-group are both safe.
+# Explicitly set to process for consistency with Agent config.
 KillMode=process
 
-# 安全加固
+# Security hardening
 NoNewPrivileges=yes
 ProtectSystem=strict
 ProtectHome=yes

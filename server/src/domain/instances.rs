@@ -104,30 +104,28 @@ async fn create_local_model_instance(
     let node_id = request
         .node_id
         .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("本地实例必须选择节点".to_string()))?;
-    let runtime_environment_id = request
-        .runtime_environment_id
-        .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("本地实例必须选择运行环境".to_string()))?;
-    let model_file_id = request
-        .model_file_id
-        .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("本地实例必须选择已验证模型文件".to_string()))?;
+        .ok_or_else(|| Stage3Error::BadRequest("Local instance requires a node".to_string()))?;
+    let runtime_environment_id = request.runtime_environment_id.as_deref().ok_or_else(|| {
+        Stage3Error::BadRequest("Local instance requires a runtime environment".to_string())
+    })?;
+    let model_file_id = request.model_file_id.as_deref().ok_or_else(|| {
+        Stage3Error::BadRequest("Local instance requires a verified model file".to_string())
+    })?;
     let env = runtime_environment(pool, runtime_environment_id).await?;
     if env.node_id.as_deref() != Some(node_id) {
         return Err(Stage3Error::BadRequest(
-            "运行环境不属于所选节点".to_string(),
+            "Runtime environment does not belong to the selected node".to_string(),
         ));
     }
     if !super::runtimes::runtime_environment_usable(env.check_status.as_deref()) {
         return Err(Stage3Error::BadRequest(
-            "运行环境未通过 Agent 检查".to_string(),
+            "Runtime environment has not passed Agent check".to_string(),
         ));
     }
     let file = verified_model_file_for_instance(pool, model_file_id).await?;
     if file.node_id != node_id {
         return Err(Stage3Error::BadRequest(
-            "模型文件不属于所选节点".to_string(),
+            "Model file does not belong to the selected node".to_string(),
         ));
     }
 
@@ -222,7 +220,7 @@ pub async fn update_model_instance(
             || request.model_name.is_some();
         if is_config_change {
             return Err(Stage3Error::Conflict(
-                "实例正在运行中，不能修改配置。请先停止实例。".to_string(),
+                "Cannot modify a running instance. Stop it first.".to_string(),
             ));
         }
     }
@@ -308,7 +306,7 @@ pub async fn delete_model_instance(pool: &SqlitePool, id: &str) -> Result<(), St
         "running" | "starting" | "stopping"
     ) {
         return Err(Stage3Error::Conflict(
-            "实例正在运行中，不能删除。请先停止实例。".to_string(),
+            "Cannot delete a running instance. Stop it first.".to_string(),
         ));
     }
     let result = sqlx::query("DELETE FROM model_instances WHERE id = ?")
@@ -335,14 +333,14 @@ pub async fn check_model_instance(
         let node_id = instance
             .node_id
             .as_deref()
-            .ok_or_else(|| Stage3Error::BadRequest("本地实例缺少节点".to_string()))?;
+            .ok_or_else(|| Stage3Error::BadRequest("Local instance missing node".to_string()))?;
         if !node_online(pool, node_id).await? {
             let _ = crate::platform_log::append(
                 &crate::platform_log::global(),
                 "server.log",
                 "warn",
                 &format!(
-                    "check_instance: instance={id} node={node_id} agent offline, 无法检查实例状态"
+                    "check_instance: instance={id} node={node_id} agent offline, cannot check status"
                 ),
             )
             .await;
@@ -350,7 +348,7 @@ pub async fn check_model_instance(
                 pool,
                 id,
                 instance.status.as_str(),
-                Some("Agent 离线，无法检查实例状态"),
+                Some("Agent offline, cannot check instance status"),
             )
             .await;
         }
@@ -397,7 +395,7 @@ pub async fn test_model_instance(
     }
     if instance.status != "running" {
         return Err(Stage3Error::BadRequest(
-            "本地实例未运行，无法测试".to_string(),
+            "Local instance is not running, cannot test".to_string(),
         ));
     }
     run_local_instance_task(pool, id, "test_model_instance", "running").await
@@ -412,31 +410,30 @@ async fn run_local_instance_task(
     let instance = model_instance(pool, id).await?;
     if instance.deploy_type != "local" {
         return Err(Stage3Error::BadRequest(
-            "External 实例不由平台启动或停止".to_string(),
+            "External instances are not started or stopped by the platform".to_string(),
         ));
     }
     let node_id = instance
         .node_id
         .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("本地实例缺少节点".to_string()))?;
+        .ok_or_else(|| Stage3Error::BadRequest("Local instance missing node".to_string()))?;
     if !node_online(pool, node_id).await? {
         return Err(Stage3Error::Conflict(
-            "节点 Agent 离线，无法执行本地实例任务".to_string(),
+            "Node Agent offline, cannot execute local instance task".to_string(),
         ));
     }
     let model_file_id = instance
         .model_file_id
         .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("本地实例缺少模型文件".to_string()))?;
+        .ok_or_else(|| Stage3Error::BadRequest("Local instance missing model file".to_string()))?;
     let file = verified_model_file_for_instance(pool, model_file_id).await?;
-    let runtime_environment_id = instance
-        .runtime_environment_id
-        .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("本地实例缺少运行环境".to_string()))?;
+    let runtime_environment_id = instance.runtime_environment_id.as_deref().ok_or_else(|| {
+        Stage3Error::BadRequest("Local instance missing runtime environment".to_string())
+    })?;
     let env = runtime_environment(pool, runtime_environment_id).await?;
     if !super::runtimes::runtime_environment_usable(env.check_status.as_deref()) {
         return Err(Stage3Error::BadRequest(
-            "运行环境未通过 Agent 检查".to_string(),
+            "Runtime environment has not passed Agent check".to_string(),
         ));
     }
     let params = parse_instance_params(instance.params_json.as_deref())?;
@@ -527,21 +524,27 @@ async fn wait_for_model_instance_task(
                             .map(str::to_string)
                     })
                     .or_else(|| row.get::<Option<String>, _>("error_message"))
-                    .unwrap_or_else(|| "本地实例任务失败".to_string());
+                    .unwrap_or_else(|| "Local instance task failed".to_string());
                 return Err(Stage3Error::Conflict(message));
             }
             "timed_out" => {
                 return Err(Stage3Error::Conflict(
-                    "本地实例任务超时，请确认 Agent 在线并重试".to_string(),
+                    "Local instance task timed out; confirm Agent is online and retry".to_string(),
                 ));
             }
             _ => {}
         }
         if Instant::now() >= deadline {
             agent_tasks::mark_task_timed_out(pool, task_id).await?;
-            update_instance_check(pool, instance_id, "failed", Some("本地实例任务超时")).await?;
+            update_instance_check(
+                pool,
+                instance_id,
+                "failed",
+                Some("local instance task timed out"),
+            )
+            .await?;
             return Err(Stage3Error::Conflict(
-                "本地实例任务超时，请确认 Agent 在线并重试".to_string(),
+                "Local instance task timed out; confirm Agent is online and retry".to_string(),
             ));
         }
         sleep(Duration::from_millis(100)).await;
@@ -677,28 +680,30 @@ fn parse_instance_params(value: Option<&str>) -> Result<serde_json::Value, Stage
         .map_err(|_| Stage3Error::BadRequest("params_json must be valid JSON".to_string()))?;
     if !parsed.is_object() {
         return Err(Stage3Error::BadRequest(
-            "运行参数必须是 JSON 对象".to_string(),
+            "runtime params must be a JSON object".to_string(),
         ));
     }
     if let Some(host) = parsed.get("host").and_then(|value| value.as_str()) {
         if host.trim().is_empty() || host.len() > 128 || host.chars().any(char::is_control) {
-            return Err(Stage3Error::BadRequest("监听地址非法".to_string()));
+            return Err(Stage3Error::BadRequest(
+                "invalid listen address".to_string(),
+            ));
         }
     }
     if let Some(port) = parsed.get("port").and_then(|value| value.as_u64()) {
         if port == 0 || port > u16::MAX as u64 {
-            return Err(Stage3Error::BadRequest("监听端口非法".to_string()));
+            return Err(Stage3Error::BadRequest("invalid listen port".to_string()));
         }
     }
     if let Some(extra_args) = parsed.get("extra_args").and_then(|value| value.as_array()) {
         for arg in extra_args {
             let Some(arg) = arg.as_str() else {
                 return Err(Stage3Error::BadRequest(
-                    "高级参数必须是一行一个字符串".to_string(),
+                    "extra args must be one string per line".to_string(),
                 ));
             };
             if arg.trim().is_empty() || arg.len() > 256 || arg.chars().any(char::is_control) {
-                return Err(Stage3Error::BadRequest("高级参数非法".to_string()));
+                return Err(Stage3Error::BadRequest("invalid extra args".to_string()));
             }
         }
     }
@@ -719,11 +724,11 @@ async fn verified_model_file_for_instance(
     .bind(model_file_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| Stage3Error::BadRequest("模型文件不存在".to_string()))?;
+    .ok_or_else(|| Stage3Error::BadRequest("model file does not exist".to_string()))?;
     let status: String = row.get("status");
     if status != "verified" {
         return Err(Stage3Error::BadRequest(
-            "本地实例只能使用已验证通过的模型文件".to_string(),
+            "local instance requires a verified model file".to_string(),
         ));
     }
     Ok(InstanceModelFile {

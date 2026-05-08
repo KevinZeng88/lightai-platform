@@ -29,14 +29,14 @@ pub(crate) async fn read_instance_log(
         if tail.trim().is_empty() {
             return ReadInstanceLogResult {
                 log_status: "available".to_string(),
-                content: "实例进程正在运行，暂无日志输出".to_string(),
-                message: "从内存缓冲区读取".to_string(),
+                content: "instance process is running; no log output yet".to_string(),
+                message: "read from memory buffer".to_string(),
             };
         }
         return ReadInstanceLogResult {
             log_status: "available".to_string(),
             content: tail,
-            message: "从内存缓冲区读取".to_string(),
+            message: "read from memory buffer".to_string(),
         };
     }
 
@@ -53,21 +53,21 @@ pub(crate) async fn read_instance_log(
                         if content.trim().is_empty() {
                             return ReadInstanceLogResult {
                                 log_status: "available".to_string(),
-                                content: "Docker 容器日志为空".to_string(),
-                                message: format!("从 docker logs {} 读取", container_ref),
+                                content: "Docker container log is empty".to_string(),
+                                message: format!("read from docker logs {}", container_ref),
                             };
                         }
                         return ReadInstanceLogResult {
                             log_status: "available".to_string(),
                             content,
-                            message: format!("从 docker logs {} 读取", container_ref),
+                            message: format!("read from docker logs {}", container_ref),
                         };
                     }
                     Err(error) => {
                         return ReadInstanceLogResult {
                             log_status: "failed".to_string(),
                             content: String::new(),
-                            message: format!("Docker 日志读取失败：{error}"),
+                            message: format!("Docker log read failed: {error}"),
                         };
                     }
                 }
@@ -79,21 +79,21 @@ pub(crate) async fn read_instance_log(
                         if tail.trim().is_empty() {
                             return ReadInstanceLogResult {
                                 log_status: "available".to_string(),
-                                content: "日志文件为空".to_string(),
-                                message: format!("从日志文件 {} 读取", log_path),
+                                content: "log file is empty".to_string(),
+                                message: format!("read from log file {}", log_path),
                             };
                         }
                         return ReadInstanceLogResult {
                             log_status: "available".to_string(),
                             content: sanitize_log(&tail),
-                            message: format!("从日志文件 {} 读取", log_path),
+                            message: format!("read from log file {}", log_path),
                         };
                     }
                     Err(error) => {
                         return ReadInstanceLogResult {
                             log_status: "failed".to_string(),
                             content: String::new(),
-                            message: format!("读取实例日志文件失败：{error}"),
+                            message: format!("failed to read instance log file: {error}"),
                         };
                     }
                 }
@@ -104,6 +104,6 @@ pub(crate) async fn read_instance_log(
     ReadInstanceLogResult {
         log_status: "failed".to_string(),
         content: String::new(),
-        message: "未找到实例日志；实例可能已停止或 Agent 已重启".to_string(),
+        message: "no instance log found; instance may have stopped or Agent restarted".to_string(),
     }
 }

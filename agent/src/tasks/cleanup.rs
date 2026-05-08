@@ -7,62 +7,68 @@ pub async fn cleanup_model_file(
     allowed_model_dirs: &[String],
 ) -> CleanupModelFileResult {
     if allowed_model_dirs.is_empty() {
-        return cleanup_failure("未配置受控模型目录，拒绝删除文件");
+        return cleanup_failure("no allowed model directory configured; refusing to delete file");
     }
     if path.trim().is_empty() || has_parent_dir(path) {
-        return cleanup_failure("路径非法");
+        return cleanup_failure("invalid path");
     }
     let target = Path::new(path);
     if !target.is_absolute() {
-        return cleanup_failure("路径必须是绝对路径");
+        return cleanup_failure("path must be absolute");
     }
 
     let allowed_dirs = match allowed_canonical_dirs(allowed_model_dirs).await {
         AllowedDirResolution::Dirs(dirs) => dirs,
-        AllowedDirResolution::InvalidConfig => return cleanup_failure("受控模型目录配置非法"),
-        AllowedDirResolution::Missing => return cleanup_failure("受控模型目录不存在"),
-        AllowedDirResolution::Inaccessible => return cleanup_failure("受控模型目录不可访问"),
+        AllowedDirResolution::InvalidConfig => {
+            return cleanup_failure("allowed model directory config is invalid")
+        }
+        AllowedDirResolution::Missing => {
+            return cleanup_failure("allowed model directory does not exist")
+        }
+        AllowedDirResolution::Inaccessible => {
+            return cleanup_failure("allowed model directory not accessible")
+        }
     };
     if allowed_dirs.is_empty() {
-        return cleanup_failure("受控模型目录配置非法");
+        return cleanup_failure("allowed model directory config is invalid");
     }
 
     let metadata = match tokio::fs::symlink_metadata(target).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return cleanup_failure("文件不存在");
+            return cleanup_failure("file does not exist");
         }
         Err(error) => {
-            return cleanup_failure(&format!("读取文件信息失败：{error}"));
+            return cleanup_failure(&format!("failed to read file info: {error}"));
         }
     };
 
     if metadata.file_type().is_symlink() {
-        return cleanup_failure("安全风险：拒绝删除软链接");
+        return cleanup_failure("Security risk: refusing to delete symlink");
     }
     if !metadata.is_file() {
-        return cleanup_failure("拒绝删除目录或非普通文件");
+        return cleanup_failure("refusing to delete directory or non-regular file");
     }
 
     let canonical_target = match tokio::fs::canonicalize(target).await {
         Ok(path) => path,
         Err(error) => {
-            return cleanup_failure(&format!("解析文件路径失败：{error}"));
+            return cleanup_failure(&format!("failed to resolve file path: {error}"));
         }
     };
     if !allowed_dirs
         .iter()
         .any(|allowed_dir| canonical_target.starts_with(allowed_dir))
     {
-        return cleanup_failure("文件不在受控模型目录内");
+        return cleanup_failure("file not within allowed model directory");
     }
 
     match tokio::fs::remove_file(target).await {
         Ok(()) => CleanupModelFileResult {
             cleanup_status: "deleted".to_string(),
-            message: "文件已清理".to_string(),
+            message: "file cleaned up".to_string(),
         },
-        Err(error) => cleanup_failure(&format!("删除文件失败：{error}")),
+        Err(error) => cleanup_failure(&format!("failed to delete file: {error}")),
     }
 }
 

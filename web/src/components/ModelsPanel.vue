@@ -6,7 +6,7 @@
     </div>
     <div class="toolbar compact">
       <el-button :loading="loading" @click="loadData">刷新</el-button>
-      <el-button type="primary" @click="openCreate">新增模型</el-button>
+      <el-button v-if="role !== 'viewer'" type="primary" @click="openCreate">新增模型</el-button>
     </div>
   </section>
 
@@ -21,7 +21,7 @@
               <strong>节点模型路径</strong>
               <p class="muted">支持单文件模型和目录模型；同一路径在不同节点也需要分别验证。</p>
             </div>
-            <el-button size="small" type="primary" @click="openFileCreate(row)">新增节点路径</el-button>
+            <el-button v-if="role !== 'viewer'" size="small" type="primary" @click="openFileCreate(row)">新增节点路径</el-button>
           </div>
           <el-table :data="filesByModel[row.id] ?? []" row-key="id" size="small" border>
             <el-table-column label="节点" min-width="150">
@@ -51,7 +51,7 @@
             <el-table-column label="失败原因" min-width="200">
               <template #default="{ row: file }">{{ file.last_error ?? '-' }}</template>
             </el-table-column>
-            <el-table-column label="操作" width="230" fixed="right">
+            <el-table-column v-if="role !== 'viewer'" label="操作" width="230" fixed="right">
               <template #default="{ row: file }">
                 <el-button size="small" @click="verifyFile(file)">验证文件</el-button>
                 <el-button size="small" @click="openFileEdit(row, file)">编辑</el-button>
@@ -79,7 +79,7 @@
     <el-table-column label="最近验证" width="180">
       <template #default="{ row }">{{ formatTime(row.last_file_verified_at) }}</template>
     </el-table-column>
-    <el-table-column label="操作" width="220" fixed="right">
+    <el-table-column v-if="role !== 'viewer'" label="操作" width="220" fixed="right">
       <template #default="{ row }">
         <el-button size="small" @click="openEdit(row)">编辑</el-button>
         <el-button size="small" type="danger" @click="remove(row)">删除配置</el-button>
@@ -215,6 +215,8 @@
 </template>
 
 <script setup lang="ts">
+defineProps<{ role: string }>()
+
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'

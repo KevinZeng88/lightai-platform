@@ -53,7 +53,7 @@ pub(super) fn build_launch_args(
             args.extend(params.extra_args.clone());
             Ok(args)
         }
-        _ => Err("后端类型不受支持".to_string()),
+        _ => Err("backend type not supported".to_string()),
     }
 }
 
@@ -77,7 +77,7 @@ fn sanitize_arg_for_display(arg: &str) -> String {
     .iter()
     .any(|needle| lower.contains(needle))
     {
-        "[已隐藏]".to_string()
+        "[redacted]".to_string()
     } else {
         arg.to_string()
     }

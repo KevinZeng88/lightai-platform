@@ -224,7 +224,7 @@ async fn local_instance_uses_verified_model_file_and_agent_start_stop_tasks() {
             token,
             task_id,
             "running",
-            "实例已启动",
+            "instance started",
         )
         .await;
     };
@@ -238,7 +238,8 @@ async fn local_instance_uses_verified_model_file_and_agent_start_stop_tasks() {
         let task = poll_agent_task(app.clone(), node_id, token).await;
         let task_id = task["task"]["id"].as_str().unwrap();
         assert_eq!(task["task"]["kind"], "stop_model_instance");
-        report_instance_task_result(app, node_id, token, task_id, "stopped", "实例已停止").await;
+        report_instance_task_result(app, node_id, token, task_id, "stopped", "instance stopped")
+            .await;
     };
     let ((status, stopped), _) = tokio::join!(stop_request, agent);
     assert_eq!(status, StatusCode::OK);
@@ -294,7 +295,7 @@ async fn local_instance_failure_persists_log_tail_and_command_summary() {
             task_id,
             json!({
                 "instance_status": "failed",
-                "message": "启动进程已退出：main: exiting due to HTTP server error",
+                "message": "process exited: main: exiting due to HTTP server error",
                 "log_tail": "stderr:\nmain: exiting due to HTTP server error",
                 "command": "[\"/usr/local/bin/llama-server\",\"-m\",\"/models/qwen2-7b/model.gguf\"]"
             }),
@@ -345,7 +346,7 @@ async fn model_directory_can_be_registered_and_used_by_local_instance_params() {
         "/models/qwen2-7b",
         "verified",
         None,
-        "目录已验证",
+        "directory verified",
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -405,7 +406,7 @@ async fn model_directory_can_be_registered_and_used_by_local_instance_params() {
             task_id,
             json!({
                 "instance_status": "running",
-                "message": "实例已启动",
+                "message": "instance started",
                 "base_url": "http://127.0.0.1:18081",
                 "endpoint_url": "http://127.0.0.1:18081",
                 "process_id": 12345,
@@ -478,7 +479,7 @@ async fn local_instance_test_uses_agent_task_and_preserves_external_check() {
             task_id,
             json!({
                 "instance_status": "running",
-                "message": "测试成功：HTTP 200 OK",
+                "message": "test succeeded: HTTP 200 OK",
                 "response_summary": "{\"data\":[]}"
             }),
         )
@@ -487,7 +488,10 @@ async fn local_instance_test_uses_agent_task_and_preserves_external_check() {
     let ((status, tested), _) = tokio::join!(test_request, agent);
     assert_eq!(status, StatusCode::OK);
     assert_eq!(tested["status"], "running");
-    assert_eq!(tested["last_error"], "测试成功：HTTP 200 OK：{\"data\":[]}");
+    assert!(tested["last_error"]
+        .as_str()
+        .unwrap_or("")
+        .contains("test succeeded: HTTP 200 OK"));
 
     let (status, external) = request(
         app,

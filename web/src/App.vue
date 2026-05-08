@@ -128,28 +128,28 @@
       </div>
       <el-tabs v-model="activeTab" class="main-tabs" @tab-change="refreshActiveTab">
         <el-tab-pane label="节点监控" name="nodes">
-          <NodesPanel ref="nodesPanel" />
+          <NodesPanel ref="nodesPanel" :role="currentUser.effective_role" />
         </el-tab-pane>
         <el-tab-pane label="配置" name="config">
-          <ConfigPanel ref="configPanel" />
+          <ConfigPanel ref="configPanel" :role="currentUser.effective_role" />
         </el-tab-pane>
         <el-tab-pane label="运行环境" name="runtime">
-          <RuntimeEnvironmentsPanel ref="runtimePanel" />
+          <RuntimeEnvironmentsPanel ref="runtimePanel" :role="currentUser.effective_role" />
         </el-tab-pane>
         <el-tab-pane label="模型" name="models">
-          <ModelsPanel ref="modelsPanel" />
+          <ModelsPanel ref="modelsPanel" :role="currentUser.effective_role" />
         </el-tab-pane>
         <el-tab-pane label="实例" name="instances">
-          <InstancesPanel ref="instancesPanel" />
+          <InstancesPanel ref="instancesPanel" :role="currentUser.effective_role" />
         </el-tab-pane>
         <el-tab-pane label="模型垃圾箱" name="trash">
-          <TrashPanel ref="trashPanel" />
+          <TrashPanel ref="trashPanel" :role="currentUser.effective_role" />
         </el-tab-pane>
         <el-tab-pane label="日志审计" name="logs">
-          <LogsAuditPanel ref="logsPanel" />
+          <LogsAuditPanel ref="logsPanel" :role="currentUser.effective_role" />
         </el-tab-pane>
         <el-tab-pane label="采集器登记" name="collectors">
-          <CollectorRegistryPanel ref="collectorsPanel" />
+          <CollectorRegistryPanel ref="collectorsPanel" :role="currentUser.effective_role" />
         </el-tab-pane>
         <el-tab-pane v-if="currentUser.effective_role === 'admin'" label="用户与组" name="users">
           <UsersPanel ref="usersPanel" />

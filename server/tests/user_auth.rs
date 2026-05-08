@@ -4,12 +4,12 @@ use lightai_server::{db, repository, routes};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+mod common;
+
 async fn test_app() -> (axum::Router, sqlx::SqlitePool) {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     db::migrate(&pool).await.unwrap();
-    repository::ensure_initial_admin(&pool, "admin", "admin-password-123")
-        .await
-        .unwrap();
+    common::ensure_initial_admin(&pool, "admin", "admin-password-123").await;
     (routes::app(pool.clone()), pool)
 }
 
@@ -779,7 +779,7 @@ async fn role_permission_matrix_is_enforced_by_effective_role() {
 }
 
 #[tokio::test]
-async fn control_plane_audit_records_logged_in_actor_and_emergency_actor() {
+async fn control_plane_audit_records_logged_in_actor() {
     let (app, pool) = test_app().await;
     let admin_cookie = login_cookie(app.clone(), "admin", "admin-password-123").await;
 
@@ -808,6 +808,8 @@ async fn control_plane_audit_records_logged_in_actor_and_emergency_actor() {
             actor_type: Some("user".to_string()),
             result: Some("failed".to_string()),
             from: None,
+            limit: None,
+            offset: None,
             to: None,
         },
     )
@@ -820,46 +822,4 @@ async fn control_plane_audit_records_logged_in_actor_and_emergency_actor() {
         .as_deref()
         .unwrap_or_default()
         .contains("\"effective_role\":\"admin\""));
-
-    let emergency_app =
-        routes::app_with_emergency_token(pool.clone(), "test-emergency-token".to_string());
-    let response = emergency_app
-        .oneshot(
-            Request::builder()
-                .method("POST")
-                .uri("/api/models")
-                .header(header::CONTENT_TYPE, "application/json")
-                .header(header::AUTHORIZATION, "Bearer test-emergency-token")
-                .body(Body::from(
-                    json!({
-                        "name": "emergency-audit-model",
-                        "model_type": "llm",
-                        "initial_file": { "node_id": "missing-node", "path": "/models/missing.gguf" }
-                    })
-                    .to_string(),
-                ))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_ne!(response.status(), StatusCode::FORBIDDEN);
-
-    let audits = repository::list_audit_events(
-        &pool,
-        lightai_server::models::AuditQuery {
-            operation_type: Some("model.create".to_string()),
-            target_type: None,
-            target_id: None,
-            node_id: None,
-            instance_id: None,
-            actor_type: Some("system-emergency".to_string()),
-            result: Some("failed".to_string()),
-            from: None,
-            to: None,
-        },
-    )
-    .await
-    .unwrap();
-    assert_eq!(audits.events.len(), 1);
-    assert_eq!(audits.events[0].actor_id.as_deref(), Some("emergency"));
 }

@@ -200,7 +200,9 @@ pub async fn record_agent_task_result(
         let last_error = if file_status == "verified" {
             None
         } else {
-            error_message.as_deref().or(Some("文件验证失败"))
+            error_message
+                .as_deref()
+                .or(Some("File verification failed"))
         };
         if let Some(model_file_id) = model_file_id {
             sqlx::query(
@@ -231,9 +233,9 @@ pub async fn record_agent_task_result(
         let message = error_message
             .as_deref()
             .unwrap_or(if request.status == "succeeded" {
-                "文件已清理"
+                "file cleaned up"
             } else {
-                "文件清理失败"
+                "File cleanup failed"
             });
         if request.status == "succeeded" {
             sqlx::query(
@@ -294,7 +296,7 @@ pub async fn record_agent_task_result(
         } else {
             error_message
                 .clone()
-                .or(Some("实例任务执行失败".to_string()))
+                .or(Some("Instance task execution failed".to_string()))
         };
         if kind == "stop_model_instance" && request.status == "succeeded" {
             last_error = request
@@ -315,7 +317,7 @@ pub async fn record_agent_task_result(
                 .result
                 .get("message")
                 .and_then(|value| value.as_str())
-                .unwrap_or("测试成功");
+                .unwrap_or("Test succeeded");
             let summary = request
                 .result
                 .get("response_summary")
@@ -416,7 +418,7 @@ pub(crate) async fn mark_timed_out_tasks(pool: &SqlitePool) -> Result<(), Stage3
                     .and_then(|value| value.as_str())
                 {
                     sqlx::query(
-                        "UPDATE model_files SET status = 'verify_timeout', last_error = '验证超时', updated_at = ? WHERE id = ?",
+                        "UPDATE model_files SET status = 'verify_timeout', last_error = 'verification timed out', updated_at = ? WHERE id = ?",
                     )
                     .bind(now)
                     .bind(model_file_id)
@@ -433,7 +435,7 @@ pub(crate) async fn mark_timed_out_tasks(pool: &SqlitePool) -> Result<(), Stage3
                         pool,
                         trash_id,
                         "cleanup_timeout",
-                        "文件清理超时",
+                        "file cleanup timed out",
                     )
                     .await?;
                 }
@@ -452,7 +454,7 @@ pub(crate) async fn mark_timed_out_tasks(pool: &SqlitePool) -> Result<(), Stage3
                         pool,
                         instance_id,
                         "failed",
-                        Some("本地实例任务超时"),
+                        Some("Local instance task timed out"),
                     )
                     .await?;
                 }
@@ -467,7 +469,7 @@ pub(crate) async fn mark_task_timed_out(
     task_id: &str,
 ) -> Result<(), Stage3Error> {
     sqlx::query(
-        "UPDATE agent_tasks SET status = 'timed_out', error_message = '任务执行超时', updated_at = ? WHERE id = ? AND status IN ('queued', 'running')",
+        "UPDATE agent_tasks SET status = 'timed_out', error_message = 'task execution timed out', updated_at = ? WHERE id = ? AND status IN ('queued', 'running')",
     )
     .bind(crate::util::now_unix_secs())
     .bind(task_id)

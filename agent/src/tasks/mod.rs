@@ -115,7 +115,7 @@ pub async fn run_once(
         log_policy,
         "agent.log",
         "info",
-        &format!("Agent 开始执行任务 task_id={} kind={}", task.id, task.kind),
+        &format!("Agent starting task task_id={} kind={}", task.id, task.kind),
     )
     .await;
 
@@ -166,7 +166,7 @@ pub async fn run_once(
                     serde_json::json!({
                         "log_status": "available",
                         "content": content,
-                        "message": "Agent 日志读取成功"
+                        "message": "Agent log read succeeded"
                     }),
                 ),
                 Err(error) => (
@@ -174,7 +174,7 @@ pub async fn run_once(
                     serde_json::json!({
                         "log_status": "failed",
                         "content": "",
-                        "message": format!("Agent 日志读取失败：{error}")
+                        "message": format!("Agent log read failed: {error}")
                     }),
                 ),
             }
@@ -231,7 +231,7 @@ pub async fn run_once(
             "failed".to_string(),
             serde_json::json!({
                 "cleanup_status": "failed",
-                "message": "未知任务类型"
+                "message": "unknown task type"
             }),
         ),
     };
@@ -258,7 +258,7 @@ pub async fn test_model_instance(payload: &serde_json::Value) -> ModelInstanceTa
         .and_then(|value| value.as_str())
         .or_else(|| payload.get("base_url").and_then(|value| value.as_str()))
     else {
-        return instance_failure("实例缺少测试地址");
+        return instance_failure("instance missing test URL");
     };
     let urls = match build_test_urls(
         payload
@@ -275,7 +275,9 @@ pub async fn test_model_instance(payload: &serde_json::Value) -> ModelInstanceTa
         .build()
     {
         Ok(client) => client,
-        Err(error) => return instance_failure(&format!("测试客户端初始化失败：{error}")),
+        Err(error) => {
+            return instance_failure(&format!("test client initialization failed: {error}"))
+        }
     };
     let mut failures = Vec::new();
     for url in &urls {
@@ -287,7 +289,7 @@ pub async fn test_model_instance(payload: &serde_json::Value) -> ModelInstanceTa
                 if status.is_success() || status.is_redirection() {
                     return ModelInstanceTaskResult {
                         instance_status: "running".to_string(),
-                        message: format!("测试成功：HTTP {status} {url}"),
+                        message: format!("test succeeded: HTTP {status} {url}"),
                         base_url: None,
                         endpoint_url: None,
                         process_id: None,
@@ -299,7 +301,7 @@ pub async fn test_model_instance(payload: &serde_json::Value) -> ModelInstanceTa
                 }
                 failures.push(format!("{url} -> HTTP {status} {summary}"));
             }
-            Err(error) => failures.push(format!("{url} -> 请求失败：{error}")),
+            Err(error) => failures.push(format!("{url} -> request failed: {error}")),
         }
     }
     instance_failure(&summarize_test_failures(&urls, &failures))

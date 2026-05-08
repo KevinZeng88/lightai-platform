@@ -9,7 +9,7 @@ use tower::ServiceExt;
 async fn health_returns_ok_for_server() {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     db::migrate(&pool).await.unwrap();
-    let response = routes::app_with_emergency_token(pool, "test-emergency-token".to_string())
+    let response = routes::app(pool)
         .oneshot(
             Request::builder()
                 .uri("/health")

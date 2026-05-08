@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 
 const AGENT_VERSION: &str = env!("CARGO_PKG_VERSION");
 
-const AGENT_HELP: &str = r#"lightai-agent — LightAI GPU 模型管理平台 Agent
+const AGENT_HELP: &str = r#"lightai-agent — LightAI GPU Model Management Platform Agent
 
 USAGE:
     lightai-agent [OPTIONS]
@@ -16,16 +16,19 @@ USAGE:
     lightai-agent collector <SUBCOMMAND>
 
 OPTIONS:
-    --config <PATH>  Path to agent config TOML file
+    --config <PATH>
+                Path to LightAI Agent config TOML file.
+                Env: LIGHTAI_AGENT_CONFIG.
+                Default: /etc/lightai/lightai-agent.toml.
+                Falls back to built-in defaults if the file does not exist.
     --help           Show this help message
     --version        Show version information
 
 CONFIGURATION (priority order):
     1. --config <PATH>
     2. LIGHTAI_AGENT_CONFIG environment variable
-    3. <executable_dir>/agent.toml
-    4. <executable_dir>/lightai-agent.toml
-    5. Built-in defaults
+    3. /etc/lightai/lightai-agent.toml
+    4. Built-in defaults
 
     Config file supports [agent] and optional [gpu_collectors] sections.
     When [gpu_collectors].root is set, collectors must be registered in the
@@ -41,27 +44,33 @@ CONFIG SUBCOMMANDS:
 COLLECTOR SUBCOMMANDS:
     lightai-agent collector inspect <DIR>
         Inspect a collector directory and output registry-ready JSON.
-        The output can be pasted into the Web '采集器登记' page.
+        The output can be pasted into the Web collector registry page.
         This command does NOT register, approve, or execute any script.
 
 DESCRIPTION:
-    LightAI Agent 运行在 GPU 节点上，负责：
-    - 主动向 Server 注册并上报心跳
-    - 执行 GPU 设备发现和指标采集
-    - 受控执行模型验证、实例启停、文件清理等任务
+    LightAI Agent runs on GPU nodes. Responsibilities:
+    - Register with Server and report heartbeat
+    - Execute GPU device discovery and metrics collection
+    - Execute controlled tasks: model verification, instance start/stop, file cleanup
 "#;
 
 const CONFIG_HELP: &str = r#"lightai-agent config — Configuration file management
 
 USAGE:
-    lightai-agent config init <PATH> [--force]
+    lightai-agent config init [PATH] [--force]
 
 SUBCOMMANDS:
-    init    Generate a configuration template at <PATH>.
+    init    Generate a LightAI Agent config template.
+            If PATH is omitted, writes ./lightai-agent.toml
+            in the current working directory.
+            Use --force to overwrite an existing file.
 
 EXAMPLES:
-    lightai-agent config init ./agent.toml
-    lightai-agent config init /etc/lightai/agent.toml --force
+    lightai-agent config init
+    lightai-agent config init ./my-agent.toml
+    lightai-agent config init /etc/lightai/lightai-agent.toml
+    lightai-agent config init --force
+    lightai-agent config init /etc/lightai/lightai-agent.toml --force
 
     The generated template includes:
     - [agent] section with defaults
@@ -117,9 +126,15 @@ async fn main() -> anyhow::Result<()> {
         &default_log_policy,
         "agent.log",
         "info",
-        &format!("Agent 启动，配置来源: {}", Config::source_label(source)),
+        &format!(
+            "Agent starting, config source: {}",
+            Config::source_label(source)
+        ),
     )
     .await?;
+
+    // ── GPU collector config diagnostics ──
+    log_gpu_collector_diagnostics(&config, &default_log_policy).await?;
 
     let listen_addr: SocketAddr = config.listen_addr.parse()?;
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
@@ -154,7 +169,7 @@ async fn main() -> anyhow::Result<()> {
         "agent.log",
         "info",
         &format!(
-            "Agent 正在退出，不会终止受管实例。managed store 保留 {record_count} 条受管进程记录。",
+            "Agent exiting without terminating managed instances. managed store retained {record_count} record(s).",
         ),
     )
     .await;
@@ -194,20 +209,34 @@ fn handle_config_cmd(args: &[String]) -> anyhow::Result<()> {
             Ok(())
         }
         "init" => {
-            if args.len() >= 4 && (args[3] == "--help" || args[3] == "-h") {
-                println!(
-                    "USAGE: lightai-agent config init <PATH> [--force]\n\n\
-                     Generate a configuration template at <PATH>.\n\
-                     Does NOT overwrite existing files unless --force is given.\n\
-                     This command does not require a Server connection."
-                );
+            if args.get(3).map(String::as_str) == Some("--help")
+                || args.get(3).map(String::as_str) == Some("-h")
+            {
+                println!("{CONFIG_HELP}");
                 return Ok(());
             }
 
-            let path = args.get(3).map(String::as_str).unwrap_or("agent.toml");
-            let force = args.get(4).map(String::as_str) == Some("--force");
+            let mut path: Option<&str> = None;
+            let mut force = false;
+            for arg in args.iter().skip(3) {
+                match arg.as_str() {
+                    "--force" => force = true,
+                    "--help" | "-h" => {
+                        println!("{CONFIG_HELP}");
+                        return Ok(());
+                    }
+                    other if !other.starts_with('-') => path = Some(other),
+                    _ => {}
+                }
+            }
 
-            let dest = std::path::Path::new(path);
+            let dest_path = path.unwrap_or("lightai-agent.toml");
+            let dest = std::path::Path::new(dest_path);
+            if let Some(parent) = dest.parent() {
+                if !parent.as_os_str().is_empty() {
+                    std::fs::create_dir_all(parent)?;
+                }
+            }
             if dest.exists() && !force {
                 anyhow::bail!(
                     "'{}' already exists. Use --force to overwrite.",
@@ -248,13 +277,13 @@ SUBCOMMANDS:
     inspect  Inspect a collector directory and output registry JSON.
 
 EXAMPLES:
-    lightai-agent collector inspect /opt/lightai/collectors/gpu/nvidia
+    lightai-agent collector inspect /opt/lightai/collectors/gpu/nvidia-wsl
 
     The inspect command:
     - Reads collector.toml from the directory
     - Computes SHA-256 of discover.sh and metrics.sh (in-process, no sha256sum)
     - Checks file permissions (no symlinks, no world-writable)
-    - Outputs JSON to stdout for pasting into Web '采集器登记' page
+    - Outputs JSON to stdout for pasting into Web 'collector registry' page
     - Does NOT register, approve, or execute any script
 "#
             );
@@ -265,7 +294,7 @@ EXAMPLES:
                 println!(
                     "USAGE: lightai-agent collector inspect <DIR>\n\n\
                      Inspect a collector directory and output registry JSON.\n\
-                     The output can be pasted into the Web '采集器登记' page.\n\
+                     The output can be pasted into the Web collector registry page.\n\
                      This command does NOT register, approve, or execute scripts."
                 );
                 return Ok(());
@@ -283,4 +312,83 @@ EXAMPLES:
             std::process::exit(1);
         }
     }
+}
+
+/// Emit structured GPU collector diagnostics on Agent startup.
+async fn log_gpu_collector_diagnostics(
+    config: &lightai_agent::config::Config,
+    log_policy: &lightai_agent::platform_log::LogPolicy,
+) -> anyhow::Result<()> {
+    if config.collector_root.is_none() {
+        lightai_agent::platform_log::append(
+            log_policy,
+            "agent.log",
+            "warn",
+            "GPU collector: [gpu_collectors].root is not configured; no GPU scripts will execute. \
+             Configure collector_root and register via the Web collector registry page.",
+        )
+        .await?;
+        return Ok(());
+    }
+
+    let root = config.collector_root.as_deref().unwrap_or("");
+    lightai_agent::platform_log::append(
+        log_policy,
+        "agent.log",
+        "info",
+        &format!(
+            "GPU collector: root={root}, mode={}, enabled={:?}, disabled={:?}",
+            config.collector_mode, config.collector_enabled, config.collector_disabled,
+        ),
+    )
+    .await?;
+
+    // Scan for local collector directories and report find/not-found.
+    let dirs = lightai_agent::collector::scan_collector_dirs(&std::path::PathBuf::from(root));
+    if dirs.is_empty() {
+        lightai_agent::platform_log::append(
+            log_policy,
+            "agent.log",
+            "warn",
+            &format!(
+                "GPU collector: no valid collector directories found under root={root}.\
+                 Each collector directory requires collector.toml + discover.sh + metrics.sh."
+            ),
+        )
+        .await?;
+        return Ok(());
+    }
+
+    for dir in &dirs {
+        lightai_agent::platform_log::append(
+            log_policy,
+            "agent.log",
+            "info",
+            &format!(
+                "GPU collector found: id={}, vendor={}, name={}, version={}, \
+                 discover_sha256={}, metrics_sha256={}",
+                dir.manifest.id,
+                dir.manifest.vendor,
+                dir.manifest.name,
+                dir.manifest.version,
+                &dir.discover_sha256[..dir.discover_sha256.len().min(16)],
+                &dir.metrics_sha256[..dir.metrics_sha256.len().min(16)],
+            ),
+        )
+        .await?;
+    }
+
+    lightai_agent::platform_log::append(
+        log_policy,
+        "agent.log",
+        "info",
+        &format!(
+            "GPU collector: found {} collector dir(s) (mode={}）。\
+             Scripts require Server registry hash verification before execution.",
+            dirs.len(),
+            config.collector_mode,
+        ),
+    )
+    .await?;
+    Ok(())
 }

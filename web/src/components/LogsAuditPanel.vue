@@ -48,7 +48,7 @@
             <el-input-number v-model="serverLogPolicy.log_retention_days" :min="0" :max="3650" />
           </el-form-item>
           <el-form-item>
-            <el-button type="primary" :loading="savingServerPolicy" @click="saveServerLogPolicy">保存 Server 日志策略</el-button>
+            <el-button v-if="role === 'admin'" type="primary" :loading="savingServerPolicy" @click="saveServerLogPolicy">保存 Server 日志策略</el-button>
           </el-form-item>
         </el-form>
       </el-card>
@@ -132,6 +132,8 @@
 </template>
 
 <script setup lang="ts">
+defineProps<{ role: string }>()
+
 import { onMounted, ref } from 'vue'
 import {
   fetchAuditEvents,

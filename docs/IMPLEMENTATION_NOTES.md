@@ -14,7 +14,7 @@
 - `POST /api/agent/tasks/poll`：Agent 轮询任务。
 - `POST /api/agent/tasks/{id}/result`：Agent 上报任务结果。
 
-除 `/health`、`/api/setup/*`、`/api/auth/login` 与 `/api/agent/*` 外，所有 `/api/*` 控制面接口都需要本地用户登录会话。Web 使用 HttpOnly `lightai_session` cookie，不在前端构建产物中预置管理密钥。空库首次管理员只能通过 Web setup 创建，生产配置不支持 `initial_admin_password` 或 `LIGHTAI_ADMIN_PASSWORD`。可选 emergency control token 默认关闭，仅用于测试、自动化或本机应急。
+除 `/health`、`/api/setup/*`、`/api/auth/login` 与 `/api/agent/*` 外，所有 `/api/*` 控制面接口都需要本地用户登录会话。Web 使用 HttpOnly `lightai_session` cookie，不在前端构建产物中预置管理密钥。空库首次管理员只能通过 Web setup 创建，生产配置不支持 `initial_admin_password` 或 `LIGHTAI_ADMIN_PASSWORD`。
 
 ### 用户与会话
 
@@ -38,7 +38,6 @@
 
 管理员忘记密码时，不提供公开远程恢复 API；在服务器本机执行 `lightai-server --reset-password <USERNAME> <PASSWORD>`。重置密码会撤销该用户现有 session，并按策略标记用户必须修改密码。
 
-关键控制面写操作会记录基础审计事件。用户会话触发的事件记录 `actor_id`，并在详情中保留 `actor_username` 与 `effective_role`；emergency token 触发的事件标记为 `system-emergency`。审计不记录密码、token、session 或 hash。
 
 用户组当前只承载成员关系和组角色，是后续部门、项目、业务系统、API Key、额度、计量和优先级归属的基础对象；当前不做资源级授权、多租户隔离、组管理员、审批流、菜单权限或复杂权限表达式。
 
@@ -253,7 +252,8 @@ managed store 路径由 Agent state path 派生，形如 `agent-state.toml.manag
 - Agent 日志策略通过 `AgentConfigPolicy` 下发。
 - `/api/logs` 支持 `server`、`agent`、`instance`、`frontend`、`errors`。
 - Agent 日志和实例日志读取也通过 Agent 任务，不读取任意远端路径。
-- 审计记录覆盖配置、Runtime、Model、Model File、Instance、Trash 等主要操作的成功事件。
+- 审计记录覆盖控制面所有写操作：用户管理、用户组管理、登录/退出、密码修改、配置更新、Runtime CRUD/check、Model/Model File CRUD/verify、Instance CRUD/start/stop/test/check/logs-refresh、Trash create/cleanup/delete、collector registry register/update。操作失败也会记录（带 error_message）。
+- 审计查询 `GET /api/audit-events` 支持可选 `limit`（默认 500，最大 1000）和 `offset`（默认 0）参数。
 
 ## Web 交互事实
 
@@ -274,6 +274,17 @@ managed store 路径由 Agent state path 派生，形如 `agent-state.toml.manag
 ### 概述
 
 Agent 只支持脚本化 GPU/加速卡 collector。未配置 `[gpu_collectors]` 时，Agent 不执行 GPU collector 脚本，也不会回退到旧的内置 `nvidia-smi` 或 custom JSON collector。
+
+Agent 启动时会输出 GPU collector 配置诊断日志（`agent.log`），明确显示配置状态、发现的 collector 目录和 hash。首次 heartbeat 周期会输出 GPU probe 日志，区分四种状态：
+
+| 状态 | 含义 | agent.log 级别 |
+|------|------|---------------|
+| `no_collector_configured` | 未配置 collector_root | WARN |
+| `collector_configured_but_failed` | collector 配置了但全部失败 | ERROR（含错误摘要） |
+| `collector_ok_no_devices` | collector 执行成功但未发现 GPU | WARN |
+| `collector_ok_devices_found` | collector 执行成功并发现 GPU | INFO（含每张卡摘要） |
+
+`collector_status` 和 `collector_errors` 通过 heartbeat 上报到 Server，存储在 `node_status` 表，并由 `GET /api/nodes` 返回，Web 节点页 GPU 列表区域会据此展示原因。
 
 | 路径 | 触发条件 | 说明 |
 |------|----------|------|
@@ -305,8 +316,8 @@ lightai-agent config init ./agent.toml
 
 ### 启用流程
 
-1. 将 collector 目录放到 Agent 本地，例如 `/opt/lightai/collectors/gpu/nvidia`
-2. 运行 `lightai-agent collector inspect /opt/lightai/collectors/gpu/nvidia`
+1. 将 collector 目录放到 Agent 本地，例如 `/opt/lightai/collectors/gpu/nvidia-wsl`
+2. 运行 `lightai-agent collector inspect /opt/lightai/collectors/gpu/nvidia-wsl`
 3. 将输出的 JSON 粘贴到 Web「采集器登记」页面
 4. 在 Agent 配置中设置 `[gpu_collectors]` root + enabled
 5. 启动 Agent
@@ -315,7 +326,7 @@ lightai-agent config init ./agent.toml
 
 ```
 /opt/lightai/collectors/gpu/
-  nvidia/                  # 示例：deploy/collectors/gpu/nvidia/
+  nvidia/                  # 示例：deploy/collectors/gpu/nvidia-wsl/
     collector.toml
     discover.sh
     metrics.sh
@@ -348,7 +359,7 @@ registry 为空时所有 collector 不执行。
 ### inspect 命令
 
 ```bash
-lightai-agent collector inspect /opt/lightai/collectors/gpu/nvidia
+lightai-agent collector inspect /opt/lightai/collectors/gpu/nvidia-wsl
 ```
 
 - 读取 `collector.toml`
@@ -359,11 +370,11 @@ lightai-agent collector inspect /opt/lightai/collectors/gpu/nvidia
 ### Server registry
 
 Agent 通过 heartbeat 从 Server 拉取 `collector_registry` 列表（`id + version` 唯一键）。
-Web「采集器登记」页面支持粘贴 inspect JSON 并启用/禁用。
+Web「采集器登记」页面支持查看已登记采集器；登记新采集器和启用/禁用切换限制为 **admin only**。
 
 ### 当前 NVIDIA 实现
 
-**示例目录**：`deploy/collectors/gpu/nvidia/`
+**示例目录**：`deploy/collectors/gpu/nvidia-wsl/`
 
 - `collector.toml`：id="nvidia", vendor="nvidia", version="1.0.0"
 - `discover.sh`：通过 `nvidia-smi --query-gpu=index,name,uuid,pci.bus_id,driver_version` 输出 DEVICE TSV 行

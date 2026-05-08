@@ -82,6 +82,10 @@ pub struct HeartbeatRequest {
     pub metrics: NodeMetrics,
     pub gpus: Vec<GpuMetrics>,
     pub collector_errors: Vec<String>,
+    /// Aggregated GPU collector status for the current heartbeat cycle.
+    /// One of: "no_collector_configured", "collector_configured_but_failed",
+    /// "collector_ok_no_devices", "collector_ok_devices_found".
+    pub collector_status: String,
     pub agent_config: AgentConfig,
     pub managed_instances: Vec<ManagedInstanceReport>,
 }

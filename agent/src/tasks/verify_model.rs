@@ -9,7 +9,7 @@ pub async fn verify_model_file_with_hint(
     path_type_hint: Option<&str>,
 ) -> VerifyModelFileResult {
     if path.trim().is_empty() || path.contains("..") {
-        return failure("invalid_path", "路径非法");
+        return failure("invalid_path", "invalid path");
     }
 
     // ollama model names are not filesystem paths — accept non-empty strings
@@ -18,7 +18,7 @@ pub async fn verify_model_file_with_hint(
             file_status: "verified".to_string(),
             size_bytes: None,
             path_type: Some("ollama".to_string()),
-            message: "Ollama 模型名已接受".to_string(),
+            message: "Ollama model name accepted".to_string(),
         };
     }
 
@@ -30,7 +30,7 @@ pub async fn verify_model_file_with_hint(
                     file_status: "verified".to_string(),
                     size_bytes: None,
                     path_type: Some("custom".to_string()),
-                    message: "自定义路径已验证".to_string(),
+                    message: "custom path verified".to_string(),
                 };
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
@@ -38,11 +38,11 @@ pub async fn verify_model_file_with_hint(
                     file_status: "verified".to_string(),
                     size_bytes: None,
                     path_type: Some("custom".to_string()),
-                    message: "自定义路径不存在，请确认目标节点上该路径可用".to_string(),
+                    message: "Custom path does not exist; verify the path is available on the target node".to_string(),
                 };
             }
             Err(error) => {
-                return failure("failed", &format!("读取路径信息失败：{error}"));
+                return failure("failed", &format!("failed to read path info: {error}"));
             }
         }
     }
@@ -50,43 +50,52 @@ pub async fn verify_model_file_with_hint(
     let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return failure("missing", "路径不存在");
+            return failure("missing", "path does not exist");
         }
         Err(error) => {
-            return failure("failed", &format!("读取文件信息失败：{error}"));
+            return failure("failed", &format!("failed to read file info: {error}"));
         }
     };
     if metadata.file_type().is_symlink() {
-        return failure("security_risk", "安全风险：模型路径不能是软链接");
+        return failure(
+            "security_risk",
+            "Security risk: model path must not be a symlink",
+        );
     }
 
     if metadata.is_dir() {
         // If path_type_hint says "file" but it's actually a directory, warn
         if path_type_hint == Some("file") {
-            return failure("type_mismatch", "期望模型文件，但路径是目录");
+            return failure(
+                "type_mismatch",
+                "Expected a model file, but path is a directory",
+            );
         }
         return VerifyModelFileResult {
             file_status: "verified".to_string(),
             size_bytes: None,
             path_type: Some("directory".to_string()),
-            message: "目录已验证".to_string(),
+            message: "directory verified".to_string(),
         };
     }
 
     if !metadata.is_file() {
-        return failure("not_file", "路径不是普通文件或目录");
+        return failure("not_file", "path is not a regular file or directory");
     }
 
     // If path_type_hint says "directory" but it's actually a file, warn
     if path_type_hint == Some("directory") {
-        return failure("type_mismatch", "期望模型目录，但路径是普通文件");
+        return failure(
+            "type_mismatch",
+            "Expected a model directory, but path is a regular file",
+        );
     }
 
     VerifyModelFileResult {
         file_status: "verified".to_string(),
         size_bytes: Some(metadata.len().min(i64::MAX as u64) as i64),
         path_type: Some("file".to_string()),
-        message: "文件已验证".to_string(),
+        message: "file verified".to_string(),
     }
 }
 

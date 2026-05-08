@@ -80,14 +80,9 @@ pub fn inspect(dir_path: &Path) -> anyhow::Result<InspectOutput> {
 
     let mut warnings = Vec::new();
 
-    // Warn if toml discover_sha256 is empty (template placeholder).
-    if manifest.discover_sha256.is_empty() {
-        warnings.push(
-            "collector.toml: discover_sha256 is empty — fill with inspect output \
-             or leave empty as template"
-                .to_string(),
-        );
-    } else if manifest.discover_sha256 != discover_sha256 {
+    // Only warn if a non-empty toml hash does not match the computed one.
+    // Empty hash fields are normal (template mode); no warning.
+    if !manifest.discover_sha256.is_empty() && manifest.discover_sha256 != discover_sha256 {
         warnings.push(format!(
             "collector.toml: discover_sha256 mismatch — toml has '{}', actual is '{}'. \
              Update toml or re-run inspect.",
@@ -95,13 +90,7 @@ pub fn inspect(dir_path: &Path) -> anyhow::Result<InspectOutput> {
         ));
     }
 
-    if manifest.metrics_sha256.is_empty() {
-        warnings.push(
-            "collector.toml: metrics_sha256 is empty — fill with inspect output \
-             or leave empty as template"
-                .to_string(),
-        );
-    } else if manifest.metrics_sha256 != metrics_sha256 {
+    if !manifest.metrics_sha256.is_empty() && manifest.metrics_sha256 != metrics_sha256 {
         warnings.push(format!(
             "collector.toml: metrics_sha256 mismatch — toml has '{}', actual is '{}'. \
              Update toml or re-run inspect.",

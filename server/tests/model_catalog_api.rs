@@ -75,8 +75,6 @@ async fn key_operations_create_audit_events() {
     assert!(events.iter().any(|event| {
         event["operation_type"] == "model.create"
             && event["target_id"] == model["id"]
-            && event["actor_type"] == "system-emergency"
-            && event["actor_id"] == "emergency"
             && event["result"] == "success"
     }));
 }
@@ -95,12 +93,12 @@ async fn model_create_fails_when_agent_reports_missing_file_and_does_not_insert_
         "/models/missing.gguf",
         "missing",
         None,
-        "文件不存在",
+        "file does not exist",
     )
     .await;
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["message"], "文件不存在");
+    assert_eq!(json["message"], "file does not exist");
     let (status, models) = request(app, "GET", "/api/models", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models["models"].as_array().unwrap().len(), 0);
@@ -129,7 +127,10 @@ async fn model_create_fails_immediately_when_agent_is_offline() {
     .await;
 
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(json["message"], "节点 Agent 离线，无法验证模型文件");
+    assert_eq!(
+        json["message"],
+        "Node Agent offline, cannot verify model file"
+    );
     let (status, models) = request(app, "GET", "/api/models", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models["models"].as_array().unwrap().len(), 0);
@@ -160,7 +161,10 @@ async fn model_create_fails_when_agent_does_not_return_verification_before_timeo
     .await;
 
     assert_eq!(status, StatusCode::CONFLICT);
-    assert_eq!(json["message"], "模型文件验证超时，请确认 Agent 在线并重试");
+    assert_eq!(
+        json["message"],
+        "Model file verification timed out; confirm Agent is online and retry"
+    );
     let (status, models) = request(app, "GET", "/api/models", None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(models["models"].as_array().unwrap().len(), 0);
@@ -195,7 +199,7 @@ async fn soft_deleted_model_name_does_not_surface_raw_unique_constraint() {
 }
 
 #[tokio::test]
-async fn deleting_model_with_legacy_model_path_trashes_only_node_file_path() {
+async fn deleting_model_with_optional_model_path_trashes_only_node_file_path() {
     let app = test_app().await;
     let model = create_model_with_path(app.clone(), Some("/models/qwen2-7b")).await;
 
@@ -212,11 +216,11 @@ async fn deleting_model_with_legacy_model_path_trashes_only_node_file_path() {
     assert_eq!(status, StatusCode::OK);
     let items = trash_list["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["path"], "/models/legacy/model.gguf");
+    assert_eq!(items[0]["path"], "/models/test/model.gguf");
 }
 
 #[tokio::test]
-async fn deleting_model_without_legacy_model_path_trashes_node_file_path() {
+async fn deleting_model_without_optional_model_path_trashes_node_file_path() {
     let app = test_app().await;
     let model = create_model_with_path(app.clone(), None).await;
 
@@ -233,5 +237,5 @@ async fn deleting_model_without_legacy_model_path_trashes_node_file_path() {
     assert_eq!(status, StatusCode::OK);
     let items = trash_list["items"].as_array().unwrap();
     assert_eq!(items.len(), 1);
-    assert_eq!(items[0]["path"], "/models/legacy/model.gguf");
+    assert_eq!(items[0]["path"], "/models/test/model.gguf");
 }

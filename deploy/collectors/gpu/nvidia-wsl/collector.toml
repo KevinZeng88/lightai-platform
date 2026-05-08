@@ -1,0 +1,20 @@
+id = "nvidia-wsl"
+vendor = "nvidia"
+name = "NVIDIA Collector (WSL)"
+version = "1.0.0"
+description = "NVIDIA GPU collector via nvidia-smi — WSL path (/usr/lib/wsl/lib/nvidia-smi)"
+
+discover = "discover.sh"
+metrics = "metrics.sh"
+
+# SHA-256 hashes — optional; computed by inspect/register/sync.
+# After modifying scripts, re-register:
+#   lightai-server collector register --dir /opt/lightai/collectors/gpu/nvidia-wsl
+#   lightai-server collector sync    --root /opt/lightai/collectors/gpu
+# Or inspect:
+#   lightai-agent  collector inspect <dir>
+#   lightai-server collector inspect --dir /opt/lightai/collectors/gpu/nvidia-wsl
+# Then paste JSON into Web → collector registry.
+
+enabled = true
+priority = 100

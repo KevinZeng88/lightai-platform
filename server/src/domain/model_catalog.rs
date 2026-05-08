@@ -140,7 +140,7 @@ pub async fn update_model(
     .await?;
     if !running_instances.is_empty() {
         return Err(Stage3Error::Conflict(format!(
-            "模型正在被运行中的实例 {} 使用，不能修改。请先停止实例。",
+            "Model in use by running instance {}. Cannot modify. Stop the instance first.",
             running_instances.join(", ")
         )));
     }
@@ -208,8 +208,11 @@ pub async fn delete_model(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error
         super::model_trash::ensure_model_file_trash(
             pool,
             &file_id,
-            Some("删除模型配置".to_string()),
-            Some("模型配置删除后不再显示；真实文件未删除，可在模型垃圾箱中逐条处理。".to_string()),
+            Some("Delete model configuration".to_string()),
+            Some(
+                "Model config removed; actual files not deleted. Process individually in Trash."
+                    .to_string(),
+            ),
         )
         .await?;
     }

@@ -40,6 +40,10 @@ export interface NodeStatus {
   effective_agent_config: AgentConfig
   config_sync_status: string
   gpus: GpuStatus[]
+  /** GPU collector status: no_collector_configured | collector_configured_but_failed | collector_ok_no_devices | collector_ok_devices_found */
+  collector_status: string
+  /** Recent collector error summaries (one per error type) */
+  collector_errors: string[]
 }
 
 export interface AgentConfig {

@@ -2,15 +2,34 @@
 # NVIDIA device metrics script.
 # Outputs TSV: STATUS line followed by zero or more METRIC lines.
 #
-# Requires: nvidia-smi
+# Requires: nvidia-smi at the hardcoded path below.
+#
+# This script is executed by the Agent inside an env_clear() sandbox.
+# It does NOT depend on PATH or parent environment.
+#
+# To customise the nvidia-smi path for your environment:
+#   1. Find the real path:  readlink -f "$(which nvidia-smi)"
+#   2. Edit NVIDIA_SMI below.
+#   3. Re-inspect and re-register:
+#        lightai-agent collector inspect <dir>
+#        lightai-server collector register --dir <dir>
+#   4. Or update via Web → collector registry → edit/update.
+#
+# Testing in a clean environment:
+#   env -i /bin/sh metrics.sh
 
-set -e
+set -eu
 
 COLLECTOR="nvidia"
 VENDOR="nvidia"
 
-if ! command -v nvidia-smi >/dev/null 2>&1; then
-    printf 'STATUS\t1\tnot_available\t%s\t%s\tnvidia-smi not found\n' "$VENDOR" "$COLLECTOR"
+# ── Hardcoded absolute path ──
+# Change this to match your environment (e.g. /usr/bin/nvidia-smi).
+NVIDIA_SMI="/usr/lib/wsl/lib/nvidia-smi"
+
+if [ ! -x "$NVIDIA_SMI" ]; then
+    printf 'STATUS\t1\tnot_available\t%s\t%s\tnvidia-smi not executable: %s\n' \
+        "$VENDOR" "$COLLECTOR" "$NVIDIA_SMI"
     exit 0
 fi
 
@@ -19,7 +38,7 @@ printf 'STATUS\t1\tok\t%s\t%s\t\n' "$VENDOR" "$COLLECTOR"
 # Query metrics fields.
 # Fields: uuid, memory.total, memory.used, memory.free, utilization.gpu,
 #         utilization.memory, temperature.gpu, power.draw
-nvidia-smi \
+"$NVIDIA_SMI" \
     --query-gpu=uuid,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw \
     --format=csv,noheader,nounits 2>/dev/null \
     | while IFS=',' read -r uuid mem_total mem_used mem_free gpu_util mem_util temp power; do
@@ -32,14 +51,12 @@ nvidia-smi \
     temp=$(echo "$temp" | tr -d ' ')
     power=$(echo "$power" | tr -d ' ')
 
-    # Build stable device_key: prefer nvidia:<uuid>, fall back to nvidia:<uuid>
     if [ -n "$uuid" ] && [ "$uuid" != "[N/A]" ]; then
         device_key="nvidia:$uuid"
     else
         device_key="nvidia:unknown"
     fi
 
-    # Health: ok unless GPU has fallen off the bus or has errors.
     health="ok"
     if [ "$gpu_util" = "[N/A]" ] && [ "$mem_util" = "[N/A]" ]; then
         health="unknown"

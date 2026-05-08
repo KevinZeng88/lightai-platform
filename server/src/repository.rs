@@ -63,26 +63,6 @@ pub async fn user_count(pool: &SqlitePool) -> anyhow::Result<i64> {
         .await?)
 }
 
-pub async fn ensure_initial_admin(
-    pool: &SqlitePool,
-    username: &str,
-    password: &str,
-) -> anyhow::Result<Option<AuthUser>> {
-    if user_count(pool).await? > 0 {
-        return Ok(None);
-    }
-    create_user(
-        pool,
-        UserCreateRequest {
-            username: username.to_string(),
-            password: password.to_string(),
-            role: "admin".to_string(),
-        },
-    )
-    .await
-    .map(Some)
-}
-
 pub async fn setup_initial_admin(
     pool: &SqlitePool,
     username: &str,
@@ -840,6 +820,8 @@ pub async fn list_audit_events(
 ) -> anyhow::Result<AuditListResponse> {
     let from = query.from.unwrap_or(0);
     let to = query.to.unwrap_or_else(now_unix_secs);
+    let limit = query.limit.unwrap_or(500).clamp(1, 1000);
+    let offset = query.offset.unwrap_or(0).max(0);
     let rows = sqlx::query(
         r#"
         SELECT *
@@ -853,7 +835,7 @@ pub async fn list_audit_events(
           AND (? IS NULL OR actor_type = ?)
           AND (? IS NULL OR result = ?)
         ORDER BY occurred_at DESC
-        LIMIT 500
+        LIMIT ? OFFSET ?
         "#,
     )
     .bind(from)
@@ -872,6 +854,8 @@ pub async fn list_audit_events(
     .bind(query.actor_type.as_deref())
     .bind(query.result.as_deref())
     .bind(query.result.as_deref())
+    .bind(limit)
+    .bind(offset)
     .fetch_all(pool)
     .await?;
     Ok(AuditListResponse {
@@ -941,20 +925,20 @@ pub async fn register_node(
     let token_hash = auth::hash_token(&token);
     let token_prefix = auth::token_prefix(&token);
 
-    // 最多重试一次：处理 same name + same hostname 并发注册导致的 UNIQUE 冲突。
-    // 第一次尝试命中 UNIQUE(name) 或 UNIQUE(hostname) 时，重试会通过 SELECT
-    // 发现已有记录，走复用 node_id 路径。
+    // Retry once for same name + same hostname concurrent registration UNIQUE conflicts.
+    // First attempt hits UNIQUE(name) or UNIQUE(hostname), retry finds
+    // finds existing record, reuses node_id path.
     for attempt in 0..2 {
         match try_register(pool, &request, now, &token, &token_hash, &token_prefix).await {
             Ok(response) => return Ok(response),
             Err(error) if attempt == 0 && is_unique_violation(&error) => {
-                continue; // 并发冲突 → 重试一次
+                continue; // concurrent conflict → retry once
             }
             Err(error) => return Err(error),
         }
     }
-    // 正常情况下不会到达此处：loop 内所有分支均 return。
-    // 保留为 Err 而非 unreachable!() 以避免生产环境 panic。
+    // Normally unreachable: all loop branches return.
+    // Kept as Err instead of unreachable!() to avoid production panic.
     anyhow::bail!("register_node: unexpected retry exhaustion")
 }
 
@@ -966,16 +950,16 @@ async fn try_register(
     token_hash: &str,
     token_prefix: &str,
 ) -> anyhow::Result<RegisterResponse> {
-    // Agent 身份识别规则（当前阶段）：
-    // 1. 不同 Agent 不允许使用相同 name — UNIQUE(name) 保障
-    // 2. 不同 Agent 不允许使用相同 hostname — UNIQUE(hostname) 保障
-    // 3. same name + same hostname → 复用 node_id，更新 token
-    // 4. same name + different hostname → 拒绝
-    // 5. different name + same hostname → 拒绝
-    // 6. different name + different hostname → 创建新节点
+    // Agent identity rules (current phase):
+    // 1. Different agents must not use the same name — enforced by UNIQUE(name)
+    // 2. Different agents must not use the same hostname — enforced by UNIQUE(hostname)
+    // 3. same name + same hostname → reuse node_id, update token
+    // 4. same name + different hostname → reject
+    // 5. different name + same hostname → reject
+    // 6. different name + different hostname → create new node
     //
-    // 事务保证检查与写入原子性；UNIQUE(name)、UNIQUE(hostname) 作为并发兜底。
-    // ON CONFLICT(id) 仅用于"同节点重注册"场景（id 不变，更新 token）。
+    // Transaction ensures atomic check+write; UNIQUE(name), UNIQUE(hostname) as concurrency safety net.
+    // ON CONFLICT(id) only for same-node re-registration (id unchanged, token updated).
     let mut tx = pool.begin().await?;
 
     let name_conflict: Option<String> =
@@ -986,7 +970,7 @@ async fn try_register(
             .await?;
     if let Some(conflict_host) = name_conflict {
         anyhow::bail!(
-            "节点名称 '{}' 已被主机 '{}' 使用；相同名称不允许用于不同主机。请修改 Agent 配置中的 node_name",
+            "Node name '{}' is already in use by host '{}'; same name cannot be used for different hosts. Change node_name in Agent config",
             request.name,
             conflict_host
         );
@@ -1000,7 +984,7 @@ async fn try_register(
             .await?;
     if let Some(conflict_name) = hostname_conflict {
         anyhow::bail!(
-            "主机 '{}' 已被节点 '{}' 使用；相同主机不允许用于不同名称。请修改 Agent 配置中的 hostname 或 node_name",
+            "Host '{}' is already in use by node '{}'; same host cannot be used for different names. Change hostname or node_name in Agent config",
             request.hostname,
             conflict_name
         );
@@ -1055,9 +1039,9 @@ async fn try_register(
     })
 }
 
-/// 判断是否为 SQLite UNIQUE 约束冲突错误。
-/// 用于 register_node 并发重试：same name + same hostname 并发注册时，
-/// 第一个 INSERT 成功，第二个触发 UNIQUE 冲突，重试后可复用已有记录。
+/// Check whether the error is a SQLite UNIQUE constraint violation.
+/// Used by register_node concurrent retry: when same name + same hostname register concurrently,
+/// the first INSERT succeeds, the second triggers a UNIQUE conflict; retry reuses the existing record.
 fn is_unique_violation(error: &anyhow::Error) -> bool {
     error.to_string().contains("UNIQUE constraint failed")
 }
@@ -1075,6 +1059,15 @@ pub async fn authenticate_node(
     Ok(hash
         .as_deref()
         .is_some_and(|expected| auth::verify_token(token, expected)))
+}
+
+/// Check whether any registered node holds the given token.
+/// Used by the agent collector-registry endpoint (no node_id in request).
+pub async fn any_node_with_token(pool: &SqlitePool, token: &str) -> anyhow::Result<bool> {
+    let hashes: Vec<String> = sqlx::query_scalar("SELECT token_hash FROM nodes")
+        .fetch_all(pool)
+        .await?;
+    Ok(hashes.iter().any(|hash| auth::verify_token(token, hash)))
 }
 
 pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> anyhow::Result<()> {
@@ -1101,13 +1094,14 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
         r#"
         INSERT INTO node_status (
             node_id, cpu_usage_percent, memory_total_bytes, memory_used_bytes,
-            disk_total_bytes, disk_used_bytes, collector_errors_json, updated_at,
+            disk_total_bytes, disk_used_bytes, collector_errors_json, collector_status,
+            updated_at,
             agent_config_version, heartbeat_interval_secs, metrics_sample_interval_secs,
             task_poll_interval_secs, config_refresh_interval_secs, command_timeout_secs,
             environment_check_timeout_secs, allowed_model_dirs_json, collector_timeout_secs,
             collector_max_output_bytes, last_config_updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(node_id) DO UPDATE SET
             cpu_usage_percent = excluded.cpu_usage_percent,
             memory_total_bytes = excluded.memory_total_bytes,
@@ -1115,6 +1109,7 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
             disk_total_bytes = excluded.disk_total_bytes,
             disk_used_bytes = excluded.disk_used_bytes,
             collector_errors_json = excluded.collector_errors_json,
+            collector_status = excluded.collector_status,
             updated_at = excluded.updated_at,
             agent_config_version = excluded.agent_config_version,
             heartbeat_interval_secs = excluded.heartbeat_interval_secs,
@@ -1136,6 +1131,7 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
     .bind(request.metrics.disk_total_bytes)
     .bind(request.metrics.disk_used_bytes)
     .bind(errors_json)
+    .bind(&request.collector_status)
     .bind(request.sampled_at)
     .bind(agent_config.as_ref().map(|config| config.config_version))
     .bind(
@@ -1244,8 +1240,8 @@ async fn reconcile_managed_instances(
         let log_tail = report
             .log_path
             .as_deref()
-            .map(|path| format!("日志文件：{path}"));
-        // last_error 仅写入失败/异常原因；running 实例不写任何信息（清空旧错误）
+            .map(|path| format!("log file: {path}"));
+        // last_error only written for failure/error reasons; running instances write nothing (clear old errors)
         let last_error: Option<&str> = if status == "running" {
             None
         } else {
@@ -1315,7 +1311,7 @@ async fn reconcile_managed_instances(
             r#"
             UPDATE model_instances
             SET status = 'failed', process_id = NULL, process_ref = NULL, last_checked_at = ?,
-                last_error = 'Agent 未上报该实例受管进程状态，进程可能已退出或被外部终止',
+                last_error = 'Agent did not report managed process status; process may have exited or been terminated externally',
                 updated_at = ?
             WHERE id = ?
             "#,
@@ -1331,7 +1327,7 @@ async fn reconcile_managed_instances(
             "server.log",
             "warn",
             &format!(
-                "heartbeat reconcile: instance={id} node={node_id} running→failed: Agent 未上报该实例受管进程状态",
+                "heartbeat reconcile: instance={id} node={node_id} running→failed: Agent did not report managed process status",
             ),
         )
         .await;
@@ -1459,6 +1455,7 @@ pub async fn list_nodes(pool: &SqlitePool) -> anyhow::Result<NodeListResponse> {
                s.config_refresh_interval_secs, s.command_timeout_secs,
                s.environment_check_timeout_secs, s.allowed_model_dirs_json,
                s.collector_timeout_secs, s.collector_max_output_bytes,
+               s.collector_errors_json, s.collector_status,
                s.last_config_updated_at
         FROM nodes n
         LEFT JOIN node_status s ON s.node_id = n.id
@@ -1542,6 +1539,25 @@ pub async fn list_nodes(pool: &SqlitePool) -> anyhow::Result<NodeListResponse> {
         }
         .to_string();
 
+        let collector_errors_json: Option<String> = row.get("collector_errors_json");
+        let collector_errors: Vec<String> = collector_errors_json
+            .as_deref()
+            .and_then(|val| serde_json::from_str(val).ok())
+            .unwrap_or_default();
+        let collector_status: String =
+            row.try_get::<String, _>("collector_status")
+                .unwrap_or_else(|_| {
+                    if gpus.is_empty() && collector_errors.is_empty() {
+                        "no_collector_configured".to_string()
+                    } else if !gpus.is_empty() {
+                        "collector_ok_devices_found".to_string()
+                    } else if !collector_errors.is_empty() {
+                        "collector_configured_but_failed".to_string()
+                    } else {
+                        "collector_ok_no_devices".to_string()
+                    }
+                });
+
         nodes.push(NodeView {
             id: node_id,
             name: row.get("name"),
@@ -1558,6 +1574,8 @@ pub async fn list_nodes(pool: &SqlitePool) -> anyhow::Result<NodeListResponse> {
             effective_agent_config,
             config_sync_status,
             gpus,
+            collector_status,
+            collector_errors,
         });
     }
 
@@ -2101,6 +2119,19 @@ pub async fn register_collector(
         created_at: now,
         updated_at: now,
     })
+}
+
+pub async fn delete_collector_registry_entry(
+    pool: &SqlitePool,
+    id: &str,
+    version: &str,
+) -> anyhow::Result<()> {
+    sqlx::query("DELETE FROM collector_registry WHERE id = ? AND version = ?")
+        .bind(id)
+        .bind(version)
+        .execute(pool)
+        .await?;
+    Ok(())
 }
 
 pub async fn update_collector_enabled(

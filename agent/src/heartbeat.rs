@@ -22,12 +22,20 @@ pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
     loop {
         let snapshot = runtime_config.read().await.clone();
         let sleep_secs = match run_once(&config, &snapshot, &mut metrics_collector).await {
-            Ok((next_config, new_registry)) => {
+            Ok((next_config, new_registry, fetched_registry)) => {
                 let mut runtime = runtime_config.write().await;
                 runtime.apply_server_config(next_config);
-                if let Some(reg) = new_registry {
-                    runtime.collector_registry = reg;
-                }
+                // Prefer the dedicated fetch result (freshest), fall back to
+                // heartbeat response registry.
+                let merged_registry =
+                    if let Some(fetched) = fetched_registry.filter(|r| !r.is_empty()) {
+                        fetched
+                    } else if let Some(hr) = new_registry.filter(|r| !r.is_empty()) {
+                        hr
+                    } else {
+                        runtime.collector_registry.clone()
+                    };
+                runtime.collector_registry = merged_registry;
                 runtime.heartbeat_interval_secs
             }
             Err(error) => {
@@ -46,12 +54,13 @@ async fn run_once(
 ) -> anyhow::Result<(
     Option<AgentConfig>,
     Option<Vec<crate::collector::registry::RegistryEntry>>,
+    Option<Vec<crate::collector::registry::RegistryEntry>>,
 )> {
     let client = ServerClient::new(config.server_url.clone());
     let mut next_config = None;
-    // 重启恢复边界：仅恢复 managed store 中持久化的受管进程记录。
-    // 不会扫描外部手工启动的进程，也不会恢复未持久化的内存注册表。
-    // 每条记录通过 /proc/{pid}/stat 的 start_time 校验，防止 PID 复用误判。
+    // Recover only persisted managed process records from the managed store.
+    // Do not scan externally started processes or recover non-persisted registrations.
+    // Each record validated via /proc/{pid}/stat start_time to prevent PID reuse false positives.
     let mut agent_state = match state::load(&config.state_path).await? {
         Some(state) => {
             // Log managed store recovery at most once per process lifetime.
@@ -63,7 +72,10 @@ async fn run_once(
                             &runtime_config.log_policy,
                             "agent.log",
                             "info",
-                            &format!("Agent 启动后恢复受管实例记录 {} 条", records.len()),
+                            &format!(
+                                "Agent recovered {} managed instance record(s) after startup",
+                                records.len()
+                            ),
                         )
                         .await;
                     }
@@ -78,9 +90,60 @@ async fn run_once(
         }
     };
 
-    let (gpus, collector_errors) = gpu::collect_gpus(&runtime_config.to_collector_config()).await;
+    // ── Fetch collector registry from Server before GPU collection ──
+    // The registry from the heartbeat response arrives too late for the same
+    // cycle (chicken-and-egg).  This dedicated fetch guarantees an up-to-date
+    // registry before every GPU collection.
+    let mut fetched_registry: Vec<crate::collector::registry::RegistryEntry> =
+        runtime_config.collector_registry.clone();
+    if runtime_config.collector_root.is_some() {
+        match client
+            .fetch_collector_registry(&agent_state.agent_token)
+            .await
+        {
+            Ok(entries) => {
+                log_registry_fetch_details(&runtime_config.log_policy, &entries).await;
+                fetched_registry = entries;
+            }
+            Err(e) => {
+                let _ = platform_log::append(
+                    &runtime_config.log_policy,
+                    "agent.log",
+                    "error",
+                    &format!("GPU collector registry fetch failed: {e}"),
+                )
+                .await;
+                // Fall back to cached registry; if empty, GPU collection will
+                // report "registry empty".
+            }
+        }
+    }
+
+    // Build collector config with the freshly-fetched registry.
+    let mut collector_cfg = runtime_config.to_collector_config();
+    collector_cfg.collector_registry = fetched_registry.clone();
+    let (gpus, collector_errors) = gpu::collect_gpus(&collector_cfg).await;
+    let collector_status = gpu::compute_collector_status(
+        runtime_config.collector_root.as_deref(),
+        &collector_errors,
+        &gpus,
+    );
+
+    // Enhance collector_errors with registry match details when relevant.
+    let collector_errors = enhance_collector_errors(collector_errors, &fetched_registry);
+
     let managed_store_path = managed_process::store_path_from_state_path(&config.state_path);
     let managed_instances = managed_process::reports(Some(&managed_store_path)).await;
+
+    // Log first-probe GPU diagnostic once per process.
+    log_first_gpu_probe(
+        &runtime_config.log_policy,
+        collector_status,
+        &gpus,
+        &collector_errors,
+    )
+    .await;
+
     let running_count = managed_instances
         .iter()
         .filter(|r| r.status == "running")
@@ -94,7 +157,7 @@ async fn run_once(
             &runtime_config.log_policy,
             "agent.log",
             "debug",
-            &format!("Agent 心跳上报受管实例状态：running={running_count}, failed={failed_count}"),
+            &format!("Agent heartbeat reporting managed instance status: running={running_count}, failed={failed_count}"),
         )
         .await;
         if failed_count > 0 {
@@ -108,7 +171,7 @@ async fn run_once(
                 &runtime_config.log_policy,
                 "agent.log",
                 "warn",
-                &format!("受管实例进程已退出：{failed_ids}"),
+                &format!("Managed instance process exited: {failed_ids}"),
             )
             .await;
         }
@@ -119,6 +182,7 @@ async fn run_once(
         metrics: metrics_collector.collect(),
         gpus,
         collector_errors,
+        collector_status: collector_status.as_str().to_string(),
         agent_config: runtime_config.to_agent_config(),
         managed_instances,
     };
@@ -140,21 +204,25 @@ async fn run_once(
                         "agent.log",
                         "info",
                         &format!(
-                            "Agent 配置已更新 config_version={}",
+                            "Agent config updated config_version={}",
                             agent_config.config_version
                         ),
                     )
                     .await;
                 }
             }
-            Ok((response.agent_config.or(next_config), new_registry))
+            Ok((
+                response.agent_config.or(next_config),
+                new_registry,
+                Some(fetched_registry),
+            ))
         }
         Err(error) if is_unauthorized(&error) => {
             let _ = platform_log::append(
                 &runtime_config.log_policy,
                 "agent.log",
                 "warn",
-                "Agent token 过期，重新注册",
+                "Agent token expired, re-registering",
             )
             .await;
             let registered = register(&client, config).await?;
@@ -170,14 +238,18 @@ async fn run_once(
             } else {
                 Some(response.collector_registry)
             };
-            Ok((response.agent_config.or(next_config), registry))
+            Ok((
+                response.agent_config.or(next_config),
+                registry,
+                Some(fetched_registry),
+            ))
         }
         Err(error) => {
             let _ = platform_log::append(
                 &runtime_config.log_policy,
                 "agent.log",
                 "error",
-                &format!("心跳失败：{error}"),
+                &format!("Heartbeat failed: {error}"),
             )
             .await;
             Err(error)
@@ -210,7 +282,7 @@ async fn register(client: &ServerClient, config: &Config) -> anyhow::Result<Regi
         &LogPolicy::default(),
         "agent.log",
         "info",
-        &format!("Agent 注册成功 node_id={}", response.node_id),
+        &format!("Agent registered successfully node_id={}", response.node_id),
     )
     .await;
     Ok(RegisteredAgent {
@@ -339,4 +411,145 @@ fn now_unix_secs() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs() as i64
+}
+
+/// Guard: first GPU probe log fires at most once per process lifetime.
+static FIRST_GPU_PROBE_LOGGED: AtomicBool = AtomicBool::new(false);
+
+async fn log_first_gpu_probe(
+    log_policy: &LogPolicy,
+    status: gpu::CollectorStatus,
+    gpus: &[crate::models::GpuMetrics],
+    errors: &[String],
+) {
+    if FIRST_GPU_PROBE_LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+
+    match status {
+        gpu::CollectorStatus::NoCollectorConfigured => {
+            let _ = platform_log::append(
+                log_policy,
+                "agent.log",
+                "warn",
+                "GPU probe: collector_root not configured. GPU collection will not run. Configure [gpu_collectors] and register via Web, then restart Agent.",
+            )
+            .await;
+        }
+        gpu::CollectorStatus::CollectorConfiguredButFailed => {
+            let summary = errors.join("; ");
+            let _ = platform_log::append(
+                log_policy,
+                "agent.log",
+                "error",
+                &format!(
+                    "GPU probe: collector execution failed ({} error(s)). Summary: {summary}",
+                    errors.len(),
+                ),
+            )
+            .await;
+        }
+        gpu::CollectorStatus::CollectorOkNoDevices => {
+            let _ = platform_log::append(
+                log_policy,
+                "agent.log",
+                "warn",
+                "GPU probe: collector ran successfully but no GPU devices found (GPUs discovered: 0).",
+            )
+            .await;
+        }
+        gpu::CollectorStatus::CollectorOkDevicesFound => {
+            let mut summary = String::new();
+            for gpu in gpus {
+                summary.push_str(&format!(
+                    "\n  gpu_key={} vendor={} name={} uuid={:?} memory={:?}MB",
+                    gpu.gpu_key,
+                    gpu.vendor,
+                    gpu.name,
+                    gpu.uuid,
+                    gpu.memory_total_bytes
+                        .map(|b| (b / 1_048_576).to_string())
+                        .unwrap_or_else(|| "?".to_string()),
+                ));
+            }
+            let _ = platform_log::append(
+                log_policy,
+                "agent.log",
+                "info",
+                &format!("GPU probe: {} GPU(s) discovered{}", gpus.len(), summary,),
+            )
+            .await;
+        }
+    }
+}
+
+/// Log detailed registry fetch info once per process (on the first successful fetch).
+static REGISTRY_FETCH_LOGGED: AtomicBool = AtomicBool::new(false);
+
+async fn log_registry_fetch_details(
+    log_policy: &LogPolicy,
+    entries: &[crate::collector::registry::RegistryEntry],
+) {
+    if REGISTRY_FETCH_LOGGED.swap(true, Ordering::Relaxed) {
+        return;
+    }
+
+    if entries.is_empty() {
+        let _ = platform_log::append(
+            log_policy,
+            "agent.log",
+            "warn",
+            "GPU collector registry fetch: entries=0. No collectors registered on Server.\
+             Register collectors via the Web collector registry page; Agent will auto-fetch.",
+        )
+        .await;
+        return;
+    }
+
+    let _ = platform_log::append(
+        log_policy,
+        "agent.log",
+        "info",
+        &format!(
+            "GPU collector registry fetch: entries={}, endpoint=/api/agent/collector-registry",
+            entries.len(),
+        ),
+    )
+    .await;
+
+    for entry in entries {
+        let _ = platform_log::append(
+            log_policy,
+            "agent.log",
+            "debug",
+            &format!(
+                "  registry entry: id={}, version={}, enabled={}, \
+                 discover_sha256={}, metrics_sha256={}",
+                entry.id,
+                entry.version,
+                entry.enabled,
+                &entry.discover_sha256[..entry.discover_sha256.len().min(16)],
+                &entry.metrics_sha256[..entry.metrics_sha256.len().min(16)],
+            ),
+        )
+        .await;
+    }
+}
+
+/// Enhance collector_errors to distinguish "registry empty" from
+/// "registry loaded but no match" and "hash mismatch" details.
+fn enhance_collector_errors(
+    mut errors: Vec<String>,
+    registry: &[crate::collector::registry::RegistryEntry],
+) -> Vec<String> {
+    if registry.is_empty() {
+        // Replace the generic "registry is empty" message with a more actionable one.
+        if let Some(pos) = errors.iter().position(|e| e.contains("registry is empty")) {
+            errors[pos] =
+                "collector registry fetch: entries=0 (no collectors registered on Server).\
+                 Register collectors via the Web collector registry page."
+                    .to_string();
+        }
+    }
+    errors
 }

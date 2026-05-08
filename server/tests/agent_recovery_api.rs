@@ -70,7 +70,7 @@ async fn heartbeat_reconciles_running_local_instance_missing_from_agent_store() 
     assert!(fetched["last_error"]
         .as_str()
         .unwrap()
-        .contains("Agent 未上报该实例受管进程状态"));
+        .contains("Agent did not report managed process status"));
     assert_eq!(fetched["process_id"], Value::Null);
     assert_eq!(fetched["process_ref"], Value::Null);
 }
@@ -121,7 +121,7 @@ async fn heartbeat_updates_running_local_instance_from_agent_managed_report() {
         json!([{
             "instance_id": instance_id,
             "status": "running",
-            "message": "Agent 重启后已恢复受管进程状态：受管进程仍在运行",
+            "message": "Agent restarted and recovered managed process: still running",
             "process_id": 23456,
             "process_ref": instance_id,
             "base_url": "http://127.0.0.1:18085",
@@ -142,7 +142,7 @@ async fn heartbeat_updates_running_local_instance_from_agent_managed_report() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fetched["status"], "running");
     assert_eq!(fetched["process_id"], 23456);
-    // running 实例不应有 last_error（恢复信息写入 Agent 日志，不入库）
+    // Running instances should not have last_error (recovery info goes to Agent log, not DB)
     assert!(fetched["last_error"].as_str().is_none_or(str::is_empty));
     assert!(fetched["log_tail"]
         .as_str()
@@ -194,7 +194,6 @@ async fn agent_register_and_heartbeat_exchange_config_and_report_effective_confi
         .clone()
         .oneshot(
             Request::builder()
-                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("POST")
                 .uri("/api/agent/heartbeat")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -235,7 +234,7 @@ async fn agent_register_and_heartbeat_exchange_config_and_report_effective_confi
     assert_eq!(node["agent_config"]["task_poll_interval_secs"], 20);
 }
 
-// ── register_node 按 name + hostname 复用 node_id ──
+// ── register_node reuses node_id by name + hostname ──
 
 #[tokio::test]
 async fn check_model_instance_returns_last_error_when_agent_offline() {
@@ -243,7 +242,7 @@ async fn check_model_instance_returns_last_error_when_agent_offline() {
     let registered = register_node_json(app.clone()).await;
     let node_id = registered["node_id"].as_str().unwrap();
     let token = registered["agent_token"].as_str().unwrap();
-    // 先发一次心跳让节点上线，否则无法创建运行环境和模型文件
+    // Send one heartbeat to bring node online, otherwise cannot create runtimes/models
     heartbeat_node_with_managed_instances(app.clone(), node_id, token, json!([])).await;
     let environment = create_runtime_environment(app.clone(), node_id, token).await;
     let model = create_model_for_node(app.clone(), node_id, token).await;
@@ -271,7 +270,7 @@ async fn check_model_instance_returns_last_error_when_agent_offline() {
     .await;
     let instance_id = instance["id"].as_str().unwrap();
 
-    // 设为 running 后清除心跳，模拟 Agent 离线
+    // Set to running then clear heartbeat, simulating Agent offline
     sqlx::query("UPDATE model_instances SET status = 'running' WHERE id = ?")
         .bind(instance_id)
         .execute(&pool)
@@ -295,11 +294,11 @@ async fn check_model_instance_returns_last_error_when_agent_offline() {
     assert!(checked["last_error"]
         .as_str()
         .unwrap_or("")
-        .contains("离线"));
+        .contains("offline"));
     assert!(checked["last_checked_at"].is_number());
 }
 
-// ── heartbeat 恢复：reports 中有存活实例 → 保持 running ──
+// ── Heartbeat recovery: surviving instances in reports → keep running ──
 
 #[tokio::test]
 async fn heartbeat_reports_keep_running_instances_alive() {
@@ -307,7 +306,7 @@ async fn heartbeat_reports_keep_running_instances_alive() {
     let registered = register_node_json(app.clone()).await;
     let node_id = registered["node_id"].as_str().unwrap();
     let token = registered["agent_token"].as_str().unwrap();
-    // 先发一次心跳让节点上线
+    // Send one heartbeat to bring node online
     heartbeat_node_with_managed_instances(app.clone(), node_id, token, json!([])).await;
     let environment = create_runtime_environment(app.clone(), node_id, token).await;
     let model = create_model_for_node(app.clone(), node_id, token).await;
@@ -341,7 +340,7 @@ async fn heartbeat_reports_keep_running_instances_alive() {
         .await
         .unwrap();
 
-    // 模拟 Agent 重启后 heartbeat 报告该实例存活
+    // Simulate Agent restart heartbeat reporting this instance alive
     heartbeat_node_with_managed_instances(
         app.clone(),
         node_id,
@@ -349,7 +348,7 @@ async fn heartbeat_reports_keep_running_instances_alive() {
         json!([{
             "instance_id": instance_id,
             "status": "running",
-            "message": "Agent 重启后已恢复受管进程状态",
+            "message": "Agent restarted and recovered managed process state",
             "process_id": 99991,
             "process_ref": instance_id,
             "base_url": "http://127.0.0.1:18100"
@@ -367,14 +366,14 @@ async fn heartbeat_reports_keep_running_instances_alive() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fetched["status"], "running");
     assert_eq!(fetched["process_id"], 99991);
-    // running 实例不应有 last_error（恢复信息写入 Agent 日志，不入库）
+    // Running instances should not have last_error (recovery info goes to Agent log, not DB)
     assert!(
         fetched["last_error"].as_str().unwrap_or("").is_empty()
             || fetched["last_error"] == Value::Null
     );
 }
 
-// ── 数据库唯一约束：name 和 hostname 独立唯一 ──
+// ── Database unique constraints: name and hostname are independently unique ──
 
 #[tokio::test]
 async fn running_instance_on_offline_node_shows_node_online_false() {
@@ -411,7 +410,7 @@ async fn running_instance_on_offline_node_shows_node_online_false() {
         .execute(&pool)
         .await
         .unwrap();
-    // 设置心跳时间为过期，模拟 Agent 离线
+    // Set heartbeat timestamp to expired, simulating Agent offline
     let cutoff = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -494,7 +493,7 @@ async fn instance_list_includes_node_online_when_agent_offline() {
     assert!(instance["last_error"].as_str().is_none_or(|s| s.is_empty()));
 }
 
-// ── Agent 在线时 node_online=true ──
+// ── Agent online → node_online=true ──
 
 #[tokio::test]
 async fn running_instance_on_online_node_shows_node_online_true() {
@@ -547,6 +546,7 @@ async fn running_instance_on_online_node_shows_node_online_true() {
 async fn stage2_test_app() -> (sqlx::SqlitePool, axum::Router) {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     db::migrate(&pool).await.unwrap();
-    let app = routes::app_with_emergency_token(pool.clone(), TEST_EMERGENCY_TOKEN.to_string());
+    ensure_initial_admin(&pool, "admin", "test-admin-pw-123").await;
+    let app = routes::app(pool.clone());
     (pool, app)
 }

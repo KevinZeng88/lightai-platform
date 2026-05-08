@@ -137,9 +137,15 @@ pub struct HeartbeatRequest {
     pub gpus: Vec<GpuMetrics>,
     #[serde(default)]
     pub collector_errors: Vec<String>,
+    #[serde(default = "default_collector_status")]
+    pub collector_status: String,
     pub agent_config: Option<AgentConfig>,
     #[serde(default)]
     pub managed_instances: Vec<ManagedInstanceReport>,
+}
+
+fn default_collector_status() -> String {
+    "no_collector_configured".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -327,6 +333,14 @@ pub struct NodeView {
     pub effective_agent_config: AgentConfig,
     pub config_sync_status: String,
     pub gpus: Vec<GpuView>,
+    /// GPU collector status: no_collector_configured,
+    /// collector_configured_but_failed, collector_ok_no_devices,
+    /// collector_ok_devices_found.
+    #[serde(default)]
+    pub collector_status: String,
+    /// Recent collector errors (truncated summary, one per error type).
+    #[serde(default)]
+    pub collector_errors: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -688,6 +702,10 @@ pub struct AuditQuery {
     pub result: Option<String>,
     pub from: Option<i64>,
     pub to: Option<i64>,
+    /// Maximum number of events to return (default 500, max 1000).
+    pub limit: Option<i64>,
+    /// Number of events to skip for pagination (default 0).
+    pub offset: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]

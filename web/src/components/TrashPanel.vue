@@ -37,9 +37,9 @@
     <el-table-column label="最近操作" width="190">
       <template #default="{ row }">{{ formatTime(row.updated_at) }}</template>
     </el-table-column>
-    <el-table-column label="操作" width="210" fixed="right">
+    <el-table-column v-if="role !== 'viewer'" label="操作" width="210" fixed="right">
       <template #default="{ row }">
-        <el-button size="small" type="danger" :loading="cleaningId === row.id" @click="cleanupFile(row)">
+        <el-button v-if="role === 'admin'" size="small" type="danger" :loading="cleaningId === row.id" @click="cleanupFile(row)">
           删除文件
         </el-button>
         <el-button size="small" @click="removeRecord(row)">删除记录</el-button>
@@ -49,6 +49,8 @@
 </template>
 
 <script setup lang="ts">
+defineProps<{ role: string }>()
+
 import { ElMessage } from 'element-plus/es/components/message/index'
 import { ElMessageBox } from 'element-plus/es/components/message-box/index'
 import { onMounted, ref } from 'vue'

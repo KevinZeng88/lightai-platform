@@ -132,7 +132,7 @@ pub async fn update_runtime_environment(
     .await?;
     if !running_instances.is_empty() {
         return Err(Stage3Error::Conflict(format!(
-            "运行环境正在被运行中的实例 {} 使用，不能修改。请先停止实例。",
+            "Runtime in use by running instance {}. Cannot modify. Stop the instance first.",
             running_instances.join(", ")
         )));
     }
@@ -208,17 +208,17 @@ pub async fn check_runtime_environment(
     let node_id = environment
         .node_id
         .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("运行环境必须绑定节点".to_string()))?;
+        .ok_or_else(|| Stage3Error::BadRequest("Runtime must be bound to a node".to_string()))?;
     if !node_online(pool, node_id).await? {
         update_runtime_environment_check(
             pool,
             id,
             "agent_offline",
-            "节点 Agent 离线，无法检查运行环境",
+            "Node Agent offline, cannot check runtime environment",
         )
         .await?;
         return Err(Stage3Error::Conflict(
-            "节点 Agent 离线，无法检查运行环境".to_string(),
+            "Node Agent offline, cannot check runtime environment".to_string(),
         ));
     }
     let request = RuntimeEnvironmentRequest {
@@ -361,7 +361,7 @@ async fn check_runtime_environment_before_save(
             }
             "timed_out" => {
                 return Err(Stage3Error::Conflict(
-                    "运行环境检查超时，请确认 Agent 在线并重试".to_string(),
+                    "Runtime check timed out; confirm Agent is online and retry".to_string(),
                 ));
             }
             _ => {}
@@ -369,7 +369,7 @@ async fn check_runtime_environment_before_save(
         if Instant::now() >= deadline {
             agent_tasks::mark_task_timed_out(pool, &task_id).await?;
             return Err(Stage3Error::Conflict(
-                "运行环境检查超时，请确认 Agent 在线并重试".to_string(),
+                "Runtime check timed out; confirm Agent is online and retry".to_string(),
             ));
         }
         sleep(Duration::from_millis(100)).await;
@@ -381,7 +381,7 @@ fn runtime_check_message(result: &serde_json::Value) -> String {
         .get("message")
         .and_then(|value| value.as_str())
         .filter(|value| !value.trim().is_empty())
-        .unwrap_or("运行环境检查失败")
+        .unwrap_or("Runtime check failed")
         .to_string()
 }
 

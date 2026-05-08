@@ -64,7 +64,10 @@ async fn run_script(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .env_clear()
-        .env("PATH", "/usr/bin:/bin:/usr/local/bin")
+        .env(
+            "PATH",
+            "/usr/local/nvidia/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin",
+        )
         .env("HOME", "/tmp")
         .env("USER", "lightai")
         .current_dir("/tmp")
@@ -177,5 +180,56 @@ mod tests {
         let s = "héllo world".to_string();
         let t = truncate_bytes(s, 2);
         assert_eq!(t, "h\n[output truncated]");
+    }
+
+    /// The sandbox PATH must include common NVIDIA driver locations so
+    /// collector scripts can find nvidia-smi even with env_clear().
+    #[test]
+    fn sandbox_path_includes_nvidia_locations() {
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let output = rt.block_on(execute_script(b"echo $PATH", 5, 4096, 4096));
+        let path = output.stdout.trim();
+        assert!(
+            path.contains("/usr/local/nvidia/bin"),
+            "sandbox PATH missing /usr/local/nvidia/bin: {path}"
+        );
+        assert!(
+            path.contains("/usr/bin"),
+            "sandbox PATH missing /usr/bin: {path}"
+        );
+        assert!(
+            path.contains("/usr/local/bin"),
+            "sandbox PATH missing /usr/local/bin: {path}"
+        );
+    }
+
+    /// A script that can't find its required tool should report a clear
+    /// error including what was checked and the current PATH.
+    #[tokio::test]
+    async fn script_not_found_reports_diagnostic() {
+        let output = execute_script(
+            br#"#!/bin/sh
+if [ -x /tmp/no-such-tool-xyz ]; then
+    echo "FOUND"
+else
+    echo "STATUS	1	not_available	test	test	tool not found; checked=/tmp/no-such-tool-xyz; PATH=$PATH" >&2
+fi
+"#,
+            5,
+            4096,
+            4096,
+        )
+        .await;
+        // Script should not panic/timout; stderr should have the diagnostic.
+        assert!(!output.timed_out);
+        let diag = format!("{}{}", output.stdout, output.stderr);
+        assert!(
+            diag.contains("tool not found"),
+            "expected diagnostic in output: {diag}"
+        );
+        assert!(
+            diag.contains("checked="),
+            "expected checked paths in output: {diag}"
+        );
     }
 }

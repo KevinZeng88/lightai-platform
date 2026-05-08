@@ -12,7 +12,7 @@ async fn verifies_existing_regular_model_file() {
 
     assert_eq!(result.file_status, "verified");
     assert_eq!(result.size_bytes, Some(5));
-    assert_eq!(result.message, "文件已验证");
+    assert_eq!(result.message, "file verified");
 
     let _ = fs::remove_file(path);
 }
@@ -25,7 +25,7 @@ async fn reports_missing_model_file() {
 
     assert_eq!(result.file_status, "missing");
     assert_eq!(result.size_bytes, None);
-    assert_eq!(result.message, "路径不存在");
+    assert_eq!(result.message, "path does not exist");
 }
 
 #[tokio::test]
@@ -39,7 +39,7 @@ async fn verifies_existing_model_directory() {
     assert_eq!(result.file_status, "verified");
     assert_eq!(result.path_type.as_deref(), Some("directory"));
     assert_eq!(result.size_bytes, None);
-    assert_eq!(result.message, "目录已验证");
+    assert_eq!(result.message, "directory verified");
 
     let _ = fs::remove_file(path.join("config.json"));
     let _ = fs::remove_dir(path);
@@ -59,7 +59,7 @@ async fn runtime_check_reports_version_unavailable_separately() {
     .await;
 
     assert_eq!(result.check_status, "version_unavailable");
-    assert!(result.message.contains("版本无法自动获取"));
+    assert!(result.message.contains("version could not"));
 
     let _ = fs::remove_file(path);
 }
@@ -77,7 +77,7 @@ async fn runtime_check_reports_not_executable_entrypoint() {
     .await;
 
     assert_eq!(result.check_status, "not_executable");
-    assert_eq!(result.message, "入口文件不可执行");
+    assert_eq!(result.message, "entrypoint file is not executable");
 
     let _ = fs::remove_file(path);
 }
@@ -153,7 +153,7 @@ async fn managed_instance_start_persists_process_reference_for_restart_recovery(
         reports[0].base_url.as_deref(),
         Some("http://127.0.0.1:19094")
     );
-    assert!(reports[0].message.contains("受管进程仍在运行"));
+    assert!(reports[0].message.contains("still running"));
 
     let stopped = tasks::stop_model_instance_with_store(
         &serde_json::json!({
@@ -182,8 +182,10 @@ async fn stop_refuses_unknown_instance_after_agent_restart() {
     .await;
 
     assert_eq!(stopped.instance_status, "failed");
-    assert!(stopped.message.contains("未找到平台受管进程记录"));
-    assert!(stopped.message.contains("拒绝停止"));
+    assert!(stopped
+        .message
+        .contains("no platform managed process record found"));
+    assert!(stopped.message.contains("refusing to stop"));
 
     let _ = fs::remove_file(store_path);
 }
@@ -317,15 +319,15 @@ async fn failed_instance_start_writes_stderr_to_controlled_log_dir() {
 
 #[test]
 fn llama_cpp_test_probe_urls_prioritize_openai_models_endpoint() {
-    let urls = tasks::build_test_urls("llama_cpp", "http://127.0.0.1:8080").unwrap();
+    let urls = tasks::build_test_urls("llama_cpp", "http://127.0.0.1:18080").unwrap();
 
-    assert_eq!(urls[0], "http://127.0.0.1:8080/v1/models");
-    assert!(urls.contains(&"http://127.0.0.1:8080/health".to_string()));
+    assert_eq!(urls[0], "http://127.0.0.1:18080/v1/models");
+    assert!(urls.contains(&"http://127.0.0.1:18080/health".to_string()));
 }
 
 #[test]
 fn model_test_404_summary_explains_missing_compatible_endpoint() {
-    let urls = tasks::build_test_urls("llama_cpp", "http://127.0.0.1:8080").unwrap();
+    let urls = tasks::build_test_urls("llama_cpp", "http://127.0.0.1:18080").unwrap();
     let failures = urls
         .iter()
         .map(|url| format!("{url} -> HTTP 404 Not Found"))
@@ -333,7 +335,7 @@ fn model_test_404_summary_explains_missing_compatible_endpoint() {
 
     let message = tasks::summarize_test_failures(&urls, &failures);
 
-    assert!(message.contains("未找到可用测试接口"));
+    assert!(message.contains("No available test endpoint found"));
     assert!(message.contains("/v1/models"));
     assert!(message.contains("endpoint_url"));
 }
@@ -356,7 +358,7 @@ async fn llama_cpp_version_detection_ignores_cuda_initialization_noise() {
     .await;
 
     assert_eq!(result.check_status, "version_unavailable");
-    assert!(result.message.contains("版本无法自动获取"));
+    assert!(result.message.contains("version could not"));
 
     let _ = fs::remove_file(script);
 }
@@ -366,7 +368,7 @@ async fn rejects_path_traversal_marker() {
     let result = tasks::verify_model_file("/models/../secret.gguf").await;
 
     assert_eq!(result.file_status, "invalid_path");
-    assert_eq!(result.message, "路径非法");
+    assert_eq!(result.message, "invalid path");
 }
 
 #[tokio::test]
@@ -381,7 +383,7 @@ async fn deletes_existing_file_inside_allowed_model_dir() {
             .await;
 
     assert_eq!(result.cleanup_status, "deleted");
-    assert_eq!(result.message, "文件已清理");
+    assert_eq!(result.message, "file cleaned up");
     assert!(!path.exists());
 
     let _ = fs::remove_dir(dir);
@@ -398,7 +400,7 @@ async fn cleanup_rejects_missing_file_and_keeps_recordable_error() {
             .await;
 
     assert_eq!(result.cleanup_status, "failed");
-    assert_eq!(result.message, "文件不存在");
+    assert_eq!(result.message, "file does not exist");
 
     let _ = fs::remove_dir(dir);
 }
@@ -415,7 +417,7 @@ async fn cleanup_distinguishes_missing_allowed_model_dir() {
     .await;
 
     assert_eq!(result.cleanup_status, "failed");
-    assert_eq!(result.message, "受控模型目录不存在");
+    assert_eq!(result.message, "allowed model directory does not exist");
 }
 
 #[tokio::test]
@@ -426,7 +428,7 @@ async fn cleanup_distinguishes_invalid_allowed_model_dir_config() {
         tasks::cleanup_model_file(target.to_str().unwrap(), &["relative/models".to_string()]).await;
 
     assert_eq!(result.cleanup_status, "failed");
-    assert_eq!(result.message, "受控模型目录配置非法");
+    assert_eq!(result.message, "allowed model directory config is invalid");
 }
 
 #[tokio::test]
@@ -442,7 +444,10 @@ async fn cleanup_rejects_directory() {
     .await;
 
     assert_eq!(result.cleanup_status, "failed");
-    assert_eq!(result.message, "拒绝删除目录或非普通文件");
+    assert_eq!(
+        result.message,
+        "refusing to delete directory or non-regular file"
+    );
 
     let _ = fs::remove_dir(model_dir);
     let _ = fs::remove_dir(dir);
@@ -460,7 +465,7 @@ async fn cleanup_rejects_path_traversal() {
     .await;
 
     assert_eq!(result.cleanup_status, "failed");
-    assert_eq!(result.message, "路径非法");
+    assert_eq!(result.message, "invalid path");
 
     let _ = fs::remove_dir(dir);
 }
@@ -479,7 +484,7 @@ async fn cleanup_rejects_file_outside_allowed_model_dirs() {
     .await;
 
     assert_eq!(result.cleanup_status, "failed");
-    assert_eq!(result.message, "文件不在受控模型目录内");
+    assert_eq!(result.message, "file not within allowed model directory");
     assert!(outside.exists());
 
     let _ = fs::remove_file(outside);
@@ -494,7 +499,10 @@ async fn cleanup_rejects_without_allowed_model_dirs() {
     let result = tasks::cleanup_model_file(path.to_str().unwrap(), &[]).await;
 
     assert_eq!(result.cleanup_status, "failed");
-    assert_eq!(result.message, "未配置受控模型目录，拒绝删除文件");
+    assert_eq!(
+        result.message,
+        "no allowed model directory configured; refusing to delete file"
+    );
     assert!(path.exists());
 
     let _ = fs::remove_file(path);

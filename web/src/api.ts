@@ -521,10 +521,12 @@ export async function fetchAuditEvents(params: {
   node_id?: string
   instance_id?: string
   result?: string
+  limit?: number
+  offset?: number
 }): Promise<AuditEvent[]> {
   const search = new URLSearchParams()
   Object.entries(params).forEach(([key, value]) => {
-    if (value) search.set(key, value)
+    if (value !== undefined && value !== null) search.set(key, String(value))
   })
   const payload = await sendJson<{ events: AuditEvent[] }>(
     `/api/audit-events?${search.toString()}`,
@@ -568,4 +570,8 @@ export async function registerCollector(
   payload: Omit<CollectorRegistryEntry, 'created_at' | 'updated_at'>
 ): Promise<CollectorRegistryEntry> {
   return sendJson('/api/collector-registry', 'POST', payload)
+}
+
+export async function deleteCollector(id: string, version: string): Promise<void> {
+  await sendEmpty(`/api/collector-registry/${encodeURIComponent(id)}/${encodeURIComponent(version)}`, 'DELETE')
 }

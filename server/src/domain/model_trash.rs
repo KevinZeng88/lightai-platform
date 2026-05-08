@@ -95,7 +95,7 @@ pub async fn cleanup_model_file_trash(
         return Ok(item);
     }
     if !node_online(pool, &node_id).await? {
-        let message = "节点 Agent 离线，无法清理文件";
+        let message = "Node Agent offline, cannot clean up file";
         update_trash_failure(pool, id, "cleanup_failed", message).await?;
         return Err(Stage3Error::Conflict(message.to_string()));
     }
@@ -203,12 +203,12 @@ async fn wait_for_model_file_cleanup(
                             .map(str::to_string)
                     })
                     .or_else(|| row.get::<Option<String>, _>("error_message"))
-                    .unwrap_or_else(|| "文件清理失败".to_string());
+                    .unwrap_or_else(|| "File cleanup failed".to_string());
                 return Err(Stage3Error::Conflict(message));
             }
             "timed_out" => {
                 return Err(Stage3Error::Conflict(
-                    "文件清理超时，请确认 Agent 在线并重试".to_string(),
+                    "file cleanup timed out; confirm Agent is online and retry".to_string(),
                 ));
             }
             _ => {}
@@ -216,9 +216,10 @@ async fn wait_for_model_file_cleanup(
 
         if Instant::now() >= deadline {
             agent_tasks::mark_task_timed_out(pool, task_id).await?;
-            update_trash_failure(pool, trash_id, "cleanup_timeout", "文件清理超时").await?;
+            update_trash_failure(pool, trash_id, "cleanup_timeout", "file cleanup timed out")
+                .await?;
             return Err(Stage3Error::Conflict(
-                "文件清理超时，请确认 Agent 在线并重试".to_string(),
+                "file cleanup timed out; confirm Agent is online and retry".to_string(),
             ));
         }
         sleep(Duration::from_millis(100)).await;

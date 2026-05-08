@@ -1,25 +1,63 @@
 #![allow(dead_code)]
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
-use lightai_server::{db, routes};
+use lightai_server::{db, models, repository, routes};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
-pub const TEST_EMERGENCY_TOKEN: &str = "test-emergency-token";
+/// Create an initial admin user for integration tests.
+pub async fn ensure_initial_admin(pool: &sqlx::SqlitePool, username: &str, password: &str) {
+    if repository::user_count(pool).await.unwrap() > 0 {
+        return;
+    }
+    repository::create_user(
+        pool,
+        models::UserCreateRequest {
+            username: username.to_string(),
+            password: password.to_string(),
+            role: "admin".to_string(),
+        },
+    )
+    .await
+    .unwrap();
+}
+
+/// Log in as admin and return a session cookie header value.
+async fn admin_cookie(app: &axum::Router) -> String {
+    let response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header(header::CONTENT_TYPE, "application/json")
+                .body(Body::from(
+                    json!({"username": "admin", "password": "test-admin-pw-123"}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    response
+        .headers()
+        .get(header::SET_COOKIE)
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_string()
+}
 
 pub async fn test_app() -> axum::Router {
-    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-    db::migrate(&pool).await.unwrap();
-    routes::app_with_emergency_token(pool, TEST_EMERGENCY_TOKEN.to_string())
+    let (app, _pool) = test_app_with_pool().await;
+    app
 }
 
 pub async fn test_app_with_pool() -> (axum::Router, sqlx::SqlitePool) {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     db::migrate(&pool).await.unwrap();
-    (
-        routes::app_with_emergency_token(pool.clone(), TEST_EMERGENCY_TOKEN.to_string()),
-        pool,
-    )
+    ensure_initial_admin(&pool, "admin", "test-admin-pw-123").await;
+    let app = routes::app(pool.clone());
+    (app, pool)
 }
 
 pub async fn request(
@@ -28,10 +66,11 @@ pub async fn request(
     uri: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
+    let cookie = admin_cookie(&app).await;
     let mut builder = Request::builder()
         .method(method)
         .uri(uri)
-        .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN);
+        .header(header::COOKIE, cookie);
     let body = match body {
         Some(value) => {
             builder = builder.header(header::CONTENT_TYPE, "application/json");
@@ -134,6 +173,7 @@ pub async fn heartbeat_node_with_managed_instances(
                         "metrics": {},
                         "gpus": [],
                         "collector_errors": [],
+                        "collector_status": "no_collector_configured",
                         "agent_config": {
                             "config_version": 1,
                             "heartbeat_interval_secs": 15,
@@ -300,7 +340,7 @@ pub async fn create_runtime_environment(app: axum::Router, node_id: &str, token:
             task_id,
             "available",
             Some("0.5.0"),
-            "运行环境可用",
+            "runtime environment available",
         )
         .await;
     };
@@ -438,7 +478,7 @@ pub async fn create_model_for_node(app: axum::Router, node_id: &str, token: &str
         "/models/qwen2-7b/model.gguf",
         "verified",
         Some(1234),
-        "文件已验证",
+        "file verified",
     )
     .await;
 
@@ -505,7 +545,7 @@ pub async fn create_model_file(
         path,
         "verified",
         Some(4321),
-        "文件已验证",
+        "file verified",
     )
     .await;
 
@@ -564,7 +604,7 @@ pub async fn create_model_with_path(app: axum::Router, model_path: Option<&str>)
         "description": "test model",
         "initial_file": {
             "node_id": node_id,
-            "path": "/models/legacy/model.gguf"
+            "path": "/models/test/model.gguf"
         }
     });
     if let Some(model_path) = model_path {
@@ -583,7 +623,7 @@ pub async fn create_model_with_path(app: axum::Router, model_path: Option<&str>)
             task_id,
             "verified",
             Some(1234),
-            "文件已验证",
+            "file verified",
         )
         .await;
     };
@@ -613,8 +653,6 @@ pub async fn register_with_name_hostname(
 }
 
 pub async fn stage2_test_app() -> (sqlx::SqlitePool, axum::Router) {
-    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-    db::migrate(&pool).await.unwrap();
-    let app = routes::app_with_emergency_token(pool.clone(), TEST_EMERGENCY_TOKEN.to_string());
+    let (app, pool) = test_app_with_pool().await;
     (pool, app)
 }

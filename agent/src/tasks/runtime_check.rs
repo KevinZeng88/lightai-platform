@@ -24,14 +24,14 @@ pub async fn check_runtime_environment(
                 .and_then(|value| value.as_str())
                 .unwrap_or_default();
             if image.trim().is_empty() || image.chars().any(char::is_whitespace) {
-                return runtime_unavailable("Docker 镜像配置非法");
+                return runtime_unavailable("Docker image config is invalid");
             }
             let inspect_ok = check_docker_image_exists(image).await;
             if !inspect_ok {
                 return RuntimeEnvironmentCheckResult {
                     check_status: "available".to_string(),
                     version: None,
-                    message: "Docker 镜像配置已通过基础校验；镜像本地不存在，启动时需拉取"
+                    message: "Docker image config passed basic validation; image not present locally, will be pulled on start"
                         .to_string(),
                 };
             }
@@ -41,9 +41,9 @@ pub async fn check_runtime_environment(
                 check_status: "available".to_string(),
                 version,
                 message: if has_version {
-                    "Docker 镜像存在且基础校验通过".to_string()
+                    "Docker image exists and passed basic validation".to_string()
                 } else {
-                    "Docker 镜像基础校验通过；版本无法自动获取，可在真实启动时验证".to_string()
+                    "Docker image passed basic validation; version unavailable (may be verified at real start)".to_string()
                 },
             }
         }
@@ -65,64 +65,68 @@ pub async fn check_runtime_environment(
                 return RuntimeEnvironmentCheckResult {
                     check_status: "available".to_string(),
                     version: Some(version.to_string()),
-                    message: format!("{backend} 入口可用，使用手工填写版本 {version}"),
+                    message: format!(
+                        "{backend} entrypoint available, using manual version {version}"
+                    ),
                 };
             }
             if let Some(version) = detect_entrypoint_version(path).await {
                 return RuntimeEnvironmentCheckResult {
                     check_status: "available".to_string(),
                     version: Some(version),
-                    message: format!("{backend} 入口可用，版本已自动获取"),
+                    message: format!("{backend} entrypoint available, version auto-detected"),
                 };
             }
             RuntimeEnvironmentCheckResult {
                 check_status: "version_unavailable".to_string(),
                 version: None,
                 message: format!(
-                    "{backend} 入口可用，但版本无法自动获取：执行 --version 未返回可识别版本；可手工填写版本"
+                    "{backend} entrypoint available but version could not be auto-detected; --version did not return a recognizable version; version may be filled manually"
                 ),
             }
         }
-        _ => runtime_unavailable("运行方式不受支持"),
+        _ => runtime_unavailable("deploy type not supported"),
     }
 }
 
 pub(crate) async fn verify_controlled_entrypoint(path: &str) -> RuntimeEnvironmentCheckResult {
     if path.trim().is_empty() || has_parent_dir(path) {
-        return runtime_unavailable("入口路径非法");
+        return runtime_unavailable("invalid entrypoint path");
     }
     let path = Path::new(path);
     if !path.is_absolute() {
-        return runtime_unavailable("入口路径必须是绝对路径");
+        return runtime_unavailable("entrypoint path must be absolute");
     }
     let metadata = match tokio::fs::symlink_metadata(path).await {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return runtime_unavailable("入口文件不存在");
+            return runtime_unavailable("entrypoint file does not exist");
         }
-        Err(error) => return runtime_unavailable(&format!("入口文件不可访问：{error}")),
+        Err(error) => {
+            return runtime_unavailable(&format!("entrypoint file not accessible: {error}"))
+        }
     };
     if metadata.file_type().is_symlink() {
-        return runtime_unavailable("安全风险：入口文件不能是软链接");
+        return runtime_unavailable("Security risk: entrypoint must not be a symlink");
     }
     if !metadata.is_file() {
         return RuntimeEnvironmentCheckResult {
             check_status: "invalid_path".to_string(),
             version: None,
-            message: "入口路径不是普通文件".to_string(),
+            message: "entrypoint path is not a regular file".to_string(),
         };
     }
     if !is_executable(&metadata) {
         return RuntimeEnvironmentCheckResult {
             check_status: "not_executable".to_string(),
             version: None,
-            message: "入口文件不可执行".to_string(),
+            message: "entrypoint file is not executable".to_string(),
         };
     }
     RuntimeEnvironmentCheckResult {
         check_status: "available".to_string(),
         version: None,
-        message: "入口文件可访问，版本无法自动获取".to_string(),
+        message: "Entrypoint file is accessible; version could not be auto-detected".to_string(),
     }
 }
 

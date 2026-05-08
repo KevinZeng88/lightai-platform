@@ -5,7 +5,6 @@ pub struct Config {
     pub listen_addr: String,
     pub database_url: String,
     pub metrics_retention_days: u32,
-    pub emergency_control_token: Option<String>,
     pub password_policy: crate::repository::PasswordPolicy,
     pub session_policy: crate::repository::SessionPolicy,
     pub log_policy: crate::platform_log::LogPolicy,
@@ -14,10 +13,9 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen_addr: "127.0.0.1:8080".to_string(),
-            database_url: "sqlite://data/lightai.db".to_string(),
+            listen_addr: "0.0.0.0:10080".to_string(),
+            database_url: "sqlite://./data/lightai.db".to_string(),
             metrics_retention_days: 7,
-            emergency_control_token: None,
             password_policy: crate::repository::PasswordPolicy::default(),
             session_policy: crate::repository::SessionPolicy::default(),
             log_policy: crate::platform_log::LogPolicy::default(),
@@ -25,12 +23,22 @@ impl Default for Config {
     }
 }
 
+/// Default Server config path.
+const DEFAULT_SERVER_CONFIG_PATH: &str = "/etc/lightai/lightai-server.toml";
+
 impl Config {
+    /// Load config: `LIGHTAI_SERVER_CONFIG` env → default path → built-in defaults.
+    /// Missing default path silently falls back to built-in defaults.
     pub fn load() -> anyhow::Result<Self> {
-        match std::env::var("LIGHTAI_SERVER_CONFIG") {
-            Ok(path) if !path.trim().is_empty() => Self::from_file(path),
-            _ => Ok(Self::default()),
+        if let Ok(path) = std::env::var("LIGHTAI_SERVER_CONFIG") {
+            if !path.trim().is_empty() {
+                return Self::from_file(path);
+            }
         }
+        if std::path::Path::new(DEFAULT_SERVER_CONFIG_PATH).is_file() {
+            return Self::from_file(DEFAULT_SERVER_CONFIG_PATH);
+        }
+        Ok(Self::default())
     }
 
     pub fn from_file(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
@@ -56,9 +64,6 @@ impl Config {
             }
         }
         if let Some(auth) = file_config.auth {
-            if let Some(value) = auth.emergency_control_token {
-                config.emergency_control_token = non_empty_token(value);
-            }
             if let Some(password) = auth.password {
                 if let Some(value) = password.min_length {
                     config.password_policy.min_length = value;
@@ -87,9 +92,6 @@ impl Config {
                 }
             }
         }
-        if let Ok(value) = std::env::var("LIGHTAI_EMERGENCY_CONTROL_TOKEN") {
-            config.emergency_control_token = non_empty_token(value);
-        }
         if let Some(logs) = file_config.logs {
             if let Some(value) = logs.dir {
                 config.log_policy.log_dir = value;
@@ -113,11 +115,6 @@ impl Config {
     }
 
     pub fn validate_auth(&self) -> anyhow::Result<()> {
-        if let Some(token) = self.emergency_control_token.as_deref() {
-            if token.trim().len() < 16 {
-                anyhow::bail!("emergency control token must be at least 16 characters");
-            }
-        }
         if self.password_policy.min_length < 8 {
             anyhow::bail!("password min_length must be at least 8");
         }
@@ -159,7 +156,6 @@ struct MetricsSection {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct AuthSection {
-    emergency_control_token: Option<String>,
     password: Option<PasswordSection>,
     session: Option<SessionSection>,
 }
@@ -189,13 +185,4 @@ struct LogsSection {
     max_file_bytes: Option<u64>,
     retention_files: Option<usize>,
     retention_days: Option<u64>,
-}
-
-fn non_empty_token(value: String) -> Option<String> {
-    let trimmed = value.trim();
-    if trimmed.is_empty() {
-        None
-    } else {
-        Some(trimmed.to_string())
-    }
 }

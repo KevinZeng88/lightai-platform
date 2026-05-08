@@ -99,14 +99,14 @@ async fn runtime_environment_create_requires_agent_check_success() {
             task_id,
             "unavailable",
             None,
-            "脚本不存在或不可访问",
+            "script not found or not accessible",
         )
         .await;
     };
     let ((status, json), _) = tokio::join!(create_request, agent);
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(json["message"], "脚本不存在或不可访问");
+    assert_eq!(json["message"], "script not found or not accessible");
 
     let (status, list) = request(app, "GET", "/api/runtime-environments", None).await;
     assert_eq!(status, StatusCode::OK);

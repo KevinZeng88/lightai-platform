@@ -40,6 +40,49 @@ impl CollectorConfig {
     }
 }
 
+/// Aggregated GPU collector status for reporting to Server / Web.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectorStatus {
+    /// No collector root configured — Agent will not execute any collector.
+    NoCollectorConfigured,
+    /// Collector(s) configured but all failed (every enabled collector had errors).
+    CollectorConfiguredButFailed,
+    /// Collector(s) ran successfully but discovered zero GPU devices.
+    CollectorOkNoDevices,
+    /// Collector(s) ran successfully and discovered GPU devices.
+    CollectorOkDevicesFound,
+}
+
+impl CollectorStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NoCollectorConfigured => "no_collector_configured",
+            Self::CollectorConfiguredButFailed => "collector_configured_but_failed",
+            Self::CollectorOkNoDevices => "collector_ok_no_devices",
+            Self::CollectorOkDevicesFound => "collector_ok_devices_found",
+        }
+    }
+}
+
+/// Determine collector status from config, errors, and discovered GPUs.
+pub fn compute_collector_status(
+    collector_root: Option<&str>,
+    collector_errors: &[String],
+    gpus: &[GpuMetrics],
+) -> CollectorStatus {
+    if collector_root.is_none() {
+        return CollectorStatus::NoCollectorConfigured;
+    }
+    if !gpus.is_empty() {
+        return CollectorStatus::CollectorOkDevicesFound;
+    }
+    if collector_errors.is_empty() {
+        CollectorStatus::CollectorOkNoDevices
+    } else {
+        CollectorStatus::CollectorConfiguredButFailed
+    }
+}
+
 /// Run all enabled script collectors and aggregate results.
 ///
 /// - If no collector root is configured, no GPU script executes.
@@ -76,7 +119,7 @@ async fn collect_via_dirs(
     if registry.is_empty() && !dirs.is_empty() {
         errors.push(
             "collector registry is empty — no collectors will execute. \
-             Register collector hashes via Web '采集器登记' page."
+             Register collector hashes via the Web collector registry page."
                 .to_string(),
         );
     }

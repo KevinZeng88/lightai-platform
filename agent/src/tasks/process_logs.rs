@@ -20,7 +20,7 @@ pub(crate) fn sanitize_log(text: &str) -> String {
             .iter()
             .any(|needle| lower.contains(needle))
             {
-                "[已隐藏敏感日志行]".to_string()
+                "[redacted — sensitive log line]".to_string()
             } else {
                 line.chars().take(500).collect()
             }
@@ -51,8 +51,8 @@ pub(crate) async fn log_tail_with_path(
     log_path: Option<&str>,
 ) -> Option<String> {
     match (log_path, log_tail(log_buffer).await) {
-        (Some(path), Some(tail)) => Some(format!("日志文件：{path}\n{tail}")),
-        (Some(path), None) => Some(format!("日志文件：{path}")),
+        (Some(path), Some(tail)) => Some(format!("log file: {path}\n{tail}")),
+        (Some(path), None) => Some(format!("log file: {path}")),
         (None, tail) => tail,
     }
 }
@@ -108,23 +108,23 @@ pub(crate) async fn controlled_log_path(
     instance_id: &str,
 ) -> Result<PathBuf, String> {
     if log_dir.trim().is_empty() || has_parent_dir(log_dir) {
-        return Err("日志目录路径非法".to_string());
+        return Err("invalid log directory path".to_string());
     }
     let dir = Path::new(log_dir);
     if !dir.is_absolute() {
-        return Err("日志目录必须是绝对路径".to_string());
+        return Err("log directory must be an absolute path".to_string());
     }
     if let Ok(metadata) = tokio::fs::symlink_metadata(dir).await {
         if metadata.file_type().is_symlink() {
-            return Err("日志目录不能是软链接".to_string());
+            return Err("log directory must not be a symlink".to_string());
         }
         if !metadata.is_dir() {
-            return Err("日志目录不是目录".to_string());
+            return Err("log directory is not a directory".to_string());
         }
     }
     tokio::fs::create_dir_all(dir)
         .await
-        .map_err(|error| format!("创建日志目录失败：{error}"))?;
+        .map_err(|error| format!("failed to create log directory: {error}"))?;
     let safe_id = instance_id
         .chars()
         .map(|ch| {

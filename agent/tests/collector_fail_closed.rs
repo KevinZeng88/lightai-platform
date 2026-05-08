@@ -266,3 +266,94 @@ async fn registry_update_flows_to_next_cycle() {
     assert!(mm.exists());
     assert!(!has_error(&e2, "not registered"), "{e2:?}");
 }
+
+/// When nvidia-smi is at an uncommon absolute path, the collector script
+/// should find it via the absolute-path search and execute it successfully.
+#[tokio::test]
+async fn script_finds_tool_via_absolute_path_fallback() {
+    let tc = tmp_collector("abs-path", "test-coll", "1.0.0");
+    let fake_bin = tc.dir.join("fake-smi");
+
+    // Create a fake nvidia-smi that just outputs the expected TSV.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(
+            &fake_bin,
+            "#!/bin/sh\necho '0, FakeGPU, GPU-000, 0000:01:00.0, 550.54'\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake_bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // Write a discover script that searches absolute paths (like the real NVIDIA one).
+    let ds = format!(
+        r#"#!/bin/sh
+set -e
+export PATH="/usr/bin:/bin"
+NVIDIA_SMI_BIN=""
+for c in /no/such/smi /tmp/no/smi "{}" /usr/bin/nvidia-smi; do
+    if [ -x "$c" ]; then NVIDIA_SMI_BIN="$c"; break; fi
+done
+if [ -z "$NVIDIA_SMI_BIN" ]; then
+    printf 'STATUS\t1\tnot_available\ttest\ttest-coll\ttool not found; checked paths; PATH=%s\n' "$PATH" >&2
+    exit 0
+fi
+printf 'STATUS\t1\tok\ttest\ttest-coll\t\n'
+"$NVIDIA_SMI_BIN" --query-gpu=index,name,uuid,pci.bus_id,driver_version --format=csv,noheader,nounits 2>/dev/null \
+    | while IFS=',' read -r idx name uuid pci driver; do
+    idx=$(echo "$idx" | tr -d ' ')
+    name=$(echo "$name" | tr -d ' ')
+    uuid=$(echo "$uuid" | tr -d ' ')
+    printf 'DEVICE\t1\ttest:GPU-000\ttest\t0\t%s\t%s\t%s\t\n' "$name" "$uuid" "$driver"
+done
+"#,
+        fake_bin.display()
+    );
+    let dp = tc.dir.join("discover.sh");
+    std::fs::write(&dp, ds).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&dp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    // metrics.sh: same lookup, just outputs METRIC.
+    let ms = format!(
+        r#"#!/bin/sh
+set -e
+export PATH="/usr/bin:/bin"
+NVIDIA_SMI_BIN=""
+for c in /no/such/smi /tmp/no/smi "{}" /usr/bin/nvidia-smi; do
+    if [ -x "$c" ]; then NVIDIA_SMI_BIN="$c"; break; fi
+done
+if [ -z "$NVIDIA_SMI_BIN" ]; then
+    printf 'STATUS\t1\tnot_available\ttest\ttest-coll\ttool not found; checked paths; PATH=%s\n' "$PATH" >&2
+    exit 0
+fi
+printf 'STATUS\t1\tok\ttest\ttest-coll\t\n'
+"$NVIDIA_SMI_BIN" --query-gpu=uuid,memory.total,memory.used --format=csv,noheader,nounits 2>/dev/null \
+    | while IFS=',' read -r uuid memt memu; do
+    uuid=$(echo "$uuid" | tr -d ' ')
+    printf 'METRIC\t1\ttest:GPU-000\t100\t50\t50\t0\t0\t0\t0\tok\t\n'
+done
+"#,
+        fake_bin.display()
+    );
+    let mp = tc.dir.join("metrics.sh");
+    std::fs::write(&mp, ms).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&mp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let config = make_config(&tc, vec![registry_entry("test-coll", "1.0.0", &tc, true)]);
+    let (gpus, errors) = gpu::collect_gpus(&config).await;
+    assert!(
+        !has_error(&errors, "not found"),
+        "should have found fake-smi via abs path: {errors:?}"
+    );
+    assert_eq!(gpus.len(), 1);
+    assert_eq!(gpus[0].gpu_key, "test:GPU-000");
+}

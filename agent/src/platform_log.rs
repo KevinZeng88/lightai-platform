@@ -147,7 +147,7 @@ pub fn sanitize(value: &str) -> String {
             .iter()
             .any(|needle| lower.contains(needle))
             {
-                "[已隐藏敏感日志行]".to_string()
+                "[redacted — sensitive log line]".to_string()
             } else {
                 line.chars().take(1000).collect()
             }
@@ -160,10 +160,10 @@ async fn prepare_dir(value: &str) -> anyhow::Result<PathBuf> {
     let path = PathBuf::from(value);
     if let Ok(metadata) = tokio::fs::symlink_metadata(&path).await {
         if metadata.file_type().is_symlink() {
-            anyhow::bail!("日志目录不能是软链接");
+            anyhow::bail!("log directory must not be a symlink");
         }
         if !metadata.is_dir() {
-            anyhow::bail!("日志路径不是目录");
+            anyhow::bail!("log path is not a directory");
         }
     }
     tokio::fs::create_dir_all(&path).await?;

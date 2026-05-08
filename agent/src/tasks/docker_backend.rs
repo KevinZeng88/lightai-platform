@@ -180,10 +180,10 @@ pub(crate) fn merge_docker_config(
     let ov = overrides.cloned().unwrap_or_default();
 
     if rt.image.trim().is_empty() {
-        return Err("Docker 运行环境缺少镜像配置".to_string());
+        return Err("Docker runtime missing image config".to_string());
     }
     if model_host_path.trim().is_empty() {
-        return Err("模型文件路径未配置".to_string());
+        return Err("Model file path not configured".to_string());
     }
 
     let container_model = if ov.model_container_path.trim().is_empty() {
@@ -198,7 +198,7 @@ pub(crate) fn merge_docker_config(
 
     let served_name = if ov.served_model_name.trim().is_empty() {
         if model_name.trim().is_empty() {
-            return Err("served_model_name 未配置".to_string());
+            return Err("served_model_name not configured".to_string());
         }
         model_name.to_string()
     } else {
@@ -289,7 +289,8 @@ pub(crate) fn parse_docker_payload(payload: &serde_json::Value) -> Result<Docker
     } else {
         params.clone()
     };
-    serde_json::from_value::<DockerPayload>(parsed).map_err(|e| format!("Docker 参数解析失败：{e}"))
+    serde_json::from_value::<DockerPayload>(parsed)
+        .map_err(|e| format!("Docker param parse failed: {e}"))
 }
 
 // ── Docker run arg construction ──
@@ -297,7 +298,7 @@ pub(crate) fn parse_docker_payload(payload: &serde_json::Value) -> Result<Docker
 pub(crate) fn build_docker_run_args(payload: &DockerPayload) -> Result<Vec<String>, String> {
     let docker = &payload.docker;
     if docker.image.trim().is_empty() {
-        return Err("Docker 镜像未配置".to_string());
+        return Err("Docker image not configured".to_string());
     }
     let mut args = vec!["run".to_string()];
     if !docker.container_name.trim().is_empty() {
@@ -376,10 +377,10 @@ pub(crate) fn build_vllm_args(payload: &DockerPayload) -> Vec<String> {
 
 fn validate_docker_arg(arg: &str) -> Result<(), String> {
     if arg.trim().is_empty() {
-        return Err("Docker 高级参数不能为空".to_string());
+        return Err("Docker extra args must not be empty".to_string());
     }
     if arg.len() > 512 || arg.chars().any(|ch| ch.is_control()) {
-        return Err("Docker 高级参数包含非法字符".to_string());
+        return Err("Docker extra args contain invalid characters".to_string());
     }
     Ok(())
 }
@@ -411,7 +412,7 @@ fn sanitize_docker_arg(arg: &str) -> String {
     .iter()
     .any(|needle| lower.contains(needle))
     {
-        "[已隐藏]".to_string()
+        "[redacted]".to_string()
     } else {
         arg.to_string()
     }
@@ -430,7 +431,7 @@ pub(crate) async fn start_docker_container(
                 &LogPolicy::default(),
                 "agent.log",
                 "error",
-                &format!("Docker start 参数构建失败 instance_id={instance_id}: {message}"),
+                &format!("Docker start arg build failed instance_id={instance_id}: {message}"),
             )
             .await;
             return instance_failure(&message);
@@ -486,12 +487,12 @@ pub(crate) async fn start_docker_container(
                 "agent.log",
                 "error",
                 &format!(
-                    "Docker run 进程启动失败 instance_id={instance_id}: {error} command_summary={command_summary}"
+                    "Docker run process start failed instance_id={instance_id}: {error} command_summary={command_summary}"
                 ),
             )
             .await;
             return instance_failure_with_details(
-                &format!("Docker run 失败：{error}"),
+                &format!("Docker run failed: {error}"),
                 None,
                 Some(command_summary),
             );
@@ -502,11 +503,15 @@ pub(crate) async fn start_docker_container(
                 "agent.log",
                 "error",
                 &format!(
-                    "Docker run 超时 instance_id={instance_id} command_summary={command_summary}"
+                    "Docker run timed out instance_id={instance_id} command_summary={command_summary}"
                 ),
             )
             .await;
-            return instance_failure_with_details("Docker run 超时", None, Some(command_summary));
+            return instance_failure_with_details(
+                "Docker run timed out",
+                None,
+                Some(command_summary),
+            );
         }
     };
 
@@ -517,7 +522,7 @@ pub(crate) async fn start_docker_container(
         let detail = stderr_text
             .lines()
             .next()
-            .unwrap_or("Docker run 失败")
+            .unwrap_or("Docker run failed")
             .chars()
             .take(300)
             .collect::<String>();
@@ -527,12 +532,12 @@ pub(crate) async fn start_docker_container(
             "agent.log",
             "error",
             &format!(
-                "Docker run 失败 instance_id={instance_id} container_name={container_name} detail={detail} command_summary={command_summary}"
+                "Docker run failed instance_id={instance_id} container_name={container_name} detail={detail} command_summary={command_summary}"
             ),
         )
         .await;
         return instance_failure_with_details(
-            &format!("Docker run 失败：{detail}"),
+            &format!("Docker run failed：{detail}"),
             Some(stderr_summary),
             Some(command_summary),
         );
@@ -545,7 +550,7 @@ pub(crate) async fn start_docker_container(
         "agent.log",
         "info",
         &format!(
-            "Docker 容器已启动 instance_id={instance_id} container_id={container_id} container_name={container_name}"
+            "Docker container started instance_id={instance_id} container_id={container_id} container_name={container_name}"
         ),
     )
     .await;
@@ -555,7 +560,7 @@ pub(crate) async fn start_docker_container(
 
     ModelInstanceTaskResult {
         instance_status: "running".to_string(),
-        message: format!("Docker 容器已启动 container_id={container_id}"),
+        message: format!("Docker container started container_id={container_id}"),
         base_url: Some(base_url.clone()),
         endpoint_url: Some(base_url),
         process_id: None,
@@ -599,14 +604,14 @@ pub(crate) async fn stop_docker_container(record: &ManagedProcessRecord) -> Resu
         .container_id
         .as_deref()
         .or(record.container_name.as_deref())
-        .ok_or_else(|| "缺少容器 ID 或名称，无法停止".to_string())?;
+        .ok_or_else(|| "missing container ID or name; cannot stop".to_string())?;
     let instance_id = record.instance_id.as_str();
 
     let _ = platform_log::append(
         &LogPolicy::default(),
         "agent.log",
         "info",
-        &format!("Docker stop 开始 instance_id={instance_id} container_ref={container_ref}"),
+        &format!("Docker stop starting instance_id={instance_id} container_ref={container_ref}"),
     )
     .await;
 
@@ -628,11 +633,11 @@ pub(crate) async fn stop_docker_container(record: &ManagedProcessRecord) -> Resu
                 "agent.log",
                 "error",
                 &format!(
-                    "Docker stop 进程失败 instance_id={instance_id} container_ref={container_ref}: {e}"
+                    "Docker stop process failed instance_id={instance_id} container_ref={container_ref}: {e}"
                 ),
             )
             .await;
-            return Err(format!("Docker stop 失败：{e}"));
+            return Err(format!("Docker stop failed: {e}"));
         }
         Err(_) => {
             let _ = platform_log::append(
@@ -640,11 +645,11 @@ pub(crate) async fn stop_docker_container(record: &ManagedProcessRecord) -> Resu
                 "agent.log",
                 "error",
                 &format!(
-                    "Docker stop 超时 instance_id={instance_id} container_ref={container_ref}"
+                    "Docker stop timed out instance_id={instance_id} container_ref={container_ref}"
                 ),
             )
             .await;
-            return Err("Docker stop 超时".to_string());
+            return Err("Docker stop timed out".to_string());
         }
     };
 
@@ -655,19 +660,21 @@ pub(crate) async fn stop_docker_container(record: &ManagedProcessRecord) -> Resu
             "agent.log",
             "error",
             &format!(
-                "Docker stop 失败 instance_id={instance_id} container_ref={container_ref}: {}",
+                "Docker stop failed instance_id={instance_id} container_ref={container_ref}: {}",
                 stderr.trim()
             ),
         )
         .await;
-        return Err(format!("Docker stop 失败：{}", stderr.trim()));
+        return Err(format!("Docker stop failed: {}", stderr.trim()));
     }
 
     let _ = platform_log::append(
         &LogPolicy::default(),
         "agent.log",
         "info",
-        &format!("Docker 容器已停止 instance_id={instance_id} container_ref={container_ref}"),
+        &format!(
+            "Docker container stopped instance_id={instance_id} container_ref={container_ref}"
+        ),
     )
     .await;
 
@@ -689,27 +696,27 @@ pub(crate) async fn inspect_docker_container(
             .output(),
     )
     .await
-    .map_err(|_| "Docker inspect 超时".to_string())?
-    .map_err(|e| format!("Docker inspect 失败：{e}"))?;
+    .map_err(|_| "Docker inspect timed out".to_string())?
+    .map_err(|e| format!("Docker inspect failed: {e}"))?;
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         if stderr.contains("No such object") {
             return Ok(DockerContainerStatus {
                 running: false,
-                message: "容器不存在".to_string(),
+                message: "container not found".to_string(),
                 exit_code: None,
             });
         }
-        return Err(format!("Docker inspect 失败：{}", stderr.trim()));
+        return Err(format!("Docker inspect failed: {}", stderr.trim()));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let parsed: Vec<serde_json::Value> =
-        serde_json::from_str(&stdout).map_err(|e| format!("Docker inspect 输出解析失败：{e}"))?;
+    let parsed: Vec<serde_json::Value> = serde_json::from_str(&stdout)
+        .map_err(|e| format!("Docker inspect output parse failed: {e}"))?;
     let container = parsed
         .first()
-        .ok_or_else(|| "Docker inspect 返回空数组".to_string())?;
+        .ok_or_else(|| "Docker inspect returned empty array".to_string())?;
     let running = container["State"]["Running"].as_bool().unwrap_or(false);
     let exit_code = container["State"]["ExitCode"].as_i64();
     let error_msg = container["State"]["Error"]
@@ -717,13 +724,13 @@ pub(crate) async fn inspect_docker_container(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
     let message = if running {
-        "容器正在运行".to_string()
+        "container running".to_string()
     } else if let Some(ref error) = error_msg {
-        format!("容器已退出，错误信息：{error}")
+        format!("container exited, error: {error}")
     } else {
         format!(
-            "容器已退出，退出码：{}",
-            exit_code.map_or("未知".to_string(), |c| c.to_string())
+            "container exited, exit code: {}",
+            exit_code.map_or("unknown".to_string(), |c| c.to_string())
         )
     };
     Ok(DockerContainerStatus {
@@ -756,8 +763,8 @@ pub(crate) async fn read_docker_logs(
             .output(),
     )
     .await
-    .map_err(|_| "Docker logs 超时".to_string())?
-    .map_err(|e| format!("Docker logs 失败：{e}"))?;
+    .map_err(|_| "Docker logs timed out".to_string())?
+    .map_err(|e| format!("Docker logs failed: {e}"))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -778,7 +785,7 @@ pub(crate) async fn check_docker_record(
         None => {
             return super::process::DockerCheckResult {
                 is_running: false,
-                message: "缺少容器 ID 或名称".to_string(),
+                message: "missing container ID or name".to_string(),
             }
         }
     };
@@ -806,13 +813,13 @@ pub(crate) async fn check_docker_record(
                 "agent.log",
                 "warn",
                 &format!(
-                    "Docker inspect 失败 instance_id={instance_id} container_ref={container_ref}: {error}"
+                    "Docker inspect failed instance_id={instance_id} container_ref={container_ref}: {error}"
                 ),
             )
             .await;
             super::process::DockerCheckResult {
                 is_running: false,
-                message: format!("Docker 容器检查失败：{error}"),
+                message: format!("Docker container check failed: {error}"),
             }
         }
     }
@@ -1146,7 +1153,7 @@ mod tests {
         let payload = DockerPayload {
             docker: DockerInstanceParams {
                 image: "vllm/vllm-openai:latest".to_string(),
-                container_name: "legacy-test".to_string(),
+                container_name: "test-container".to_string(),
                 gpu: "all".to_string(),
                 ipc: "host".to_string(),
                 ports: vec![DockerPortMapping {
@@ -1170,7 +1177,7 @@ mod tests {
         };
         let args = build_docker_run_args(&payload).unwrap();
         assert!(args.contains(&"--name".to_string()));
-        assert!(args.contains(&"legacy-test".to_string()));
+        assert!(args.contains(&"test-container".to_string()));
     }
 
     #[test]

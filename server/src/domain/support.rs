@@ -94,7 +94,8 @@ pub(super) fn validate_runtime_entrypoints(
             .is_some_and(|value| !value.trim().is_empty())
     {
         return Err(Stage3Error::BadRequest(
-            "运行环境不再配置 External URL，请在实例中接入外部服务".to_string(),
+            "Runtime no longer accepts External URL; connect external services via Instance"
+                .to_string(),
         ));
     }
     for (field, value) in [
@@ -112,12 +113,12 @@ pub(super) fn validate_runtime_entrypoints(
     match request.deploy_type.as_str() {
         "docker" if request.docker_image.as_deref().is_none_or(str::is_empty) => {
             return Err(Stage3Error::BadRequest(
-                "Docker 运行环境必须配置镜像".to_string(),
+                "Docker runtime must specify an image".to_string(),
             ));
         }
         "script" | "binary" if request.binary_path.as_deref().is_none_or(str::is_empty) => {
             return Err(Stage3Error::BadRequest(
-                "运行环境必须配置受控入口路径".to_string(),
+                "Runtime must specify a controlled entry path".to_string(),
             ));
         }
         _ => {}
@@ -224,7 +225,7 @@ pub(super) fn map_sqlx_conflict(error: sqlx::Error) -> Stage3Error {
                 .message()
                 .contains("UNIQUE constraint failed") =>
         {
-            Stage3Error::Conflict("模型名称已存在，请使用其他名称".to_string())
+            Stage3Error::Conflict("model name already exists; use a different name".to_string())
         }
         _ => Stage3Error::Internal(error.into()),
     }

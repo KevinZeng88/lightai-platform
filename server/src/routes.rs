@@ -28,23 +28,8 @@ struct HealthResponse {
 }
 
 pub fn app(pool: SqlitePool) -> Router {
-    let emergency_token = std::env::var("LIGHTAI_EMERGENCY_CONTROL_TOKEN")
-        .ok()
-        .filter(|value| !value.trim().is_empty());
-    app_with_emergency_control_token(pool, emergency_token)
-}
-
-pub fn app_with_emergency_token(pool: SqlitePool, emergency_token: String) -> Router {
-    app_with_emergency_control_token(pool, Some(emergency_token))
-}
-
-pub fn app_with_emergency_control_token(
-    pool: SqlitePool,
-    emergency_control_token: Option<String>,
-) -> Router {
     app_with_auth_policies(
         pool,
-        emergency_control_token,
         repository::PasswordPolicy::default(),
         repository::SessionPolicy::default(),
     )
@@ -52,16 +37,10 @@ pub fn app_with_emergency_control_token(
 
 pub fn app_with_auth_policies(
     pool: SqlitePool,
-    emergency_control_token: Option<String>,
     password_policy: repository::PasswordPolicy,
     session_policy: repository::SessionPolicy,
 ) -> Router {
-    let auth_state = AuthState::new(
-        pool.clone(),
-        emergency_control_token,
-        password_policy,
-        session_policy,
-    );
+    let auth_state = AuthState::new(pool.clone(), password_policy, session_policy);
     Router::new()
         .route("/health", get(health))
         .route("/api/setup/status", get(setup_status))
@@ -77,6 +56,10 @@ pub fn app_with_auth_policies(
         .route("/api/groups/{id}/members", put(update_group_members))
         .route("/api/agent/register", post(register_agent))
         .route("/api/agent/heartbeat", post(agent_heartbeat))
+        .route(
+            "/api/agent/collector-registry",
+            get(agent_collector_registry),
+        )
         .route("/api/nodes", get(list_nodes))
         .route("/api/config/agent", get(list_agent_config_policies))
         .route(
@@ -117,7 +100,9 @@ pub fn app_with_auth_policies(
         )
         .route(
             "/api/collector-registry/{id}/{version}",
-            get(get_collector_entry).put(update_collector_entry),
+            get(get_collector_entry)
+                .put(update_collector_entry)
+                .delete(delete_collector_entry),
         )
         .route("/api/models", get(list_models).post(create_model))
         .route(
@@ -192,7 +177,6 @@ pub fn app_with_auth_policies(
 #[derive(Clone)]
 struct AuthState {
     pool: SqlitePool,
-    emergency_token_hash: Option<String>,
     password_policy: repository::PasswordPolicy,
     session_policy: repository::SessionPolicy,
 }
@@ -206,23 +190,14 @@ struct AuthPolicies {
 impl AuthState {
     fn new(
         pool: SqlitePool,
-        emergency_token: Option<String>,
         password_policy: repository::PasswordPolicy,
         session_policy: repository::SessionPolicy,
     ) -> Self {
         Self {
             pool,
-            emergency_token_hash: emergency_token
-                .map(|token| crate::auth::hash_token(token.trim())),
             password_policy,
             session_policy,
         }
-    }
-
-    fn verify_emergency_token(&self, token: &str) -> bool {
-        self.emergency_token_hash
-            .as_deref()
-            .is_some_and(|hash| crate::auth::verify_token(token.trim(), hash))
     }
 }
 
@@ -242,19 +217,6 @@ async fn control_plane_auth(
         return next.run(request).await;
     }
 
-    let token = management_token(&headers);
-    if token.is_some_and(|token| auth.verify_emergency_token(token)) {
-        request.extensions_mut().insert(AuthUser {
-            id: "emergency".to_string(),
-            username: "emergency".to_string(),
-            role: "admin".to_string(),
-            effective_role: "admin".to_string(),
-            enabled: true,
-            must_change_password: false,
-        });
-        return next.run(request).await;
-    }
-
     if let Some(session_token) = session_cookie(&headers) {
         match repository::authenticate_session(&auth.pool, session_token, &auth.session_policy)
             .await
@@ -262,7 +224,7 @@ async fn control_plane_auth(
             Ok(Some(user)) => {
                 if user.must_change_password && !is_password_change_allowed_path(path) {
                     return forbidden_response_with_message(
-                        "必须修改密码后才能继续使用控制台".to_string(),
+                        "Password change required before continuing".to_string(),
                     );
                 }
                 if !is_authorized_for_path(&user, request.method(), path) {
@@ -282,7 +244,7 @@ async fn control_plane_auth(
         StatusCode::UNAUTHORIZED,
         Json(ErrorResponse {
             error: "unauthorized",
-            message: Some("请先登录".to_string()),
+            message: Some("Please log in".to_string()),
         }),
     )
         .into_response()
@@ -317,7 +279,7 @@ fn is_password_change_allowed_path(path: &str) -> bool {
 }
 
 fn forbidden_response() -> Response {
-    forbidden_response_with_message("当前用户没有权限执行该操作".to_string())
+    forbidden_response_with_message("Insufficient permissions for this operation".to_string())
 }
 
 fn forbidden_response_with_message(message: String) -> Response {
@@ -337,13 +299,6 @@ fn session_cookie(headers: &HeaderMap) -> Option<&str> {
         let (name, value) = part.trim().split_once('=')?;
         (name == "lightai_session" && !value.is_empty()).then_some(value)
     })
-}
-
-fn management_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get("x-lightai-control-token")
-        .and_then(|value| value.to_str().ok())
-        .or_else(|| bearer_token(headers))
 }
 
 async fn login(
@@ -646,7 +601,7 @@ async fn register_agent(
         Ok(response) => response,
         Err(error) => {
             let msg = error.to_string();
-            if msg.contains("相同名称不允许") || msg.contains("相同主机不允许") {
+            if msg.contains("same name cannot") || msg.contains("same host cannot") {
                 return Err(ApiError::BadRequest(msg));
             }
             return Err(ApiError::Internal(error));
@@ -658,7 +613,7 @@ async fn register_agent(
             .unwrap_or_default(),
         "server.log",
         "info",
-        &format!("Agent 注册成功 node_id={}", response.node_id),
+        &format!("Agent registered successfully node_id={}", response.node_id),
     )
     .await;
     Ok(Json(response))
@@ -686,6 +641,23 @@ async fn agent_heartbeat(
     }))
 }
 
+async fn agent_collector_registry(
+    State(pool): State<SqlitePool>,
+    headers: HeaderMap,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let token = bearer_token(&headers).ok_or(ApiError::Unauthorized)?;
+    // Authenticate via any registered node's token — the registry is global,
+    // so we verify the token is valid for any node.
+    let valid = repository::any_node_with_token(&pool, token).await?;
+    if !valid {
+        return Err(ApiError::Unauthorized);
+    }
+    let entries = repository::list_collector_registry(&pool)
+        .await
+        .unwrap_or_default();
+    Ok(Json(serde_json::json!({ "collectors": entries })))
+}
+
 async fn list_nodes(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<crate::models::NodeListResponse>, ApiError> {
@@ -709,26 +681,24 @@ async fn read_logs(
                 max_bytes,
             )
             .await?,
-            message: Some("Server 日志读取成功".to_string()),
+            message: Some("Server log loaded".to_string()),
         })),
         "agent" => {
-            let node_id = query
-                .node_id
-                .as_deref()
-                .ok_or_else(|| ApiError::BadRequest("查看 Agent 日志必须选择节点".to_string()))?;
+            let node_id = query.node_id.as_deref().ok_or_else(|| {
+                ApiError::BadRequest("Node selection required to view Agent log".to_string())
+            })?;
             Ok(Json(crate::models::LogResponse {
                 source_type: "agent".to_string(),
                 node_id: Some(node_id.to_string()),
                 instance_id: None,
                 content: domain::read_agent_log(&pool, node_id, max_bytes).await?,
-                message: Some("Agent 日志读取成功".to_string()),
+                message: Some("Agent log loaded".to_string()),
             }))
         }
         "instance" => {
-            let instance_id = query
-                .instance_id
-                .as_deref()
-                .ok_or_else(|| ApiError::BadRequest("查看实例日志必须选择实例".to_string()))?;
+            let instance_id = query.instance_id.as_deref().ok_or_else(|| {
+                ApiError::BadRequest("Instance selection required to view instance log".to_string())
+            })?;
             let instance = domain::model_instance(&pool, instance_id).await?;
             Ok(Json(crate::models::LogResponse {
                 source_type: "instance".to_string(),
@@ -737,8 +707,8 @@ async fn read_logs(
                 content: instance
                     .log_tail
                     .or(instance.last_error)
-                    .unwrap_or_else(|| "暂无实例日志".to_string()),
-                message: Some("实例日志读取成功".to_string()),
+                    .unwrap_or_else(|| "No instance log available".to_string()),
+                message: Some("Instance log loaded".to_string()),
             }))
         }
         "errors" => Ok(Json(crate::models::LogResponse {
@@ -746,16 +716,18 @@ async fn read_logs(
             node_id: None,
             instance_id: None,
             content: domain::recent_error_summary(&pool).await?,
-            message: Some("最近错误摘要读取成功".to_string()),
+            message: Some("Recent error summary loaded".to_string()),
         })),
         "frontend" => Ok(Json(crate::models::LogResponse {
             source_type: "frontend".to_string(),
             node_id: None,
             instance_id: None,
             content: domain::frontend_error_summary(&pool).await?,
-            message: Some("前端错误日志读取成功".to_string()),
+            message: Some("Frontend error log loaded".to_string()),
         })),
-        _ => Err(ApiError::BadRequest("日志类型不受支持".to_string())),
+        _ => Err(ApiError::BadRequest(
+            "unsupported log source type".to_string(),
+        )),
     }
 }
 
@@ -1002,9 +974,23 @@ async fn delete_runtime_environment(
 
 async fn check_runtime_environment(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::RuntimeEnvironmentView>, ApiError> {
-    Ok(Json(domain::check_runtime_environment(&pool, &id).await?))
+    let view = domain::check_runtime_environment(&pool, &id).await?;
+    audit_actor_result(
+        &pool,
+        &user,
+        "runtime.check",
+        "runtime_environment",
+        Some(&id),
+        view.node_id.as_deref(),
+        None,
+        "success",
+        None,
+    )
+    .await;
+    Ok(Json(view))
 }
 
 async fn list_models(
@@ -1332,16 +1318,29 @@ async fn test_model_instance(
 
 async fn refresh_instance_logs(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::LogResponse>, ApiError> {
     let content = domain::refresh_instance_logs(&pool, &id).await?;
     let instance = domain::model_instance(&pool, &id).await?;
+    audit_actor_result(
+        &pool,
+        &user,
+        "instance.logs.refresh",
+        "model_instance",
+        Some(&id),
+        instance.node_id.as_deref(),
+        Some(&id),
+        "success",
+        None,
+    )
+    .await;
     Ok(Json(crate::models::LogResponse {
         source_type: "instance".to_string(),
         node_id: instance.node_id.clone(),
         instance_id: Some(id),
         content,
-        message: Some("实例日志已刷新".to_string()),
+        message: Some("Instance log refreshed".to_string()),
     }))
 }
 
@@ -1369,7 +1368,7 @@ async fn report_frontend_error(
             .unwrap_or_default(),
         "server.log",
         "warn",
-        &format!("前端错误：{message}"),
+        &format!("Frontend error: {message}"),
     )
     .await;
     Ok(StatusCode::OK)
@@ -1528,11 +1527,7 @@ async fn audit_actor_result(
     result: &str,
     error_message: Option<&str>,
 ) {
-    let actor_type = if actor.id == "emergency" {
-        "system-emergency"
-    } else {
-        "user"
-    };
+    let actor_type = "user";
     let detail_json = serde_json::json!({
         "actor_username": actor.username,
         "effective_role": actor.effective_role,
@@ -1591,7 +1586,7 @@ impl IntoResponse for ApiError {
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorResponse {
                     error: "unauthorized",
-                    message: Some("请先登录或检查账号密码".to_string()),
+                    message: Some("Please log in or check credentials".to_string()),
                 }),
             )
                 .into_response(),
@@ -1599,7 +1594,7 @@ impl IntoResponse for ApiError {
                 StatusCode::FORBIDDEN,
                 Json(ErrorResponse {
                     error: "forbidden",
-                    message: Some("当前用户没有权限执行该操作".to_string()),
+                    message: Some("Insufficient permissions for this operation".to_string()),
                 }),
             )
                 .into_response(),
@@ -1629,13 +1624,13 @@ impl IntoResponse for ApiError {
                 .into_response(),
             Self::Internal(error) => {
                 tracing::error!(%error, "api request failed");
-                // fire-and-forget: into_response 不是 async，无法 await
+                // fire-and-forget: into_response is not async, cannot await
                 std::mem::drop(tokio::spawn(async move {
                     let _ = crate::platform_log::append(
                         &crate::platform_log::global(),
                         "server.log",
                         "error",
-                        &format!("API 内部错误：{error}"),
+                        &format!("API internal error: {error}"),
                     )
                     .await;
                 }));
@@ -1663,9 +1658,23 @@ async fn list_collector_registry_entries(
 
 async fn register_collector_entry(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Json(request): Json<RegisterCollectorRequest>,
 ) -> Result<Json<CollectorRegistryEntry>, ApiError> {
+    require_admin(&user)?;
     let entry = repository::register_collector(&pool, &request).await?;
+    audit_actor_result(
+        &pool,
+        &user,
+        "collector.register",
+        "collector_registry",
+        Some(&entry.id),
+        None,
+        None,
+        "success",
+        None,
+    )
+    .await;
     Ok(Json(entry))
 }
 
@@ -1681,12 +1690,48 @@ async fn get_collector_entry(
     Ok(Json(entry))
 }
 
+async fn delete_collector_entry(
+    State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
+    Path((id, version)): Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    require_admin(&user)?;
+    repository::delete_collector_registry_entry(&pool, &id, &version).await?;
+    audit_actor_result(
+        &pool,
+        &user,
+        "collector.delete",
+        "collector_registry",
+        Some(&id),
+        None,
+        None,
+        "success",
+        None,
+    )
+    .await;
+    Ok(StatusCode::OK)
+}
+
 async fn update_collector_entry(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path((_id, _version)): Path<(String, String)>,
     Json(request): Json<RegisterCollectorRequest>,
 ) -> Result<Json<CollectorRegistryEntry>, ApiError> {
+    require_admin(&user)?;
     let entry = repository::register_collector(&pool, &request).await?;
+    audit_actor_result(
+        &pool,
+        &user,
+        "collector.update",
+        "collector_registry",
+        Some(&entry.id),
+        None,
+        None,
+        "success",
+        None,
+    )
+    .await;
     Ok(Json(entry))
 }
 
