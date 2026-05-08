@@ -238,8 +238,6 @@ pub struct RuntimeConfig {
     pub command_timeout_secs: u64,
     pub environment_check_timeout_secs: u64,
     pub allowed_model_dirs: Vec<String>,
-    pub nvidia_collector_enabled: bool,
-    pub custom_collector_script: Option<String>,
     pub collector_timeout_secs: u64,
     pub collector_max_output_bytes: usize,
     pub collector_root: Option<String>,
@@ -260,8 +258,6 @@ impl RuntimeConfig {
             command_timeout_secs: 5,
             environment_check_timeout_secs: 5,
             allowed_model_dirs: Vec::new(),
-            nvidia_collector_enabled: true,
-            custom_collector_script: None,
             collector_timeout_secs: 5,
             collector_max_output_bytes: 1024 * 1024,
             collector_root: None,
@@ -294,8 +290,6 @@ impl RuntimeConfig {
             self.command_timeout_secs = config.command_timeout_secs;
             self.environment_check_timeout_secs = config.environment_check_timeout_secs;
             self.allowed_model_dirs = config.allowed_model_dirs;
-            self.nvidia_collector_enabled = config.nvidia_collector_enabled;
-            self.custom_collector_script = config.custom_collector_script;
             self.collector_timeout_secs = config.collector_timeout_secs;
             self.collector_max_output_bytes = config.collector_max_output_bytes;
             self.log_policy = config.log_policy;
@@ -313,8 +307,6 @@ impl RuntimeConfig {
             command_timeout_secs: self.command_timeout_secs,
             environment_check_timeout_secs: self.environment_check_timeout_secs,
             allowed_model_dirs: self.allowed_model_dirs.clone(),
-            nvidia_collector_enabled: self.nvidia_collector_enabled,
-            custom_collector_script: self.custom_collector_script.clone(),
             collector_timeout_secs: self.collector_timeout_secs,
             collector_max_output_bytes: self.collector_max_output_bytes,
             log_policy: self.log_policy.clone(),
@@ -329,8 +321,6 @@ impl RuntimeConfig {
             collector_enabled: self.collector_enabled.clone(),
             collector_disabled: self.collector_disabled.clone(),
             collector_registry: self.collector_registry.clone(),
-            nvidia_collector_enabled: self.nvidia_collector_enabled,
-            custom_collector_script: self.custom_collector_script.clone(),
             collector_timeout_secs: self.collector_timeout_secs,
             collector_max_output_bytes: self.collector_max_output_bytes,
         }

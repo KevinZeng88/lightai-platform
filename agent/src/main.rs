@@ -30,7 +30,7 @@ CONFIGURATION (priority order):
     Config file supports [agent] and optional [gpu_collectors] sections.
     When [gpu_collectors].root is set, collectors must be registered in the
     Server registry before they execute (fail-closed).
-    If [gpu_collectors] is omitted, the legacy built-in NVIDIA/custom path is used.
+    If [gpu_collectors] is omitted, no GPU collector scripts execute.
 
 CONFIG SUBCOMMANDS:
     lightai-agent config init <PATH> [--force]

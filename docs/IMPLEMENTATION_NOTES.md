@@ -2,6 +2,8 @@
 
 本文档记录较细的实现事实、数据流和注意事项。核心架构边界以 [ARCHITECTURE.md](ARCHITECTURE.md) 为准；本文随代码演进更新。
 
+当前实现属于第一阶段：GPU 服务器统一纳管、基础模型实例管理、Web 控制台、本地用户与用户组。统一模型调用 API、API Key、额度、计量、调用统计、GPU 调度优先级、扩缩容、降级和费用归集是后续阶段目标，本文件只记录当前已落地的实现事实。
+
 ## API 路径
 
 ### 基础与 Agent
@@ -11,6 +13,34 @@
 - `POST /api/agent/heartbeat`：Agent 心跳，Bearer token 鉴权。
 - `POST /api/agent/tasks/poll`：Agent 轮询任务。
 - `POST /api/agent/tasks/{id}/result`：Agent 上报任务结果。
+
+除 `/health`、`/api/setup/*`、`/api/auth/login` 与 `/api/agent/*` 外，所有 `/api/*` 控制面接口都需要本地用户登录会话。Web 使用 HttpOnly `lightai_session` cookie，不在前端构建产物中预置管理密钥。空库首次管理员只能通过 Web setup 创建，生产配置不支持 `initial_admin_password` 或 `LIGHTAI_ADMIN_PASSWORD`。可选 emergency control token 默认关闭，仅用于测试、自动化或本机应急。
+
+### 用户与会话
+
+- `POST /api/auth/login`：本地用户名/密码登录，成功后设置 HttpOnly session cookie。
+- `POST /api/auth/logout`：撤销当前 session。
+- `GET /api/auth/me`：读取当前登录用户。
+- `POST /api/auth/change-password`：当前用户修改自己的密码。管理员重置密码后，用户登录只能访问 `me`、`change-password`、`logout` 等必要接口，修改成功后旧 session 会失效并需要重新登录。
+- `GET /api/setup/status`：空库初始化状态。
+- `POST /api/setup/admin`：仅无用户时创建第一个管理员，成功后关闭 setup 入口并登录。
+- `GET|POST /api/users`：管理员列出/创建本地用户。
+- `PUT /api/users/{id}`：管理员修改用户角色、启用状态或密码。
+- `GET|POST /api/groups`：管理员列出/创建用户组。
+- `PUT|DELETE /api/groups/{id}`：管理员修改用户组或删除空组。
+- `PUT /api/groups/{id}/members`：管理员替换用户组成员列表。
+
+密码使用 Argon2 哈希存储；数据库中不保存明文密码或 session token，只保存 hash。当前角色保持极简，仅 `admin`、`operator` 与 `viewer`。
+
+用户可以有直接角色，也可以通过启用状态的用户组继承角色。后端在登录、会话认证、用户列表和组成员展示时统一计算最高权限 `effective_role`；控制面权限判断使用 `effective_role`，不能只依赖前端隐藏按钮。`admin` 可管理用户、用户组、系统配置和 Trash/清理类危险操作；`operator` 可执行 Runtime、模型、模型文件、实例等日常运维写操作；`viewer` 只能执行 GET 查看。禁用用户组后，该组不再提供角色继承。删除用户组要求先移除所有成员。
+
+密码策略可通过 `[auth.password]` 配置：`min_length` 默认 12，`complexity_required` 默认 false，`expires_days = 0` 表示关闭过期，`force_change_after_reset` 默认 true。session 策略可通过 `[auth.session]` 配置：`ttl_secs` 默认 43200，`idle_timeout_secs` 默认 7200，`secure_cookie` 默认 false。生产 HTTPS 部署应开启 `secure_cookie`，并推荐 Web 与 API 同源或通过同一反向代理访问。
+
+管理员忘记密码时，不提供公开远程恢复 API；在服务器本机执行 `lightai-server --reset-password <USERNAME> <PASSWORD>`。重置密码会撤销该用户现有 session，并按策略标记用户必须修改密码。
+
+关键控制面写操作会记录基础审计事件。用户会话触发的事件记录 `actor_id`，并在详情中保留 `actor_username` 与 `effective_role`；emergency token 触发的事件标记为 `system-emergency`。审计不记录密码、token、session 或 hash。
+
+用户组当前只承载成员关系和组角色，是后续部门、项目、业务系统、API Key、额度、计量和优先级归属的基础对象；当前不做资源级授权、多租户隔离、组管理员、审批流、菜单权限或复杂权限表达式。
 
 ### 节点、指标、配置
 
@@ -71,11 +101,11 @@ Agent 在 `agent/src/tasks/mod.rs` 中分发以下任务：
 
 启动时 `server/src/db.rs` 会：
 
-- 创建 SQLite parent directory，开启 WAL。
+- 创建 SQLite parent directory，开启 WAL，并开启 SQLite foreign key 约束。
 - 执行 `0001_init.sql`、`0002_stage2_nodes.sql`、`0003_stage3a_models.sql`。
 - 创建 `nodes.name` 和 `nodes.hostname` 唯一索引。
 - 用幂等代码补齐 node status 配置字段、runtime endpoint 字段、model file `deleted_at/path_type`、instance process/log/command 字段、trash 字段等。
-- 创建 `agent_config_policies`、`audit_events`、`platform_settings`。
+- 创建 `agent_config_policies`、`audit_events`、`users`、`user_sessions`、`user_groups`、`user_group_members`、`platform_settings`。
 
 注意：
 
@@ -238,17 +268,15 @@ managed store 路径由 Agent state path 派生，形如 `agent-state.toml.manag
 当前前后端差异：
 
 - Runtime 的 `params_json` 在 Server 内部存入 `runtime_environments.config_json`，返回时映射为 `params_json`；这是当前兼容实现。
-- Web Runtime 下拉只筛选 `check_status === "available"`，Server 对 `version_unavailable` 也认为可用。
 
 ## GPU Collector 架构（脚本化）
 
 ### 概述
 
-Agent 支持两套 GPU/加速卡采集路径：
+Agent 只支持脚本化 GPU/加速卡 collector。未配置 `[gpu_collectors]` 时，Agent 不执行 GPU collector 脚本，也不会回退到旧的内置 `nvidia-smi` 或 custom JSON collector。
 
 | 路径 | 触发条件 | 说明 |
 |------|----------|------|
-| **Legacy** | `collector_root` 未配置 | 内置 `nvidia-smi` + custom script，无需 registry |
 | **Collector 框架** | `collector_root` 已配置 | 脚本化 collector 目录，需要 Server registry 登记 |
 
 ### Agent 配置
@@ -257,9 +285,9 @@ Agent 本地 TOML 配置文件支持 `[gpu_collectors]` 节：
 
 ```toml
 [gpu_collectors]
-root = “/opt/lightai/collectors/gpu”
-mode = “explicit”         # “explicit” | “auto”
-enabled = [“nvidia”]
+root = "/opt/lightai/collectors/gpu"
+mode = "explicit"         # "explicit" | "auto"
+enabled = ["nvidia"]
 disabled = []
 ```
 
@@ -337,14 +365,9 @@ Web「采集器登记」页面支持粘贴 inspect JSON 并启用/禁用。
 
 **示例目录**：`deploy/collectors/gpu/nvidia/`
 
-- `collector.toml`：id=”nvidia”, vendor=”nvidia”, version=”1.0.0”
+- `collector.toml`：id="nvidia", vendor="nvidia", version="1.0.0"
 - `discover.sh`：通过 `nvidia-smi --query-gpu=index,name,uuid,pci.bus_id,driver_version` 输出 DEVICE TSV 行
 - `metrics.sh`：通过 `nvidia-smi --query-gpu=uuid,memory.total,...` 输出 METRIC TSV 行
-
-**Legacy 路径**（`collector_root` 未配置时）：
-- 保留内置 `nvidia-smi` CSV 解析（`agent/src/gpu/nvidia.rs`）
-- 保留 custom script JSON 解析（`agent/src/gpu/custom.rs`）
-- 不做 registry 校验
 
 ### 后续支持国产卡
 
@@ -357,12 +380,12 @@ Web「采集器登记」页面支持粘贴 inspect JSON 并启用/禁用。
 
 | 厂商 | 预期命令 | 状态 |
 |------|----------|------|
-| NVIDIA | `nvidia-smi` | 已实现（脚本+legacy） |
+| NVIDIA | `nvidia-smi` | 已实现（脚本 collector） |
 | 沐曦 | `mx-smi` | 未实现，需真实硬件 |
 | 昇腾 | `npu-smi` | 未实现，需真实硬件 |
 | 海光 | `hy-smi` | 未实现，需真实硬件 |
 
-所有未验证的 collector 不得默认启用，不得在文档中宣称已支持。未接入真实硬件前，可通过 custom script 适配。
+所有未验证的 collector 不得默认启用，不得在文档中宣称已支持。未接入真实硬件前，可以新增脚本 collector 目录并通过 registry/hash 流程验证。
 
 ### GPU key 约定
 
@@ -372,7 +395,7 @@ Web「采集器登记」页面支持粘贴 inspect JSON 并启用/禁用。
 
 ## systemd 注意事项
 
-Agent systemd 示例应使用 `KillMode=process`。如果使用默认 `control-group`，停止 Agent service 可能向整个 cgroup 发送信号，破坏”Agent 退出不终止模型实例”的约束。
+Agent systemd 示例应使用 `KillMode=process`。如果使用默认 `control-group`，停止 Agent service 可能向整个 cgroup 发送信号，破坏"Agent 退出不终止模型实例"的约束。
 
 ## 后续开发注意
 

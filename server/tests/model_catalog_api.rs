@@ -75,8 +75,8 @@ async fn key_operations_create_audit_events() {
     assert!(events.iter().any(|event| {
         event["operation_type"] == "model.create"
             && event["target_id"] == model["id"]
-            && event["actor_type"] == "system"
-            && event["actor_id"] == "local"
+            && event["actor_type"] == "system-emergency"
+            && event["actor_id"] == "emergency"
             && event["result"] == "success"
     }));
 }

@@ -148,12 +148,14 @@ impl Config {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileConfig {
     agent: Option<AgentSection>,
     gpu_collectors: Option<GpuCollectorsSection>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct AgentSection {
     listen_addr: Option<String>,
     server_url: Option<String>,
@@ -162,6 +164,7 @@ struct AgentSection {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct GpuCollectorsSection {
     root: Option<String>,
     mode: Option<String>,
@@ -199,8 +202,7 @@ state_path = "data/agent-state.toml"
 
 # ── GPU / accelerator collector configuration (optional) ──
 # Uncomment [gpu_collectors] and set root to enable the script-based collector
-# framework.  When root is configured, the legacy built-in NVIDIA/custom path
-# is disabled and all GPU collection goes through collector directories.
+# framework.  Without [gpu_collectors], no GPU collector scripts execute.
 #
 # Enabling workflow:
 #   1. Place collector files on the agent machine, e.g.
@@ -222,6 +224,12 @@ state_path = "data/agent-state.toml"
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, OnceLock};
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+    }
 
     #[test]
     fn parses_minimal_agent_config() {
@@ -292,6 +300,7 @@ disabled = ["nvidia-legacy"]
 
     #[test]
     fn cli_path_has_top_priority() {
+        let _guard = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let cli_file = dir.path().join("cli.toml");
         std::fs::write(&cli_file, "[agent]\nnode_name = \"cli-node\"\n").unwrap();
@@ -310,6 +319,7 @@ disabled = ["nvidia-legacy"]
 
     #[test]
     fn env_path_falls_back_from_cli() {
+        let _guard = env_lock();
         let dir = tempfile::tempdir().unwrap();
         let env_file = dir.path().join("env.toml");
         std::fs::write(&env_file, "[agent]\nnode_name = \"env-node\"\n").unwrap();
@@ -330,6 +340,7 @@ disabled = ["nvidia-legacy"]
 
     #[test]
     fn explicit_env_missing_file_errors() {
+        let _guard = env_lock();
         std::env::set_var("LIGHTAI_AGENT_CONFIG", "/nonexistent/path/env.toml");
         let result = Config::load_with_priority(None);
         std::env::remove_var("LIGHTAI_AGENT_CONFIG");
@@ -338,6 +349,7 @@ disabled = ["nvidia-legacy"]
 
     #[test]
     fn no_config_falls_back_to_defaults() {
+        let _guard = env_lock();
         std::env::remove_var("LIGHTAI_AGENT_CONFIG");
         let (config, source) = Config::load_with_priority(None).unwrap();
         assert_eq!(source, ConfigSource::BuiltInDefault);
@@ -358,16 +370,12 @@ disabled = ["nvidia-legacy"]
     }
 
     // ── exec-dir tests: these manipulate files in the test binary directory
-    //     and require LIGHTAI_AGENT_CONFIG to be unset.  They are combined
-    //     into a single test to avoid inter-test file conflicts.
-    //     Run with `--test-threads=1` if env-var tests run in parallel.
+    //     and require LIGHTAI_AGENT_CONFIG to be unset.
 
     #[test]
     fn executable_dir_agent_toml_loaded() {
-        // Guard: bail if env var is set (may leak from parallel tests).
-        if std::env::var("LIGHTAI_AGENT_CONFIG").is_ok() {
-            return; // cannot reliably test exec-dir when env is set
-        }
+        let _guard = env_lock();
+        std::env::remove_var("LIGHTAI_AGENT_CONFIG");
 
         let exe_dir = std::env::current_exe()
             .unwrap()
@@ -388,9 +396,8 @@ disabled = ["nvidia-legacy"]
 
     #[test]
     fn executable_dir_lightai_agent_toml_fallback() {
-        if std::env::var("LIGHTAI_AGENT_CONFIG").is_ok() {
-            return;
-        }
+        let _guard = env_lock();
+        std::env::remove_var("LIGHTAI_AGENT_CONFIG");
 
         let exe_dir = std::env::current_exe()
             .unwrap()
@@ -411,9 +418,8 @@ disabled = ["nvidia-legacy"]
 
     #[test]
     fn executable_dir_both_present_agent_toml_wins() {
-        if std::env::var("LIGHTAI_AGENT_CONFIG").is_ok() {
-            return;
-        }
+        let _guard = env_lock();
+        std::env::remove_var("LIGHTAI_AGENT_CONFIG");
 
         let exe_dir = std::env::current_exe()
             .unwrap()

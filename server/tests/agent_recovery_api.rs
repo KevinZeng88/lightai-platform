@@ -194,6 +194,7 @@ async fn agent_register_and_heartbeat_exchange_config_and_report_effective_confi
         .clone()
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("POST")
                 .uri("/api/agent/heartbeat")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -546,6 +547,6 @@ async fn running_instance_on_online_node_shows_node_online_true() {
 async fn stage2_test_app() -> (sqlx::SqlitePool, axum::Router) {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     db::migrate(&pool).await.unwrap();
-    let app = routes::app(pool.clone());
+    let app = routes::app_with_emergency_token(pool.clone(), TEST_EMERGENCY_TOKEN.to_string());
     (pool, app)
 }

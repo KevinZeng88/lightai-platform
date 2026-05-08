@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use lightai_server::{config::Config, db, platform_log, routes};
+use lightai_server::{config::Config, db, platform_log, repository, routes};
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -13,6 +13,8 @@ OPTIONS:
     --help       Show this help message
     --version    Show version information
     --config <PATH>  Path to server config TOML file (env: LIGHTAI_SERVER_CONFIG)
+    --reset-password <USERNAME> <PASSWORD>
+                Reset a local user's password from the server host
 
 DESCRIPTION:
     LightAI Server 是平台的中央控制面，负责：
@@ -23,7 +25,8 @@ DESCRIPTION:
 
 CONFIGURATION:
     Environment variable: LIGHTAI_SERVER_CONFIG=<path>
-    Default: embedded defaults (listen 127.0.0.1:8080, SQLite data/server.db)
+    Empty databases enter Web setup mode for first-admin creation
+    Default: embedded defaults (listen 127.0.0.1:8080, SQLite data/lightai.db)
 "#;
 
 #[tokio::main]
@@ -40,6 +43,24 @@ async fn main() -> anyhow::Result<()> {
                 println!("lightai-server {SERVER_VERSION}");
                 return Ok(());
             }
+            "--reset-password" => {
+                if args.len() != 4 {
+                    eprintln!("usage: lightai-server --reset-password <USERNAME> <PASSWORD>");
+                    std::process::exit(1);
+                }
+                let config = Config::load()?;
+                config.validate_auth()?;
+                let pool = db::connect(&config.database_url).await?;
+                repository::reset_user_password(
+                    &pool,
+                    &args[2],
+                    &args[3],
+                    config.password_policy.clone(),
+                )
+                .await?;
+                println!("password reset completed for user {}", args[2]);
+                return Ok(());
+            }
             other => {
                 eprintln!("unknown option: {other}");
                 eprintln!("try: lightai-server --help");
@@ -53,6 +74,7 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::load()?;
+    config.validate_auth()?;
     platform_log::set_global(config.log_policy.clone());
     platform_log::append(&config.log_policy, "server.log", "info", "Server 启动").await?;
     let listen_addr: SocketAddr = config.listen_addr.parse()?;
@@ -67,6 +89,15 @@ async fn main() -> anyhow::Result<()> {
         "starting lightai server"
     );
 
-    axum::serve(listener, routes::app(pool)).await?;
+    axum::serve(
+        listener,
+        routes::app_with_auth_policies(
+            pool,
+            config.emergency_control_token,
+            config.password_policy,
+            config.session_policy,
+        ),
+    )
+    .await?;
     Ok(())
 }

@@ -87,8 +87,6 @@ fn make_config(tc: &TmpCollector, registry: Vec<RegistryEntry>) -> gpu::Collecto
         collector_enabled: vec!["test-coll".to_string()],
         collector_disabled: vec![],
         collector_registry: registry,
-        nvidia_collector_enabled: false,
-        custom_collector_script: None,
         collector_timeout_secs: 5,
         collector_max_output_bytes: 1024 * 1024,
     }
@@ -210,37 +208,22 @@ async fn hash_match_and_enabled_executes() {
 }
 
 #[tokio::test]
-async fn configured_root_no_legacy_fallback() {
-    let tc = tmp_collector("no-fallback", "test-coll", "1.0.0");
-    let (dm, mm) = markers(&tc);
-    let _ = std::fs::remove_file(&dm);
-    let _ = std::fs::remove_file(&mm);
-
-    let mut config = make_config(&tc, vec![]);
-    config.nvidia_collector_enabled = true;
-
-    let (_gpus, errors) = gpu::collect_gpus(&config).await;
-    assert!(!dm.exists());
-    assert!(!mm.exists());
-    assert!(has_error(&errors, "registry is empty"), "{errors:?}");
-}
-
-#[tokio::test]
-async fn no_collector_root_legacy_works() {
+async fn no_collector_root_executes_no_collectors() {
     let config = gpu::CollectorConfig {
         collector_root: None,
         collector_mode: "explicit".to_string(),
         collector_enabled: vec![],
         collector_disabled: vec![],
         collector_registry: vec![],
-        nvidia_collector_enabled: true,
-        custom_collector_script: None,
         collector_timeout_secs: 5,
         collector_max_output_bytes: 1024 * 1024,
     };
-    let (_gpus, errors) = gpu::collect_gpus(&config).await;
-    assert!(!has_error(&errors, "registry is empty"), "{errors:?}");
-    assert!(!has_error(&errors, "not registered"), "{errors:?}");
+    let (gpus, errors) = gpu::collect_gpus(&config).await;
+    assert!(gpus.is_empty());
+    assert!(
+        has_error(&errors, "collector root is not configured"),
+        "{errors:?}"
+    );
 }
 
 #[tokio::test]

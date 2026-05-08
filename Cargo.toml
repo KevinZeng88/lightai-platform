@@ -8,6 +8,7 @@ license = "UNLICENSED"
 
 [workspace.dependencies]
 anyhow = "1"
+argon2 = "0.5"
 axum = "0.8"
 base64 = "0.22"
 constant_time_eq = "0.4"

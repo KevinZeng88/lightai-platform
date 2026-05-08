@@ -3,6 +3,7 @@ set -euo pipefail
 
 SERVER_URL="${LIGHTAI_SERVER_URL:-http://127.0.0.1:8080}"
 AGENT_URL="${LIGHTAI_AGENT_URL:-http://127.0.0.1:8081}"
+CONTROL_TOKEN="${LIGHTAI_EMERGENCY_CONTROL_TOKEN:-}"
 
 echo "Checking nvidia-smi..."
 if ! command -v nvidia-smi >/dev/null 2>&1; then
@@ -25,7 +26,11 @@ curl -fsS "$AGENT_URL/health"
 echo
 
 echo "Checking Server /api/nodes..."
-curl -fsS "$SERVER_URL/api/nodes"
+if [[ -z "$CONTROL_TOKEN" ]]; then
+  echo "LIGHTAI_EMERGENCY_CONTROL_TOKEN is required for this API check, or inspect nodes through the logged-in Web UI" >&2
+  exit 1
+fi
+curl -fsS -H "X-LightAI-Control-Token: $CONTROL_TOKEN" "$SERVER_URL/api/nodes"
 echo
 
 echo "NVIDIA local development check completed."

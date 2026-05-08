@@ -5,10 +5,12 @@ use serde_json::{json, Value};
 use sqlx::Row;
 use tower::ServiceExt;
 
+const TEST_EMERGENCY_TOKEN: &str = "test-emergency-token";
+
 async fn test_app() -> (sqlx::SqlitePool, axum::Router) {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     db::migrate(&pool).await.unwrap();
-    let app = routes::app(pool.clone());
+    let app = routes::app_with_emergency_token(pool.clone(), TEST_EMERGENCY_TOKEN.to_string());
     (pool, app)
 }
 
@@ -16,6 +18,7 @@ async fn register_node(app: axum::Router) -> Value {
     let response = app
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("POST")
                 .uri("/api/agent/register")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -73,6 +76,7 @@ async fn agent_config_policy_supports_global_defaults_and_node_override() {
         .clone()
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("PUT")
                 .uri("/api/config/agent/global")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -83,7 +87,6 @@ async fn agent_config_policy_supports_global_defaults_and_node_override() {
                         "command_timeout_secs": 6,
                         "environment_check_timeout_secs": 7,
                         "allowed_model_dirs": ["/models"],
-                        "nvidia_collector_enabled": true,
                         "collector_timeout_secs": 5,
                         "collector_max_output_bytes": 1048576
                     })
@@ -99,6 +102,7 @@ async fn agent_config_policy_supports_global_defaults_and_node_override() {
         .clone()
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("PUT")
                 .uri(format!("/api/nodes/{node_id}/config"))
                 .header(header::CONTENT_TYPE, "application/json")
@@ -119,6 +123,7 @@ async fn agent_config_policy_supports_global_defaults_and_node_override() {
         .clone()
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("POST")
                 .uri("/api/agent/heartbeat")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -137,8 +142,6 @@ async fn agent_config_policy_supports_global_defaults_and_node_override() {
                             "command_timeout_secs": 5,
                             "environment_check_timeout_secs": 5,
                             "allowed_model_dirs": [],
-                            "nvidia_collector_enabled": true,
-                            "custom_collector_script": null,
                             "collector_timeout_secs": 5,
                             "collector_max_output_bytes": 1048576,
                             "last_config_updated_at": null
@@ -169,6 +172,7 @@ async fn agent_config_policy_supports_global_defaults_and_node_override() {
     let nodes_response = app
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .uri("/api/nodes")
                 .body(Body::empty())
                 .unwrap(),
@@ -195,6 +199,7 @@ async fn heartbeat_updates_latest_status_and_inserts_metric_samples() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("POST")
                 .uri("/api/agent/heartbeat")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -271,6 +276,7 @@ async fn metrics_api_returns_raw_samples_in_time_window() {
             .clone()
             .oneshot(
                 Request::builder()
+                    .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                     .method("POST")
                     .uri("/api/agent/heartbeat")
                     .header(header::CONTENT_TYPE, "application/json")
@@ -316,6 +322,7 @@ async fn metrics_api_returns_raw_samples_in_time_window() {
         .clone()
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .uri(format!("/api/nodes/{node_id}/metrics?from=150&to=250"))
                 .body(Body::empty())
                 .unwrap(),
@@ -336,6 +343,7 @@ async fn metrics_api_returns_raw_samples_in_time_window() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .uri(format!(
                     "/api/nodes/{node_id}/gpus/{}/metrics?from=0&to=250",
                     "custom:0"
@@ -367,6 +375,7 @@ async fn gpu_metrics_query_endpoint_handles_gpu_keys_with_path_separators() {
         .clone()
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("POST")
                 .uri("/api/agent/heartbeat")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -404,6 +413,7 @@ async fn gpu_metrics_query_endpoint_handles_gpu_keys_with_path_separators() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .uri(format!(
                     "/api/nodes/{node_id}/gpu-metrics?gpu_key=custom%3Aslot%2F0&from=0&to=400"
                 ))
@@ -430,6 +440,7 @@ async fn metrics_api_returns_empty_metadata_when_no_samples_exist() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .uri(format!("/api/nodes/{node_id}/metrics?from=0&to=250"))
                 .body(Body::empty())
                 .unwrap(),
@@ -458,6 +469,7 @@ async fn heartbeat_rejects_invalid_token() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("POST")
                 .uri("/api/agent/heartbeat")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -501,6 +513,7 @@ async fn collector_registry_empty_list_on_fresh_db() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("GET")
                 .uri("/api/collector-registry")
                 .body(Body::empty())
@@ -534,6 +547,7 @@ async fn collector_registry_register_and_list() {
         .clone()
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("POST")
                 .uri("/api/collector-registry")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -553,6 +567,7 @@ async fn collector_registry_register_and_list() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("GET")
                 .uri("/api/collector-registry")
                 .body(Body::empty())
@@ -584,6 +599,7 @@ async fn collector_registry_get_by_id_version() {
     app.clone()
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("POST")
                 .uri("/api/collector-registry")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -596,6 +612,7 @@ async fn collector_registry_get_by_id_version() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("GET")
                 .uri("/api/collector-registry/nvidia-r550/2.0.0")
                 .body(Body::empty())
@@ -623,6 +640,7 @@ async fn collector_registry_update_enabled_by_upsert() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("POST")
                 .uri("/api/collector-registry")
                 .header(header::CONTENT_TYPE, "application/json")
@@ -681,6 +699,7 @@ async fn collector_registry_heartbeat_includes_registry() {
     let response = app
         .oneshot(
             Request::builder()
+                .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN)
                 .method("POST")
                 .uri("/api/agent/heartbeat")
                 .header(header::CONTENT_TYPE, "application/json")

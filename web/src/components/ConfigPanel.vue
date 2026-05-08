@@ -17,7 +17,7 @@
   />
 
   <el-alert
-    title="GPU 采集当前内置 NVIDIA nvidia-smi；国产或其它 GPU 可通过自定义采集脚本接入，脚本由 Agent 按受控路径直接执行并返回统一 JSON。"
+    title="GPU 采集只通过 Agent 本地 [gpu_collectors] 脚本目录和 Server registry/hash 校验启用；本页只配置在线策略，不下发任意采集脚本路径。"
     type="info"
     show-icon
     class="alert"
@@ -61,8 +61,6 @@
       <div><span class="muted">心跳 / 采样</span><p>{{ selectedNode.effective_agent_config.heartbeat_interval_secs }}s / {{ selectedNode.effective_agent_config.metrics_sample_interval_secs }}s</p></div>
       <div><span class="muted">命令 / 环境检查</span><p>{{ selectedNode.effective_agent_config.command_timeout_secs }}s / {{ selectedNode.effective_agent_config.environment_check_timeout_secs }}s</p></div>
       <div class="wide-detail"><span class="muted">Allowed dirs</span><p>{{ selectedNode.effective_agent_config.allowed_model_dirs.join(', ') || '未配置' }}</p></div>
-      <div><span class="muted">NVIDIA 采集</span><p>{{ selectedNode.effective_agent_config.nvidia_collector_enabled ? '启用' : '停用' }}</p></div>
-      <div class="wide-detail"><span class="muted">自定义 GPU 采集脚本</span><p>{{ selectedNode.effective_agent_config.custom_collector_script || '未配置' }}</p></div>
       <div><span class="muted">日志级别</span><p>{{ selectedNode.effective_agent_config.log_level }}</p></div>
       <div class="wide-detail"><span class="muted">日志目录</span><p>{{ selectedNode.effective_agent_config.log_dir }}</p></div>
       <div><span class="muted">日志轮转</span><p>{{ selectedNode.effective_agent_config.log_max_file_bytes }} bytes / {{ selectedNode.effective_agent_config.log_retention_files }} 个 / {{ selectedNode.effective_agent_config.log_retention_days }} 天</p></div>
@@ -72,7 +70,6 @@
 
 <script setup lang="ts">
 import { computed, defineComponent, h, onMounted, ref, watch } from 'vue'
-import { ElCheckbox } from 'element-plus/es/components/checkbox/index'
 import { ElFormItem } from 'element-plus/es/components/form/index'
 import { ElInput } from 'element-plus/es/components/input/index'
 import { ElInputNumber } from 'element-plus/es/components/input-number/index'
@@ -91,8 +88,6 @@ const emptyPolicy = (): AgentConfigPolicy => ({
   command_timeout_secs: null,
   environment_check_timeout_secs: null,
   allowed_model_dirs: null,
-  nvidia_collector_enabled: null,
-  custom_collector_script: null,
   collector_timeout_secs: null,
   collector_max_output_bytes: null,
   log_dir: null,
@@ -142,19 +137,6 @@ const PolicyFields = defineComponent({
                 .map((item) => item.trim())
                 .filter(Boolean)
             )
-        })
-      ),
-      h(ElFormItem, { label: 'NVIDIA 采集器' }, () =>
-        h(ElCheckbox, {
-          modelValue: (props.modelValue as AgentConfigPolicy).nvidia_collector_enabled ?? true,
-          onChange: (value: string | number | boolean) => update('nvidia_collector_enabled', Boolean(value))
-        }, () => '启用')
-      ),
-      h(ElFormItem, { label: '自定义采集脚本' }, () =>
-        h(ElInput, {
-          modelValue: (props.modelValue as AgentConfigPolicy).custom_collector_script ?? '',
-          placeholder: props.allowInherit ? '留空禁用或继承' : '留空禁用',
-          onInput: (value: string) => update('custom_collector_script', value.trim() || null)
         })
       ),
       numberField('采集器超时（秒）', 'collector_timeout_secs'),
@@ -234,8 +216,6 @@ function policyFromConfig(config: NodeStatus['effective_agent_config']): AgentCo
     command_timeout_secs: config.command_timeout_secs,
     environment_check_timeout_secs: config.environment_check_timeout_secs,
     allowed_model_dirs: config.allowed_model_dirs,
-    nvidia_collector_enabled: config.nvidia_collector_enabled,
-    custom_collector_script: config.custom_collector_script ?? null,
     collector_timeout_secs: config.collector_timeout_secs,
     collector_max_output_bytes: config.collector_max_output_bytes,
     log_dir: config.log_dir,

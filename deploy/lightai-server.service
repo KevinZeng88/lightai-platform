@@ -8,6 +8,9 @@ Type=simple
 User=lightai
 Group=lightai
 WorkingDirectory=/opt/lightai
+# Put LIGHTAI_SERVER_CONFIG and optional non-secret runtime settings here.
+# First admin creation should use the Web setup flow.
+EnvironmentFile=/etc/lightai/server.env
 ExecStart=/opt/lightai/bin/lightai-server
 Restart=always
 RestartSec=3

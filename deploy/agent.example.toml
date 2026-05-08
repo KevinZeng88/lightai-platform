@@ -7,8 +7,8 @@ node_name = "gpu-node-1"
 state_path = "data/agent-state.toml"
 
 # ── GPU 采集器配置（可选）──
-# 未配置 [gpu_collectors] 时（默认），Agent 使用内置 NVIDIA/custom 采集路径（legacy）。
-# 配置 root 后，Agent 切换到脚本化 collector 框架，legacy 路径不再执行。
+# 未配置 [gpu_collectors] 时，Agent 不执行 GPU collector 脚本。
+# 配置 root 后，Agent 使用脚本化 collector 框架，并要求 Server registry 登记。
 #
 # 启用流程：
 #   1. 将 collector 目录放到 Agent 本地，例如 /opt/lightai/collectors/gpu/nvidia

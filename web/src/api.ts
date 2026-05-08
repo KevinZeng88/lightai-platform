@@ -18,12 +18,53 @@ import type {
 
 const isFrontendErrorUrl = (url: string) => url.includes('/api/frontend-errors')
 
+export type Role = 'admin' | 'operator' | 'viewer'
+
+export interface AuthUser {
+  id: string
+  username: string
+  role: Role
+  effective_role: Role
+  enabled: boolean
+  must_change_password: boolean
+}
+
+export interface UserGroup {
+  id: string
+  name: string
+  role: Role
+  enabled: boolean
+  member_count: number
+  members: AuthUser[]
+}
+
+function jsonHeaders(extra?: HeadersInit): HeadersInit {
+  const headers: Record<string, string> = {}
+  if (extra instanceof Headers) {
+    extra.forEach((value, key) => {
+      headers[key] = value
+    })
+  } else if (Array.isArray(extra)) {
+    for (const [key, value] of extra) headers[key] = value
+  } else if (extra) {
+    Object.assign(headers, extra)
+  }
+  return headers
+}
+
 async function readJson<T>(response: Response, fallback: string): Promise<T> {
   if (!response.ok) {
     let message = fallback
+    if (response.status === 401) {
+      message = '登录已过期或未登录，请重新登录'
+    } else if (response.status === 403) {
+      message = '当前用户没有权限执行该操作'
+    }
     try {
       const payload = await response.json()
-      message = payload.message ?? payload.error ?? message
+      if (response.status !== 401) {
+        message = payload.message ?? payload.error ?? message
+      }
     } catch {
       message = `${fallback}: ${response.status}`
     }
@@ -31,6 +72,7 @@ async function readJson<T>(response: Response, fallback: string): Promise<T> {
     if (!isFrontendErrorUrl(response.url)) {
       fetch('/api/frontend-errors', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: `API 请求失败：${message}`,
@@ -47,19 +89,27 @@ async function readJson<T>(response: Response, fallback: string): Promise<T> {
 async function sendJson<T>(url: string, method: string, body?: unknown): Promise<T> {
   const response = await fetch(url, {
     method,
-    headers: body == null ? undefined : { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: jsonHeaders(body == null ? undefined : { 'Content-Type': 'application/json' }),
     body: body == null ? undefined : JSON.stringify(body)
   })
   return readJson<T>(response, `${method} ${url} failed`)
 }
 
 async function sendEmpty(url: string, method: string): Promise<void> {
-  const response = await fetch(url, { method })
+  const response = await fetch(url, { method, credentials: 'include', headers: jsonHeaders() })
   if (!response.ok) {
     let message = `${method} ${url} failed: ${response.status}`
+    if (response.status === 401) {
+      message = '登录已过期或未登录，请重新登录'
+    } else if (response.status === 403) {
+      message = '当前用户没有权限执行该操作'
+    }
     try {
       const payload = await response.json()
-      message = payload.message ?? payload.error ?? message
+      if (response.status !== 401) {
+        message = payload.message ?? payload.error ?? message
+      }
     } catch {
       // Keep status-only message.
     }
@@ -67,6 +117,7 @@ async function sendEmpty(url: string, method: string): Promise<void> {
     if (!isFrontendErrorUrl(response.url)) {
       fetch('/api/frontend-errors', {
         method: 'POST',
+        credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           message: `API 请求失败：${message}`,
@@ -79,12 +130,111 @@ async function sendEmpty(url: string, method: string): Promise<void> {
   }
 }
 
-export async function fetchNodes(): Promise<NodeStatus[]> {
-  const response = await fetch('/api/nodes')
-  if (!response.ok) {
-    throw new Error(`Failed to fetch nodes: ${response.status}`)
+export async function login(username: string, password: string): Promise<AuthUser> {
+  const payload = await sendJson<{ user: AuthUser }>('/api/auth/login', 'POST', {
+    username,
+    password
+  })
+  return payload.user
+}
+
+export async function logout(): Promise<void> {
+  await sendJson('/api/auth/logout', 'POST')
+}
+
+export async function fetchCurrentUser(): Promise<AuthUser> {
+  const payload = await sendJson<{ user: AuthUser }>('/api/auth/me', 'GET')
+  return payload.user
+}
+
+export async function fetchSetupStatus(): Promise<boolean> {
+  const payload = await sendJson<{ setup_required: boolean }>('/api/setup/status', 'GET')
+  return payload.setup_required
+}
+
+export async function setupAdmin(username: string, password: string): Promise<AuthUser> {
+  const payload = await sendJson<{ user: AuthUser }>('/api/setup/admin', 'POST', {
+    username,
+    password
+  })
+  return payload.user
+}
+
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string
+): Promise<void> {
+  await sendJson('/api/auth/change-password', 'POST', {
+    current_password: currentPassword,
+    new_password: newPassword
+  })
+}
+
+export async function fetchUsers(): Promise<AuthUser[]> {
+  const payload = await sendJson<{ users: AuthUser[] }>('/api/users', 'GET')
+  return payload.users
+}
+
+export async function createUser(payload: {
+  username: string
+  password: string
+  role: Role
+}): Promise<AuthUser> {
+  const response = await sendJson<{ user: AuthUser }>('/api/users', 'POST', payload)
+  return response.user
+}
+
+export async function updateUser(
+  id: string,
+  payload: {
+    password?: string
+    role?: Role
+    enabled?: boolean
   }
-  const payload = await response.json()
+): Promise<AuthUser> {
+  const response = await sendJson<{ user: AuthUser }>(`/api/users/${id}`, 'PUT', payload)
+  return response.user
+}
+
+export async function fetchGroups(): Promise<UserGroup[]> {
+  const payload = await sendJson<{ groups: UserGroup[] }>('/api/groups', 'GET')
+  return payload.groups
+}
+
+export async function createGroup(payload: {
+  name: string
+  role: Role
+}): Promise<UserGroup> {
+  const response = await sendJson<{ group: UserGroup }>('/api/groups', 'POST', payload)
+  return response.group
+}
+
+export async function updateGroup(
+  id: string,
+  payload: {
+    name?: string
+    role?: Role
+    enabled?: boolean
+  }
+): Promise<UserGroup> {
+  const response = await sendJson<{ group: UserGroup }>(`/api/groups/${id}`, 'PUT', payload)
+  return response.group
+}
+
+export async function updateGroupMembers(id: string, userIds: string[]): Promise<UserGroup> {
+  const response = await sendJson<{ group: UserGroup }>(`/api/groups/${id}/members`, 'PUT', {
+    user_ids: userIds
+  })
+  return response.group
+}
+
+export async function deleteGroup(id: string): Promise<void> {
+  await sendEmpty(`/api/groups/${id}`, 'DELETE')
+}
+
+export async function fetchNodes(): Promise<NodeStatus[]> {
+  const response = await fetch('/api/nodes', { credentials: 'include', headers: jsonHeaders() })
+  const payload = await readJson<{ nodes: NodeStatus[] }>(response, 'Failed to fetch nodes')
   return payload.nodes
 }
 
@@ -110,11 +260,14 @@ export async function fetchNodeMetrics(
   from: number,
   to: number
 ): Promise<MetricSampleResponse<NodeMetricSample>> {
-  const response = await fetch(`/api/nodes/${nodeId}/metrics?from=${from}&to=${to}`)
-  if (!response.ok) {
-    throw new Error(`Failed to fetch node metrics: ${response.status}`)
-  }
-  const payload = await response.json()
+  const response = await fetch(`/api/nodes/${nodeId}/metrics?from=${from}&to=${to}`, {
+    credentials: 'include',
+    headers: jsonHeaders()
+  })
+  const payload = await readJson<MetricSampleResponse<NodeMetricSample>>(
+    response,
+    'Failed to fetch node metrics'
+  )
   return payload
 }
 
@@ -298,7 +451,8 @@ export function reportFrontendError(payload: {
   }
   fetch('/api/frontend-errors', {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    credentials: 'include',
+    headers: jsonHeaders({ 'Content-Type': 'application/json' }),
     body: JSON.stringify(payload)
   }).catch(() => {
     // fire and forget; don't throw if reporting fails
@@ -335,13 +489,11 @@ export async function fetchGpuMetrics(
   to: number
 ): Promise<MetricSampleResponse<GpuMetricSample>> {
   const url = gpuMetricsUrl(nodeId, gpuKey, from, to)
-  const response = await fetch(
-    url
+  const response = await fetch(url, { credentials: 'include', headers: jsonHeaders() })
+  const payload = await readJson<MetricSampleResponse<GpuMetricSample>>(
+    response,
+    'Failed to fetch GPU metrics'
   )
-  if (!response.ok) {
-    throw new Error(`Failed to fetch GPU metrics: ${response.status}`)
-  }
-  const payload = await response.json()
   return payload
 }
 

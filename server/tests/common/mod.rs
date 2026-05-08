@@ -5,16 +5,21 @@ use lightai_server::{db, routes};
 use serde_json::{json, Value};
 use tower::ServiceExt;
 
+pub const TEST_EMERGENCY_TOKEN: &str = "test-emergency-token";
+
 pub async fn test_app() -> axum::Router {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     db::migrate(&pool).await.unwrap();
-    routes::app(pool)
+    routes::app_with_emergency_token(pool, TEST_EMERGENCY_TOKEN.to_string())
 }
 
 pub async fn test_app_with_pool() -> (axum::Router, sqlx::SqlitePool) {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     db::migrate(&pool).await.unwrap();
-    (routes::app(pool.clone()), pool)
+    (
+        routes::app_with_emergency_token(pool.clone(), TEST_EMERGENCY_TOKEN.to_string()),
+        pool,
+    )
 }
 
 pub async fn request(
@@ -23,7 +28,10 @@ pub async fn request(
     uri: &str,
     body: Option<Value>,
 ) -> (StatusCode, Value) {
-    let mut builder = Request::builder().method(method).uri(uri);
+    let mut builder = Request::builder()
+        .method(method)
+        .uri(uri)
+        .header("x-lightai-control-token", TEST_EMERGENCY_TOKEN);
     let body = match body {
         Some(value) => {
             builder = builder.header(header::CONTENT_TYPE, "application/json");
@@ -311,7 +319,7 @@ pub async fn report_runtime_check_result(
     version: Option<&str>,
     message: &str,
 ) {
-    let status = if check_status == "available" {
+    let status = if matches!(check_status, "available" | "version_unavailable") {
         "succeeded"
     } else {
         "failed"
@@ -607,6 +615,6 @@ pub async fn register_with_name_hostname(
 pub async fn stage2_test_app() -> (sqlx::SqlitePool, axum::Router) {
     let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
     db::migrate(&pool).await.unwrap();
-    let app = routes::app(pool.clone());
+    let app = routes::app_with_emergency_token(pool.clone(), TEST_EMERGENCY_TOKEN.to_string());
     (pool, app)
 }

@@ -21,18 +21,19 @@
 
 ## 建议测试流程
 
-1. 启动 Server、Agent、Web。
-2. 在 Web 中添加 llama.cpp 运行环境。
-3. 运行环境入口文件使用：`/home/kzeng/llama.cpp/build/bin/llama-server`。
-4. 在 Web 中添加模型文件。
-5. 模型路径使用：`/home/kzeng/models/qwen2.5-0.5b-gguf/qwen2.5-0.5b-instruct-q4_k_m.gguf`。
-6. 验证模型文件。
-7. 创建本地实例。
-8. 使用端口 `18088` 或更高端口。
-9. 启动实例。
-10. 点击测试。
-11. 停止实例。
-12. 验证停止后进程退出。
+1. 启动 Server，例如 `cargo run -p lightai-server`。
+2. 启动 Agent、Web；空数据库首次打开 Web 会进入初始化页，创建第一个管理员账号后自动登录。
+3. 在 Web 中添加 llama.cpp 运行环境。
+4. 运行环境入口文件使用：`/home/kzeng/llama.cpp/build/bin/llama-server`。
+5. 在 Web 中添加模型文件。
+6. 模型路径使用：`/home/kzeng/models/qwen2.5-0.5b-gguf/qwen2.5-0.5b-instruct-q4_k_m.gguf`。
+7. 验证模型文件。
+8. 创建本地实例。
+9. 使用端口 `18088` 或更高端口。
+10. 启动实例。
+11. 点击测试。
+12. 停止实例。
+13. 验证停止后进程退出。
 
 ## 端口冲突测试
 
@@ -52,7 +53,7 @@ Web 应显示明确的端口冲突原因；
 
 ## 状态检查与异常恢复验证
 
-以下端到端场景需在真实环境中逐项验证。所有代码路径已由 95 项自动化测试覆盖。
+以下端到端场景需在真实环境中逐项验证。自动化测试覆盖了主要代码路径，但真实 GPU、Docker 和 systemd 行为仍需手工验收。
 
 ### 1. Agent 离线 — 自动状态检测
 
@@ -61,7 +62,7 @@ Web 应显示明确的端口冲突原因；
 # 确认 Web 显示 running（绿色标签）
 
 # 停止 Agent（Ctrl+C 或 kill）
-# 等待约 15-30 秒（Web 周期刷新）
+# 在"实例"页面等待约 15-30 秒（实例页有周期刷新）
 
 # 预期（无需用户点击任何按钮）：
 # - 实例状态标签自动变为黄色 warning

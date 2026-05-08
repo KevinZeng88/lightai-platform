@@ -1,39 +1,14 @@
-pub mod custom;
-pub mod nvidia;
-
 use std::path::PathBuf;
-use std::pin::Pin;
 
 use crate::collector::{self, execute, registry::RegistryEntry};
 use crate::models::GpuMetrics;
 
-/// Unified GPU collector abstraction (Rust-native path).
+/// Configuration for the GPU collector pipeline.
 ///
-/// **Deprecated in favor of the script-based collector framework** (`crate::collector`).
-/// This trait and its implementations (NvidiaCollector, CustomCollector) are retained
-/// for backward compatibility and will be removed once the script-based path is stable.
-///
-/// New collectors should be added as collector directories with `collector.toml` +
-/// `discover.sh` + `metrics.sh` — see `docs/IMPLEMENTATION_NOTES.md`.
-pub trait GpuCollector: Send + Sync {
-    fn name(&self) -> &'static str;
-    fn collect(
-        &self,
-        timeout_secs: u64,
-        max_output_bytes: usize,
-    ) -> Pin<Box<dyn std::future::Future<Output = anyhow::Result<Vec<GpuMetrics>>> + Send + '_>>;
-}
-
-/// Configuration for the composite GPU collector pipeline.
-///
-/// Supports two collection paths:
-/// 1. **Directory-based collectors** (primary): Scan `collector_root` for
-///    `collector.toml` + `discover.sh` + `metrics.sh` directories.
-/// 2. **Legacy built-in collectors** (deprecated): Direct `nvidia-smi` and
-///    custom script execution via the `GpuCollector` trait.
+/// GPU collection only uses directory-based collectors that are registered on
+/// the Server and verified by script hash before execution.
 #[derive(Debug, Clone)]
 pub struct CollectorConfig {
-    // ── Directory-based collector config ──
     /// Root directory for script-based collectors.
     pub collector_root: Option<PathBuf>,
     pub collector_mode: String,
@@ -41,32 +16,11 @@ pub struct CollectorConfig {
     pub collector_disabled: Vec<String>,
     /// Server registry entries (pulled from heartbeat/config).
     pub collector_registry: Vec<RegistryEntry>,
-
-    // ── Legacy built-in config (deprecated) ──
-    pub nvidia_collector_enabled: bool,
-    pub custom_collector_script: Option<String>,
-
-    // ── Shared limits ──
     pub collector_timeout_secs: u64,
     pub collector_max_output_bytes: usize,
 }
 
 impl CollectorConfig {
-    /// Build legacy Rust-native collectors.
-    /// Deprecated: prefer the directory-based path via `collect_via_dirs()`.
-    pub fn build_collectors(&self) -> Vec<Box<dyn GpuCollector>> {
-        let mut collectors: Vec<Box<dyn GpuCollector>> = Vec::new();
-        if self.nvidia_collector_enabled {
-            collectors.push(Box::new(nvidia::NvidiaCollector));
-        }
-        if let Some(ref script) = self.custom_collector_script {
-            if !script.trim().is_empty() {
-                collectors.push(Box::new(custom::CustomCollector::new(script.clone())));
-            }
-        }
-        collectors
-    }
-
     /// Build the directory-based collector config for the new framework.
     fn to_dir_config(&self) -> Option<collector::CollectorConfig> {
         self.collector_root
@@ -86,17 +40,14 @@ impl CollectorConfig {
     }
 }
 
-/// Run all enabled collectors (directory-based + legacy) and aggregate results.
+/// Run all enabled script collectors and aggregate results.
 ///
-/// - Directory-based collectors take priority; if configured, they replace the
-///   corresponding legacy path (to avoid duplicate device reporting).
-/// - Legacy collectors only run if no directory-based collectors are configured.
+/// - If no collector root is configured, no GPU script executes.
 /// - A single failing collector never blocks the heartbeat.
 pub async fn collect_gpus(config: &CollectorConfig) -> (Vec<GpuMetrics>, Vec<String>) {
     let mut gpus = Vec::new();
     let mut errors = Vec::new();
 
-    // ── Path 1: Directory-based script collectors (primary) ──
     if let Some(dir_config) = config.to_dir_config() {
         collect_via_dirs(
             &dir_config,
@@ -105,25 +56,10 @@ pub async fn collect_gpus(config: &CollectorConfig) -> (Vec<GpuMetrics>, Vec<Str
             &mut errors,
         )
         .await;
-        // When directory collectors are configured, skip legacy to avoid duplicates.
         return (gpus, errors);
     }
 
-    // ── Path 2: Legacy built-in collectors (fallback) ──
-    let collectors = config.build_collectors();
-    for collector in collectors {
-        match collector
-            .collect(
-                config.collector_timeout_secs,
-                config.collector_max_output_bytes,
-            )
-            .await
-        {
-            Ok(mut collected) => gpus.append(&mut collected),
-            Err(error) => errors.push(format!("{} collector failed: {error}", collector.name())),
-        }
-    }
-
+    errors.push("gpu collector root is not configured; no GPU collectors executed".to_string());
     (gpus, errors)
 }
 

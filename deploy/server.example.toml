@@ -6,3 +6,20 @@ url = "sqlite://data/lightai.db"
 
 [metrics]
 retention_days = 7
+
+[auth]
+# First admin is created through the Web setup page when the database has no users.
+# Do not put production admin passwords in this file.
+
+[auth.password]
+min_length = 12
+complexity_required = false
+# 0 disables expiration.
+expires_days = 0
+force_change_after_reset = true
+
+[auth.session]
+ttl_secs = 43200
+idle_timeout_secs = 7200
+# Set true when serving Web/API over HTTPS.
+secure_cookie = false

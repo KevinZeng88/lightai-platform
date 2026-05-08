@@ -51,8 +51,6 @@ export interface AgentConfig {
   command_timeout_secs: number
   environment_check_timeout_secs: number
   allowed_model_dirs: string[]
-  nvidia_collector_enabled: boolean
-  custom_collector_script?: string | null
   collector_timeout_secs: number
   collector_max_output_bytes: number
   log_dir: string
@@ -69,8 +67,6 @@ export interface AgentConfigPolicy {
   command_timeout_secs?: number | null
   environment_check_timeout_secs?: number | null
   allowed_model_dirs?: string[] | null
-  nvidia_collector_enabled?: boolean | null
-  custom_collector_script?: string | null
   collector_timeout_secs?: number | null
   collector_max_output_bytes?: number | null
   log_dir?: string | null

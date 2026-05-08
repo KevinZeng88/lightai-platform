@@ -6,12 +6,24 @@
 Agent (GPU node) ──register / heartbeat / poll tasks──> Server <── Web
 ```
 
-LightAI Platform 当前是单控制面、单节点单副本实例管理模型：
+LightAI Platform 的最终目标是企业级模型服务与 GPU 资源调度平台：统一纳管多台 GPU 服务器，让多个模型能够上线、下线、扩容、降级，并通过统一 API 为多个业务系统提供模型调用能力；后续还需要支撑 API Key、部门/项目归属、额度、计量、优先级、费用和 SLA 分析。
+
+当前代码处于第一阶段，重点是 GPU 服务器统一纳管与基础模型实例管理：
 
 - **Server** 是唯一 HTTP API 入口和状态持久化位置。
 - **Agent** 是节点本地事实采集和本地动作执行者。
 - **Web** 是 Server API 的前端控制台，不直接访问 Agent 或节点本地服务。
-- **SQLite** 保存节点、指标采样、运行环境、模型、模型文件、实例、Agent 任务、配置策略、日志策略和审计记录。
+- **SQLite** 保存节点、指标采样、运行环境、模型、模型文件、实例、Agent 任务、配置策略、日志策略、审计记录、用户、用户组和会话。
+
+## 阶段规划
+
+1. 第一阶段：GPU 服务器统一纳管、Agent 心跳/GPU 状态上报、基础模型/Runtime/实例管理、Web 控制台、本地用户与用户组。
+2. 第二阶段：模型服务管理与统一调用入口，包括 OpenAI-compatible API Gateway、模型路由、统一调用认证和基础调用状态。
+3. 第三阶段：API Key、部门/项目/业务系统归属、额度、限流、调用统计和基础计量。
+4. 第四阶段：GPU 资源调度、关键模型优先级、扩缩容、降级策略和资源紧张时的保障策略。
+5. 第五阶段：费用归集、SLA、审计分析、运营报表和企业级治理能力。
+
+后续阶段是产品方向，不表示当前阶段已经实现。当前实现应为这些方向保留清晰归属基础，但不提前实现复杂调度、计费、网关或多租户隔离。
 
 ## 通信边界
 
@@ -21,8 +33,18 @@ LightAI Platform 当前是单控制面、单节点单副本实例管理模型：
 
 ## 安全边界
 
+- 除 `/health`、`/api/setup/*`、`/api/auth/login` 与 Agent 专用 `/api/agent/*` 外，控制面 API 必须携带已登录用户会话 cookie。
+- 空数据库首次访问 Web 时进入 setup 页面创建第一个管理员；setup 入口由后端保证只能成功一次。
+- 不支持通过生产配置文件或 `LIGHTAI_ADMIN_PASSWORD` 初始化管理员密码。
+- 服务器本机可通过 `lightai-server --reset-password <USERNAME> <PASSWORD>` 重置管理员或其他本地用户密码，重置后该用户旧 session 会失效，并要求用户登录后修改密码。
+- 当前角色为 `admin`、`operator`、`viewer`。用户可以拥有直接角色，也可以通过启用状态的用户组继承角色；后端统一计算最高权限 `effective_role`，权限判断不能只依赖前端隐藏按钮。`admin` 负责系统管理、配置和危险清理；`operator` 负责日常模型/Runtime/实例运维；`viewer` 只读查看。
+- 用户组当前只承载成员关系和组角色，是后续部门、项目、业务系统、API Key、额度、计量和优先级归属的基础对象。
+- 可选的 emergency control token 默认关闭，仅用于测试、自动化或本机应急，不是 Web 正式登录方式；使用时审计 actor 标记为 `system-emergency`。
+- Cookie 使用 HttpOnly、SameSite=Lax，可通过配置在 HTTPS 部署时启用 Secure；推荐 Web 与 API 同源部署或通过同一反向代理访问。
+- Agent token 只用于 Agent 注册后的心跳、任务轮询和任务结果上报；不要与用户登录会话或 emergency control token 混用。
 - Agent 只执行平台定义的任务类型，不接受任意 shell 命令。
 - 本地程序、脚本、Docker 均使用 argv 方式执行，不拼接 shell 命令字符串。
+- GPU collector 只走本地 `[gpu_collectors]` 目录 + Server registry/hash 校验机制；未登记或 hash 不匹配的脚本不会执行。
 - 路径需要校验；模型文件物理删除只能由 Agent 在 Server 下发的 allowed dirs 内执行。
 - 日志写入和读取做敏感信息脱敏，不允许前端指定任意日志文件路径。
 - Agent 是管理进程，不是模型进程宿主；Agent 退出不主动 kill 受管实例。
@@ -40,6 +62,7 @@ Model + Runtime Environment + Node + Instance Overrides = Model Instance
 | Runtime Environment | 某节点上的运行模板，含 backend 与 `deploy_type`（`binary` / `script` / `docker`） |
 | Node | Agent 注册后的节点身份和心跳状态 |
 | Model Instance | `external` 外部服务，或 `local` 受 Agent 管理实例 |
+| User Group | 当前阶段的最小组织归属对象，后续可承接部门、项目、业务系统和 API Key 归属 |
 
 关键边界：
 
@@ -110,16 +133,16 @@ Agent 本地 TOML 主要是 bootstrap：Server 地址、节点名、监听地址
 内置默认 + 全局策略 + 节点覆盖 -> effective_agent_config
 ```
 
-当前在线下发字段包括心跳/采样间隔、命令和检查超时、allowed dirs、GPU collector、日志策略等。
+当前在线下发字段包括心跳/采样间隔、命令和检查超时、allowed dirs、collector 执行超时/输出上限、日志策略等。GPU collector 的本地目录、启用列表和禁用列表属于 Agent bootstrap 配置。
 
-## MVP 范围
+## 当前阶段范围
 
 已实现：
 
 - Server / Agent / Web 基础闭环。
 - 单节点单副本模型实例管理。
 - 外部服务接入和本地实例生命周期。
-- Runtime、Model、Model File、Trash、日志审计和基础配置页面。
+- Runtime、Model、Model File、Trash、日志审计、用户/用户组和基础配置页面。
 - 系统/GPU 指标当前状态和历史趋势。
 
 部分完成：
@@ -128,10 +151,10 @@ Agent 本地 TOML 主要是 bootstrap：Server 地址、节点名、监听地址
 - 模型元数据 UI 已有表单，但前后端字段尚未统一，兼容性判断不能作为强约束依据。
 - SQLite schema 有迁移 SQL 和代码内幂等修正，但还没有正式 migration ledger。
 
-未完成：
+当前阶段暂未实现，作为后续阶段目标保留：
 
-- OpenAI-compatible API Gateway、API Key、用量统计和计费。
-- 多节点调度、自动 GPU 调度、高可用、IAM/SSO。
+- OpenAI-compatible API Gateway、API Key、统一模型调用入口、调用统计、额度、计量和费用归集。
+- GPU 资源调度、关键模型优先级、自动扩缩容、降级策略、高可用和复杂 IAM/SSO。
 - 指标清理/聚合/降采样后台任务。
 - 厂商 GPU SDK collector。
 

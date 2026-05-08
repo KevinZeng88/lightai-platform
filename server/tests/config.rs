@@ -17,6 +17,15 @@ url = "sqlite://data/test.db"
 
 [metrics]
 retention_days = 14
+
+[auth]
+emergency_control_token = "emergency-control-token-123"
+
+[auth.password]
+min_length = 12
+
+[auth.session]
+ttl_secs = 43200
 "#,
     )
     .unwrap();
@@ -26,6 +35,45 @@ retention_days = 14
     assert_eq!(config.listen_addr, "127.0.0.1:18080");
     assert_eq!(config.database_url, "sqlite://data/test.db");
     assert_eq!(config.metrics_retention_days, 14);
+    assert_eq!(
+        config.emergency_control_token.as_deref(),
+        Some("emergency-control-token-123")
+    );
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn initial_admin_password_config_is_rejected() {
+    let path = unique_temp_path("server-initial-admin-password.toml");
+    fs::write(
+        &path,
+        r#"
+[auth]
+initial_admin_username = "admin"
+initial_admin_password = "admin-password-123"
+"#,
+    )
+    .unwrap();
+
+    assert!(Config::from_file(&path).is_err());
+
+    let _ = fs::remove_file(path);
+}
+
+#[test]
+fn old_control_section_is_rejected() {
+    let path = unique_temp_path("server-old-control.toml");
+    fs::write(
+        &path,
+        r#"
+[control]
+token = "old-control-token"
+"#,
+    )
+    .unwrap();
+
+    assert!(Config::from_file(&path).is_err());
 
     let _ = fs::remove_file(path);
 }

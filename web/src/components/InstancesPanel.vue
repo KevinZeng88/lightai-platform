@@ -123,7 +123,7 @@
             <el-option
               v-for="env in localRuntimeOptions"
               :key="env.id"
-              :label="`${env.name} (${backendLabel(env.backend)} / ${runtimeDeployTypeLabel(env.deploy_type)})`"
+              :label="runtimeOptionLabel(env)"
               :value="env.id"
             />
           </el-select>
@@ -741,7 +741,9 @@ watch([() => form.value.model_id, () => form.value.runtime_environment_id], chec
 
 const localRuntimeOptions = computed(() =>
   runtimeEnvironments.value.filter(
-    (env) => env.node_id === form.value.node_id && env.check_status === 'available'
+    (env) =>
+      env.node_id === form.value.node_id &&
+      ['available', 'version_unavailable'].includes(env.check_status ?? '')
   )
 )
 const localFileOptions = computed(() =>
@@ -751,6 +753,11 @@ const localFileOptions = computed(() =>
 function onLocalNodeChange() {
   form.value.runtime_environment_id = ''
   form.value.model_file_id = ''
+}
+
+function runtimeOptionLabel(env: RuntimeEnvironment) {
+  const suffix = env.check_status === 'version_unavailable' ? ' / 版本无法自动获取' : ''
+  return `${env.name} (${backendLabel(env.backend)} / ${runtimeDeployTypeLabel(env.deploy_type)}${suffix})`
 }
 
 async function remove(row: ModelInstance) {

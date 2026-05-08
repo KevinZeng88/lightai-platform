@@ -7,6 +7,7 @@ pub async fn connect(database_url: &str) -> anyhow::Result<SqlitePool> {
 
     let options = SqliteConnectOptions::from_str(database_url)?
         .create_if_missing(true)
+        .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal);
 
     let pool = SqlitePoolOptions::new()
@@ -76,8 +77,6 @@ async fn migrate_stage3a_corrections(pool: &SqlitePool) -> anyhow::Result<()> {
     add_node_status_column_if_missing(pool, "command_timeout_secs", "INTEGER").await?;
     add_node_status_column_if_missing(pool, "environment_check_timeout_secs", "INTEGER").await?;
     add_node_status_column_if_missing(pool, "allowed_model_dirs_json", "TEXT").await?;
-    add_node_status_column_if_missing(pool, "nvidia_collector_enabled", "INTEGER").await?;
-    add_node_status_column_if_missing(pool, "custom_collector_script", "TEXT").await?;
     add_node_status_column_if_missing(pool, "collector_timeout_secs", "INTEGER").await?;
     add_node_status_column_if_missing(pool, "collector_max_output_bytes", "INTEGER").await?;
     add_node_status_column_if_missing(pool, "last_config_updated_at", "INTEGER").await?;
@@ -101,9 +100,93 @@ async fn migrate_stage3a_corrections(pool: &SqlitePool) -> anyhow::Result<()> {
     ensure_stage3b_tables(pool).await?;
     ensure_agent_config_tables(pool).await?;
     ensure_audit_tables(pool).await?;
+    ensure_user_tables(pool).await?;
     ensure_platform_settings(pool).await?;
     ensure_collector_registry(pool).await?;
 
+    Ok(())
+}
+
+async fn ensure_user_tables(pool: &SqlitePool) -> anyhow::Result<()> {
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS users (
+            id TEXT PRIMARY KEY,
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            password_changed_at INTEGER NOT NULL DEFAULT 0,
+            must_change_password INTEGER NOT NULL DEFAULT 0,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        "#,
+    )
+    .await?;
+    add_user_column_if_missing(pool, "password_changed_at", "INTEGER NOT NULL DEFAULT 0").await?;
+    add_user_column_if_missing(pool, "must_change_password", "INTEGER NOT NULL DEFAULT 0").await?;
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS user_sessions (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            token_hash TEXT NOT NULL UNIQUE,
+            created_at INTEGER NOT NULL,
+            last_seen_at INTEGER NOT NULL,
+            expires_at INTEGER NOT NULL,
+            revoked_at INTEGER
+        )
+        "#,
+    )
+    .await?;
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS user_groups (
+            id TEXT PRIMARY KEY,
+            name TEXT NOT NULL UNIQUE,
+            role TEXT NOT NULL,
+            enabled INTEGER NOT NULL DEFAULT 1,
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        )
+        "#,
+    )
+    .await?;
+    pool.execute(
+        r#"
+        CREATE TABLE IF NOT EXISTS user_group_members (
+            group_id TEXT NOT NULL REFERENCES user_groups(id) ON DELETE CASCADE,
+            user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (group_id, user_id)
+        )
+        "#,
+    )
+    .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_group_members_user ON user_group_members(user_id)",
+    )
+    .await?;
+    pool.execute("CREATE INDEX IF NOT EXISTS idx_user_sessions_token ON user_sessions(token_hash)")
+        .await?;
+    pool.execute(
+        "CREATE INDEX IF NOT EXISTS idx_user_sessions_user_expires ON user_sessions(user_id, expires_at)",
+    )
+    .await?;
+    Ok(())
+}
+
+async fn add_user_column_if_missing(
+    pool: &SqlitePool,
+    column: &str,
+    column_type: &str,
+) -> anyhow::Result<()> {
+    let columns = table_columns(pool, "users").await?;
+    if !columns.iter().any(|existing| existing.name == column) {
+        pool.execute(format!("ALTER TABLE users ADD COLUMN {column} {column_type}").as_str())
+            .await?;
+    }
     Ok(())
 }
 

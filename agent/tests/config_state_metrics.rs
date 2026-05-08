@@ -32,7 +32,7 @@ state_path = "data/test-agent-state.toml"
 }
 
 #[test]
-fn ignores_runtime_policy_fields_in_local_agent_bootstrap_config() {
+fn rejects_removed_legacy_agent_config_fields() {
     let path = unique_temp_path("agent-bootstrap-only.toml");
     fs::write(
         &path,
@@ -50,11 +50,11 @@ enabled = false
     )
     .unwrap();
 
-    let config = Config::from_file(&path).unwrap();
-
-    assert_eq!(config.server_url, "http://127.0.0.1:18080");
-    assert_eq!(config.node_name, "gpu-node-test");
-    assert_eq!(config.state_path, Config::default().state_path);
+    let error = Config::from_file(&path).unwrap_err().to_string();
+    assert!(
+        error.contains("unknown field") || error.contains("unexpected"),
+        "{error}"
+    );
 
     let _ = fs::remove_file(path);
 }
@@ -111,8 +111,6 @@ fn runtime_config_applies_server_config_and_reports_effective_values() {
         command_timeout_secs: 7,
         environment_check_timeout_secs: 8,
         allowed_model_dirs: vec!["/models".to_string()],
-        nvidia_collector_enabled: false,
-        custom_collector_script: Some("/opt/lightai/gpu".to_string()),
         collector_timeout_secs: 9,
         collector_max_output_bytes: 4096,
         log_policy: Default::default(),
@@ -124,11 +122,6 @@ fn runtime_config_applies_server_config_and_reports_effective_values() {
     assert_eq!(effective.heartbeat_interval_secs, 30);
     assert_eq!(effective.metrics_sample_interval_secs, 60);
     assert_eq!(effective.allowed_model_dirs, vec!["/models"]);
-    assert!(!effective.nvidia_collector_enabled);
-    assert_eq!(
-        effective.custom_collector_script.as_deref(),
-        Some("/opt/lightai/gpu")
-    );
     assert_eq!(effective.last_config_updated_at, Some(1_700_000_000));
 }
 

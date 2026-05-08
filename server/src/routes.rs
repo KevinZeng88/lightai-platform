@@ -1,17 +1,22 @@
-use axum::extract::{Path, Query, State};
+use axum::body::Body;
+use axum::extract::{Extension, Path, Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
+use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
-use axum::{routing::delete, routing::get, routing::post, Json, Router};
+use axum::{routing::delete, routing::get, routing::post, routing::put, Json, Router};
 use serde::Serialize;
 use sqlx::SqlitePool;
 
 use crate::domain;
 use crate::models::{
-    AgentConfigPolicy, AgentTaskPollRequest, AgentTaskResultRequest, AuditQuery,
-    CollectorRegistryEntry, FrontendErrorReport, GpuMetricsQuery, HeartbeatRequest,
-    HeartbeatResponse, LogQuery, MetricsQuery, ModelFileRequest, ModelFileTrashRequest,
-    ModelInstanceCreateRequest, ModelInstanceUpdateRequest, ModelRequest, RegisterCollectorRequest,
-    RegisterRequest, RuntimeEnvironmentRequest,
+    AgentConfigPolicy, AgentTaskPollRequest, AgentTaskResultRequest, AuditQuery, AuthResponse,
+    AuthUser, ChangePasswordRequest, CollectorRegistryEntry, FrontendErrorReport, GpuMetricsQuery,
+    HeartbeatRequest, HeartbeatResponse, LogQuery, LoginRequest, MetricsQuery, ModelFileRequest,
+    ModelFileTrashRequest, ModelInstanceCreateRequest, ModelInstanceUpdateRequest, ModelRequest,
+    RegisterCollectorRequest, RegisterRequest, RuntimeEnvironmentRequest, SetupAdminRequest,
+    SetupStatusResponse, UserCreateRequest, UserGroupCreateRequest, UserGroupListResponse,
+    UserGroupMembersRequest, UserGroupResponse, UserGroupUpdateRequest, UserListResponse,
+    UserUpdateRequest,
 };
 use crate::platform_log::LogPolicy;
 use crate::repository;
@@ -23,8 +28,53 @@ struct HealthResponse {
 }
 
 pub fn app(pool: SqlitePool) -> Router {
+    let emergency_token = std::env::var("LIGHTAI_EMERGENCY_CONTROL_TOKEN")
+        .ok()
+        .filter(|value| !value.trim().is_empty());
+    app_with_emergency_control_token(pool, emergency_token)
+}
+
+pub fn app_with_emergency_token(pool: SqlitePool, emergency_token: String) -> Router {
+    app_with_emergency_control_token(pool, Some(emergency_token))
+}
+
+pub fn app_with_emergency_control_token(
+    pool: SqlitePool,
+    emergency_control_token: Option<String>,
+) -> Router {
+    app_with_auth_policies(
+        pool,
+        emergency_control_token,
+        repository::PasswordPolicy::default(),
+        repository::SessionPolicy::default(),
+    )
+}
+
+pub fn app_with_auth_policies(
+    pool: SqlitePool,
+    emergency_control_token: Option<String>,
+    password_policy: repository::PasswordPolicy,
+    session_policy: repository::SessionPolicy,
+) -> Router {
+    let auth_state = AuthState::new(
+        pool.clone(),
+        emergency_control_token,
+        password_policy,
+        session_policy,
+    );
     Router::new()
         .route("/health", get(health))
+        .route("/api/setup/status", get(setup_status))
+        .route("/api/setup/admin", post(setup_admin))
+        .route("/api/auth/login", post(login))
+        .route("/api/auth/logout", post(logout))
+        .route("/api/auth/me", get(current_user))
+        .route("/api/auth/change-password", post(change_password))
+        .route("/api/users", get(list_users).post(create_user))
+        .route("/api/users/{id}", put(update_user))
+        .route("/api/groups", get(list_groups).post(create_group))
+        .route("/api/groups/{id}", put(update_group).delete(delete_group))
+        .route("/api/groups/{id}/members", put(update_group_members))
         .route("/api/agent/register", post(register_agent))
         .route("/api/agent/heartbeat", post(agent_heartbeat))
         .route("/api/nodes", get(list_nodes))
@@ -128,7 +178,457 @@ pub fn app(pool: SqlitePool) -> Router {
         )
         .route("/api/agent/tasks/poll", post(agent_task_poll))
         .route("/api/agent/tasks/{id}/result", post(agent_task_result))
+        .layer(axum::Extension(AuthPolicies {
+            password_policy: auth_state.password_policy.clone(),
+            session_policy: auth_state.session_policy.clone(),
+        }))
+        .route_layer(middleware::from_fn_with_state(
+            auth_state,
+            control_plane_auth,
+        ))
         .with_state(pool)
+}
+
+#[derive(Clone)]
+struct AuthState {
+    pool: SqlitePool,
+    emergency_token_hash: Option<String>,
+    password_policy: repository::PasswordPolicy,
+    session_policy: repository::SessionPolicy,
+}
+
+#[derive(Clone)]
+struct AuthPolicies {
+    password_policy: repository::PasswordPolicy,
+    session_policy: repository::SessionPolicy,
+}
+
+impl AuthState {
+    fn new(
+        pool: SqlitePool,
+        emergency_token: Option<String>,
+        password_policy: repository::PasswordPolicy,
+        session_policy: repository::SessionPolicy,
+    ) -> Self {
+        Self {
+            pool,
+            emergency_token_hash: emergency_token
+                .map(|token| crate::auth::hash_token(token.trim())),
+            password_policy,
+            session_policy,
+        }
+    }
+
+    fn verify_emergency_token(&self, token: &str) -> bool {
+        self.emergency_token_hash
+            .as_deref()
+            .is_some_and(|hash| crate::auth::verify_token(token.trim(), hash))
+    }
+}
+
+async fn control_plane_auth(
+    State(auth): State<AuthState>,
+    headers: HeaderMap,
+    mut request: axum::http::Request<Body>,
+    next: Next,
+) -> Response {
+    let path = request.uri().path();
+    if !path.starts_with("/api/")
+        || path.starts_with("/api/agent/")
+        || path == "/api/auth/login"
+        || path == "/api/setup/status"
+        || path == "/api/setup/admin"
+    {
+        return next.run(request).await;
+    }
+
+    let token = management_token(&headers);
+    if token.is_some_and(|token| auth.verify_emergency_token(token)) {
+        request.extensions_mut().insert(AuthUser {
+            id: "emergency".to_string(),
+            username: "emergency".to_string(),
+            role: "admin".to_string(),
+            effective_role: "admin".to_string(),
+            enabled: true,
+            must_change_password: false,
+        });
+        return next.run(request).await;
+    }
+
+    if let Some(session_token) = session_cookie(&headers) {
+        match repository::authenticate_session(&auth.pool, session_token, &auth.session_policy)
+            .await
+        {
+            Ok(Some(user)) => {
+                if user.must_change_password && !is_password_change_allowed_path(path) {
+                    return forbidden_response_with_message(
+                        "必须修改密码后才能继续使用控制台".to_string(),
+                    );
+                }
+                if !is_authorized_for_path(&user, request.method(), path) {
+                    return forbidden_response();
+                }
+                request.extensions_mut().insert(user);
+                return next.run(request).await;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(error = %error, "failed to authenticate user session");
+            }
+        }
+    }
+
+    (
+        StatusCode::UNAUTHORIZED,
+        Json(ErrorResponse {
+            error: "unauthorized",
+            message: Some("请先登录".to_string()),
+        }),
+    )
+        .into_response()
+}
+
+fn is_authorized_for_path(user: &AuthUser, method: &axum::http::Method, path: &str) -> bool {
+    let role = user.effective_role.as_str();
+    if role == "admin" {
+        return true;
+    }
+    if path.starts_with("/api/auth/") || path == "/api/frontend-errors" {
+        return true;
+    }
+    if path.starts_with("/api/users")
+        || path.starts_with("/api/groups")
+        || path.starts_with("/api/config")
+        || path.starts_with("/api/model-file-trash")
+    {
+        return false;
+    }
+    if role == "operator" {
+        return true;
+    }
+    matches!(*method, axum::http::Method::GET)
+}
+
+fn is_password_change_allowed_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/auth/me" | "/api/auth/logout" | "/api/auth/change-password"
+    ) || path == "/api/frontend-errors"
+}
+
+fn forbidden_response() -> Response {
+    forbidden_response_with_message("当前用户没有权限执行该操作".to_string())
+}
+
+fn forbidden_response_with_message(message: String) -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(ErrorResponse {
+            error: "forbidden",
+            message: Some(message),
+        }),
+    )
+        .into_response()
+}
+
+fn session_cookie(headers: &HeaderMap) -> Option<&str> {
+    let cookie = headers.get(header::COOKIE)?.to_str().ok()?;
+    cookie.split(';').find_map(|part| {
+        let (name, value) = part.trim().split_once('=')?;
+        (name == "lightai_session" && !value.is_empty()).then_some(value)
+    })
+}
+
+fn management_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get("x-lightai-control-token")
+        .and_then(|value| value.to_str().ok())
+        .or_else(|| bearer_token(headers))
+}
+
+async fn login(
+    State(pool): State<SqlitePool>,
+    Extension(auth): Extension<AuthPolicies>,
+    Json(request): Json<LoginRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let Some((user, session_token)) = repository::login_user(
+        &pool,
+        &request.username,
+        &request.password,
+        &auth.session_policy,
+        &auth.password_policy,
+    )
+    .await?
+    else {
+        return Err(ApiError::Unauthorized);
+    };
+    let cookie = session_cookie_header(
+        &session_token,
+        auth.session_policy.ttl_secs,
+        auth.session_policy.secure_cookie,
+    );
+    audit_actor_success(&pool, &user, "auth.login", "user", Some(&user.id)).await;
+    Ok(([(header::SET_COOKIE, cookie)], Json(AuthResponse { user })))
+}
+
+async fn logout(
+    State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, ApiError> {
+    if let Some(token) = session_cookie(&headers) {
+        repository::revoke_session(&pool, token).await?;
+    }
+    audit_actor_success(&pool, &user, "auth.logout", "user", Some(&user.id)).await;
+    Ok((
+        [(
+            header::SET_COOKIE,
+            "lightai_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0".to_string(),
+        )],
+        Json(serde_json::json!({ "status": "ok" })),
+    ))
+}
+
+async fn change_password(
+    State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
+    Extension(auth): Extension<AuthPolicies>,
+    Json(request): Json<ChangePasswordRequest>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    repository::change_user_password(
+        &pool,
+        &user.id,
+        &request.current_password,
+        &request.new_password,
+        &auth.password_policy,
+    )
+    .await
+    .map_err(password_change_error)?;
+    audit_actor_success(&pool, &user, "auth.password.change", "user", Some(&user.id)).await;
+    Ok(Json(serde_json::json!({ "status": "ok" })))
+}
+
+async fn setup_status(
+    State(pool): State<SqlitePool>,
+) -> Result<Json<SetupStatusResponse>, ApiError> {
+    Ok(Json(SetupStatusResponse {
+        setup_required: repository::user_count(&pool).await? == 0,
+    }))
+}
+
+async fn setup_admin(
+    State(pool): State<SqlitePool>,
+    Extension(auth): Extension<AuthPolicies>,
+    Json(request): Json<SetupAdminRequest>,
+) -> Result<impl IntoResponse, ApiError> {
+    let user = repository::setup_initial_admin(
+        &pool,
+        &request.username,
+        &request.password,
+        &auth.password_policy,
+    )
+    .await
+    .map_err(setup_error)?;
+    let (_, session_token) = repository::login_user(
+        &pool,
+        &request.username,
+        &request.password,
+        &auth.session_policy,
+        &auth.password_policy,
+    )
+    .await?
+    .ok_or(ApiError::Unauthorized)?;
+    let cookie = session_cookie_header(
+        &session_token,
+        auth.session_policy.ttl_secs,
+        auth.session_policy.secure_cookie,
+    );
+    audit_actor_success(&pool, &user, "auth.setup", "user", Some(&user.id)).await;
+    Ok(([(header::SET_COOKIE, cookie)], Json(AuthResponse { user })))
+}
+
+fn session_cookie_header(token: &str, max_age_secs: i64, secure: bool) -> String {
+    let secure = if secure { "; Secure" } else { "" };
+    format!(
+        "lightai_session={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age_secs}{secure}"
+    )
+}
+
+async fn current_user(
+    Extension(user): Extension<AuthUser>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    Ok(Json(AuthResponse { user }))
+}
+
+async fn list_users(
+    Extension(user): Extension<AuthUser>,
+    State(pool): State<SqlitePool>,
+) -> Result<Json<UserListResponse>, ApiError> {
+    require_admin(&user)?;
+    Ok(Json(UserListResponse {
+        users: repository::list_users(&pool).await?,
+    }))
+}
+
+async fn create_user(
+    Extension(user): Extension<AuthUser>,
+    Extension(auth): Extension<AuthPolicies>,
+    State(pool): State<SqlitePool>,
+    Json(request): Json<UserCreateRequest>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    require_admin(&user)?;
+    let created = repository::create_user_with_policy(&pool, request, &auth.password_policy)
+        .await
+        .map_err(user_management_error)?;
+    audit_actor_success(&pool, &user, "user.create", "user", Some(&created.id)).await;
+    Ok(Json(AuthResponse { user: created }))
+}
+
+async fn update_user(
+    Extension(user): Extension<AuthUser>,
+    Extension(auth): Extension<AuthPolicies>,
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+    Json(request): Json<UserUpdateRequest>,
+) -> Result<Json<AuthResponse>, ApiError> {
+    require_admin(&user)?;
+    let updated = repository::update_user_with_policy(&pool, &id, request, &auth.password_policy)
+        .await
+        .map_err(user_management_error)?;
+    audit_actor_success(&pool, &user, "user.update", "user", Some(&id)).await;
+    Ok(Json(AuthResponse { user: updated }))
+}
+
+async fn list_groups(
+    Extension(user): Extension<AuthUser>,
+    State(pool): State<SqlitePool>,
+) -> Result<Json<UserGroupListResponse>, ApiError> {
+    require_admin(&user)?;
+    Ok(Json(UserGroupListResponse {
+        groups: repository::list_user_groups(&pool).await?,
+    }))
+}
+
+async fn create_group(
+    Extension(user): Extension<AuthUser>,
+    State(pool): State<SqlitePool>,
+    Json(request): Json<UserGroupCreateRequest>,
+) -> Result<Json<UserGroupResponse>, ApiError> {
+    require_admin(&user)?;
+    let group = repository::create_user_group(&pool, request)
+        .await
+        .map_err(group_management_error)?;
+    audit_actor_success(&pool, &user, "group.create", "user_group", Some(&group.id)).await;
+    Ok(Json(UserGroupResponse { group }))
+}
+
+async fn update_group(
+    Extension(user): Extension<AuthUser>,
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+    Json(request): Json<UserGroupUpdateRequest>,
+) -> Result<Json<UserGroupResponse>, ApiError> {
+    require_admin(&user)?;
+    let group = repository::update_user_group(&pool, &id, request)
+        .await
+        .map_err(group_management_error)?;
+    audit_actor_success(&pool, &user, "group.update", "user_group", Some(&id)).await;
+    Ok(Json(UserGroupResponse { group }))
+}
+
+async fn update_group_members(
+    Extension(user): Extension<AuthUser>,
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+    Json(request): Json<UserGroupMembersRequest>,
+) -> Result<Json<UserGroupResponse>, ApiError> {
+    require_admin(&user)?;
+    let group = repository::replace_user_group_members(&pool, &id, request)
+        .await
+        .map_err(group_management_error)?;
+    audit_actor_success(
+        &pool,
+        &user,
+        "group.members.update",
+        "user_group",
+        Some(&id),
+    )
+    .await;
+    Ok(Json(UserGroupResponse { group }))
+}
+
+async fn delete_group(
+    Extension(user): Extension<AuthUser>,
+    State(pool): State<SqlitePool>,
+    Path(id): Path<String>,
+) -> Result<StatusCode, ApiError> {
+    require_admin(&user)?;
+    repository::delete_user_group(&pool, &id)
+        .await
+        .map_err(group_management_error)?;
+    audit_actor_success(&pool, &user, "group.delete", "user_group", Some(&id)).await;
+    Ok(StatusCode::OK)
+}
+
+fn require_admin(user: &AuthUser) -> Result<(), ApiError> {
+    if user.is_admin() {
+        Ok(())
+    } else {
+        Err(ApiError::Forbidden)
+    }
+}
+
+fn group_management_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("not found") {
+        ApiError::NotFound(message)
+    } else if message.contains("has members") {
+        ApiError::Conflict(message)
+    } else if message.contains("UNIQUE constraint")
+        || message.contains("must be")
+        || message.contains("may only contain")
+    {
+        ApiError::BadRequest(message)
+    } else {
+        ApiError::Internal(error)
+    }
+}
+
+fn setup_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("already completed") {
+        ApiError::Conflict(message)
+    } else if message.contains("password") || message.contains("username") {
+        ApiError::BadRequest(message)
+    } else {
+        ApiError::Internal(error)
+    }
+}
+
+fn user_management_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("not found") {
+        ApiError::NotFound(message)
+    } else if message.contains("UNIQUE constraint")
+        || message.contains("must be")
+        || message.contains("cannot disable")
+        || message.contains("may only contain")
+    {
+        ApiError::BadRequest(message)
+    } else {
+        ApiError::Internal(error)
+    }
+}
+
+fn password_change_error(error: anyhow::Error) -> ApiError {
+    let message = error.to_string();
+    if message.contains("password") {
+        ApiError::BadRequest(message)
+    } else if message.contains("not found") {
+        ApiError::NotFound(message)
+    } else {
+        ApiError::Internal(error)
+    }
 }
 
 async fn health() -> Json<HealthResponse> {
@@ -267,15 +767,37 @@ async fn get_server_log_policy(
 
 async fn update_server_log_policy(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Json(request): Json<LogPolicy>,
 ) -> Result<Json<LogPolicy>, ApiError> {
-    let policy = repository::update_server_log_policy(&pool, request).await?;
-    audit_success(
+    let policy = match repository::update_server_log_policy(&pool, request).await {
+        Ok(policy) => policy,
+        Err(error) => {
+            let message = format!("{error:?}");
+            audit_actor_result(
+                &pool,
+                &user,
+                "config.update",
+                "server_log_policy",
+                Some("server"),
+                None,
+                None,
+                "failed",
+                Some(&message),
+            )
+            .await;
+            return Err(ApiError::Internal(error));
+        }
+    };
+    audit_actor_result(
         &pool,
+        &user,
         "config.update",
         "server_log_policy",
         Some("server"),
         None,
+        None,
+        "success",
         None,
     )
     .await;
@@ -303,15 +825,19 @@ async fn get_global_agent_config_policy(
 
 async fn update_global_agent_config_policy(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Json(request): Json<AgentConfigPolicy>,
 ) -> Result<Json<crate::models::AgentConfigPolicyView>, ApiError> {
     let view = repository::update_global_agent_config_policy(&pool, request).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "config.update",
         "agent_config",
         Some("global"),
         None,
+        None,
+        "success",
         None,
     )
     .await;
@@ -330,16 +856,20 @@ async fn get_node_agent_config_policy(
 
 async fn update_node_agent_config_policy(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(node_id): Path<String>,
     Json(request): Json<AgentConfigPolicy>,
 ) -> Result<Json<crate::models::AgentConfigPolicyView>, ApiError> {
     let view = repository::update_node_agent_config_policy(&pool, &node_id, request).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "config.update",
         "agent_config",
         Some(&node_id),
         Some(&node_id),
+        None,
+        "success",
         None,
     )
     .await;
@@ -400,16 +930,20 @@ async fn list_node_runtime_environments(
 
 async fn create_runtime_environment(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(node_id): Path<String>,
     Json(request): Json<RuntimeEnvironmentRequest>,
 ) -> Result<Json<crate::models::RuntimeEnvironmentView>, ApiError> {
     let view = domain::create_runtime_environment(&pool, &node_id, request).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "runtime.create",
         "runtime_environment",
         Some(&view.id),
         Some(&node_id),
+        None,
+        "success",
         None,
     )
     .await;
@@ -425,16 +959,20 @@ async fn get_runtime_environment(
 
 async fn update_runtime_environment(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
     Json(request): Json<RuntimeEnvironmentRequest>,
 ) -> Result<Json<crate::models::RuntimeEnvironmentView>, ApiError> {
     let view = domain::update_runtime_environment(&pool, &id, request).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "runtime.update",
         "runtime_environment",
         Some(&id),
         view.node_id.as_deref(),
+        None,
+        "success",
         None,
     )
     .await;
@@ -443,15 +981,19 @@ async fn update_runtime_environment(
 
 async fn delete_runtime_environment(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     domain::delete_runtime_environment(&pool, &id).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "runtime.delete",
         "runtime_environment",
         Some(&id),
         None,
+        None,
+        "success",
         None,
     )
     .await;
@@ -473,10 +1015,29 @@ async fn list_models(
 
 async fn create_model(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Json(request): Json<ModelRequest>,
 ) -> Result<Json<crate::models::ModelView>, ApiError> {
-    let view = domain::create_model(&pool, request).await?;
-    audit_success(&pool, "model.create", "model", Some(&view.id), None, None).await;
+    let view = match domain::create_model(&pool, request).await {
+        Ok(view) => view,
+        Err(error) => {
+            let message = format!("{error:?}");
+            audit_actor_result(
+                &pool,
+                &user,
+                "model.create",
+                "model",
+                None,
+                None,
+                None,
+                "failed",
+                Some(&message),
+            )
+            .await;
+            return Err(error.into());
+        }
+    };
+    audit_actor_success(&pool, &user, "model.create", "model", Some(&view.id)).await;
     Ok(Json(view))
 }
 
@@ -489,20 +1050,22 @@ async fn get_model(
 
 async fn update_model(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
     Json(request): Json<ModelRequest>,
 ) -> Result<Json<crate::models::ModelView>, ApiError> {
     let view = domain::update_model(&pool, &id, request).await?;
-    audit_success(&pool, "model.update", "model", Some(&id), None, None).await;
+    audit_actor_success(&pool, &user, "model.update", "model", Some(&id)).await;
     Ok(Json(view))
 }
 
 async fn delete_model(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     domain::delete_model(&pool, &id).await?;
-    audit_success(&pool, "model.delete", "model", Some(&id), None, None).await;
+    audit_actor_success(&pool, &user, "model.delete", "model", Some(&id)).await;
     Ok(StatusCode::OK)
 }
 
@@ -515,16 +1078,20 @@ async fn list_model_files(
 
 async fn create_model_file(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
     Json(request): Json<ModelFileRequest>,
 ) -> Result<Json<crate::models::ModelFileView>, ApiError> {
     let view = domain::create_model_file(&pool, &id, request).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "model_file.create",
         "model_file",
         Some(&view.id),
         Some(&view.node_id),
+        None,
+        "success",
         None,
     )
     .await;
@@ -540,16 +1107,20 @@ async fn get_model_file(
 
 async fn update_model_file(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
     Json(request): Json<ModelFileRequest>,
 ) -> Result<Json<crate::models::ModelFileView>, ApiError> {
     let view = domain::update_model_file(&pool, &id, request).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "model_file.update",
         "model_file",
         Some(&id),
         Some(&view.node_id),
+        None,
+        "success",
         None,
     )
     .await;
@@ -558,15 +1129,19 @@ async fn update_model_file(
 
 async fn delete_model_file(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     domain::delete_model_file(&pool, &id).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "model_file.delete",
         "model_file",
         Some(&id),
         None,
+        None,
+        "success",
         None,
     )
     .await;
@@ -575,15 +1150,19 @@ async fn delete_model_file(
 
 async fn verify_model_file(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelFileView>, ApiError> {
     let view = domain::queue_model_file_verification(&pool, &id).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "model_file.verify",
         "model_file",
         Some(&id),
         Some(&view.node_id),
+        None,
+        "success",
         None,
     )
     .await;
@@ -598,16 +1177,20 @@ async fn list_model_instances(
 
 async fn create_model_instance(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Json(request): Json<ModelInstanceCreateRequest>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
     let view = domain::create_model_instance(&pool, request).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "instance.create",
         "model_instance",
         Some(&view.id),
         view.node_id.as_deref(),
         Some(&view.id),
+        "success",
+        None,
     )
     .await;
     Ok(Json(view))
@@ -622,17 +1205,21 @@ async fn get_model_instance(
 
 async fn update_model_instance(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
     Json(request): Json<ModelInstanceUpdateRequest>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
     let view = domain::update_model_instance(&pool, &id, request).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "instance.update",
         "model_instance",
         Some(&id),
         view.node_id.as_deref(),
         Some(&id),
+        "success",
+        None,
     )
     .await;
     Ok(Json(view))
@@ -640,16 +1227,20 @@ async fn update_model_instance(
 
 async fn delete_model_instance(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     domain::delete_model_instance(&pool, &id).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "instance.delete",
         "model_instance",
         Some(&id),
         None,
         Some(&id),
+        "success",
+        None,
     )
     .await;
     Ok(StatusCode::OK)
@@ -657,16 +1248,20 @@ async fn delete_model_instance(
 
 async fn check_model_instance(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
     let view = domain::check_model_instance(&pool, &id).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "instance.check",
         "model_instance",
         Some(&id),
         view.node_id.as_deref(),
         Some(&id),
+        "success",
+        None,
     )
     .await;
     Ok(Json(view))
@@ -674,16 +1269,20 @@ async fn check_model_instance(
 
 async fn start_model_instance(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
     let view = domain::start_model_instance(&pool, &id).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "instance.start",
         "model_instance",
         Some(&id),
         view.node_id.as_deref(),
         Some(&id),
+        "success",
+        None,
     )
     .await;
     Ok(Json(view))
@@ -691,16 +1290,20 @@ async fn start_model_instance(
 
 async fn stop_model_instance(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
     let view = domain::stop_model_instance(&pool, &id).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "instance.stop",
         "model_instance",
         Some(&id),
         view.node_id.as_deref(),
         Some(&id),
+        "success",
+        None,
     )
     .await;
     Ok(Json(view))
@@ -708,16 +1311,20 @@ async fn stop_model_instance(
 
 async fn test_model_instance(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelInstanceView>, ApiError> {
     let view = domain::test_model_instance(&pool, &id).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "instance.test",
         "model_instance",
         Some(&id),
         view.node_id.as_deref(),
         Some(&id),
+        "success",
+        None,
     )
     .await;
     Ok(Json(view))
@@ -740,6 +1347,7 @@ async fn refresh_instance_logs(
 
 async fn report_frontend_error(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Json(report): Json<FrontendErrorReport>,
 ) -> Result<StatusCode, ApiError> {
     let message = report.message.chars().take(1024).collect::<String>();
@@ -752,6 +1360,7 @@ async fn report_frontend_error(
         stack.as_deref(),
         url.as_deref(),
         occurred_at,
+        Some(&user),
     )
     .await?;
     let _ = crate::platform_log::append(
@@ -774,16 +1383,20 @@ async fn list_model_file_trash(
 
 async fn create_model_file_trash(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
     Json(request): Json<ModelFileTrashRequest>,
 ) -> Result<Json<crate::models::ModelFileTrashView>, ApiError> {
     let view = domain::create_model_file_trash(&pool, &id, request).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "trash.create",
         "model_file_trash",
         Some(&view.id),
         view.node_id.as_deref(),
+        None,
+        "success",
         None,
     )
     .await;
@@ -792,15 +1405,19 @@ async fn create_model_file_trash(
 
 async fn cleanup_model_file_trash(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<Json<crate::models::ModelFileTrashView>, ApiError> {
     let view = domain::cleanup_model_file_trash(&pool, &id).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "trash.cleanup",
         "model_file_trash",
         Some(&id),
         view.node_id.as_deref(),
+        None,
+        "success",
         None,
     )
     .await;
@@ -809,15 +1426,19 @@ async fn cleanup_model_file_trash(
 
 async fn delete_model_file_trash(
     State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
     domain::delete_model_file_trash(&pool, &id).await?;
-    audit_success(
+    audit_actor_result(
         &pool,
+        &user,
         "trash.delete_record",
         "model_file_trash",
         Some(&id),
         None,
+        None,
+        "success",
         None,
     )
     .await;
@@ -874,14 +1495,49 @@ fn current_unix_secs() -> i64 {
         .as_secs() as i64
 }
 
-async fn audit_success(
+async fn audit_actor_success(
     pool: &SqlitePool,
+    actor: &AuthUser,
+    operation_type: &str,
+    target_type: &str,
+    target_id: Option<&str>,
+) {
+    audit_actor_result(
+        pool,
+        actor,
+        operation_type,
+        target_type,
+        target_id,
+        None,
+        None,
+        "success",
+        None,
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn audit_actor_result(
+    pool: &SqlitePool,
+    actor: &AuthUser,
     operation_type: &str,
     target_type: &str,
     target_id: Option<&str>,
     node_id: Option<&str>,
     instance_id: Option<&str>,
+    result: &str,
+    error_message: Option<&str>,
 ) {
+    let actor_type = if actor.id == "emergency" {
+        "system-emergency"
+    } else {
+        "user"
+    };
+    let detail_json = serde_json::json!({
+        "actor_username": actor.username,
+        "effective_role": actor.effective_role,
+    })
+    .to_string();
     let _ = repository::record_audit(
         pool,
         repository::AuditRecord {
@@ -890,11 +1546,12 @@ async fn audit_success(
             target_id,
             node_id,
             instance_id,
-            result: "success",
-            error_message: None,
-            detail_json: None,
-            actor_type: None,
-            source: None,
+            result,
+            error_message,
+            detail_json: Some(detail_json),
+            actor_type: Some(actor_type),
+            actor_id: Some(&actor.id),
+            source: Some("web"),
         },
     )
     .await;
@@ -903,6 +1560,7 @@ async fn audit_success(
 #[derive(Debug)]
 enum ApiError {
     Unauthorized,
+    Forbidden,
     BadRequest(String),
     NotFound(String),
     Conflict(String),
@@ -933,7 +1591,15 @@ impl IntoResponse for ApiError {
                 StatusCode::UNAUTHORIZED,
                 Json(ErrorResponse {
                     error: "unauthorized",
-                    message: None,
+                    message: Some("请先登录或检查账号密码".to_string()),
+                }),
+            )
+                .into_response(),
+            Self::Forbidden => (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "forbidden",
+                    message: Some("当前用户没有权限执行该操作".to_string()),
                 }),
             )
                 .into_response(),

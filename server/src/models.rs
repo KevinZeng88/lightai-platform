@@ -2,6 +2,114 @@ use serde::{Deserialize, Serialize};
 
 use crate::platform_log::LogPolicy;
 
+#[derive(Debug, Clone, Serialize)]
+pub struct AuthUser {
+    pub id: String,
+    pub username: String,
+    pub role: String,
+    pub effective_role: String,
+    pub enabled: bool,
+    pub must_change_password: bool,
+}
+
+impl AuthUser {
+    pub fn is_admin(&self) -> bool {
+        self.effective_role == "admin"
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LoginRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct SetupStatusResponse {
+    pub setup_required: bool,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetupAdminRequest {
+    pub username: String,
+    pub password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct AuthResponse {
+    pub user: AuthUser,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ChangePasswordRequest {
+    pub current_password: String,
+    pub new_password: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserListResponse {
+    pub users: Vec<AuthUser>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserCreateRequest {
+    pub username: String,
+    pub password: String,
+    #[serde(default = "default_user_role")]
+    pub role: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserUpdateRequest {
+    pub password: Option<String>,
+    pub role: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct UserGroupView {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+    pub enabled: bool,
+    pub member_count: i64,
+    pub members: Vec<AuthUser>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserGroupListResponse {
+    pub groups: Vec<UserGroupView>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct UserGroupResponse {
+    pub group: UserGroupView,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserGroupCreateRequest {
+    pub name: String,
+    #[serde(default = "default_user_role")]
+    pub role: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserGroupUpdateRequest {
+    pub name: Option<String>,
+    pub role: Option<String>,
+    pub enabled: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UserGroupMembersRequest {
+    #[serde(default)]
+    pub user_ids: Vec<String>,
+}
+
+fn default_user_role() -> String {
+    "viewer".to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct RegisterRequest {
     pub name: String,
@@ -60,10 +168,6 @@ pub struct AgentConfig {
     pub environment_check_timeout_secs: u64,
     #[serde(default)]
     pub allowed_model_dirs: Vec<String>,
-    #[serde(default = "default_nvidia_collector_enabled")]
-    pub nvidia_collector_enabled: bool,
-    #[serde(default)]
-    pub custom_collector_script: Option<String>,
     #[serde(default = "default_collector_timeout_secs")]
     pub collector_timeout_secs: u64,
     #[serde(default = "default_collector_max_output_bytes")]
@@ -84,18 +188,12 @@ impl Default for AgentConfig {
             command_timeout_secs: 5,
             environment_check_timeout_secs: 5,
             allowed_model_dirs: Vec::new(),
-            nvidia_collector_enabled: true,
-            custom_collector_script: None,
             collector_timeout_secs: default_collector_timeout_secs(),
             collector_max_output_bytes: default_collector_max_output_bytes(),
             log_policy: LogPolicy::default(),
             last_config_updated_at: None,
         }
     }
-}
-
-fn default_nvidia_collector_enabled() -> bool {
-    true
 }
 
 fn default_collector_timeout_secs() -> u64 {
@@ -113,8 +211,6 @@ pub struct AgentConfigPolicy {
     pub command_timeout_secs: Option<u64>,
     pub environment_check_timeout_secs: Option<u64>,
     pub allowed_model_dirs: Option<Vec<String>>,
-    pub nvidia_collector_enabled: Option<bool>,
-    pub custom_collector_script: Option<Option<String>>,
     pub collector_timeout_secs: Option<u64>,
     pub collector_max_output_bytes: Option<usize>,
     pub log_dir: Option<String>,

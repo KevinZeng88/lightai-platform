@@ -5,6 +5,9 @@ pub struct Config {
     pub listen_addr: String,
     pub database_url: String,
     pub metrics_retention_days: u32,
+    pub emergency_control_token: Option<String>,
+    pub password_policy: crate::repository::PasswordPolicy,
+    pub session_policy: crate::repository::SessionPolicy,
     pub log_policy: crate::platform_log::LogPolicy,
 }
 
@@ -14,6 +17,9 @@ impl Default for Config {
             listen_addr: "127.0.0.1:8080".to_string(),
             database_url: "sqlite://data/lightai.db".to_string(),
             metrics_retention_days: 7,
+            emergency_control_token: None,
+            password_policy: crate::repository::PasswordPolicy::default(),
+            session_policy: crate::repository::SessionPolicy::default(),
             log_policy: crate::platform_log::LogPolicy::default(),
         }
     }
@@ -49,6 +55,41 @@ impl Config {
                 config.metrics_retention_days = value;
             }
         }
+        if let Some(auth) = file_config.auth {
+            if let Some(value) = auth.emergency_control_token {
+                config.emergency_control_token = non_empty_token(value);
+            }
+            if let Some(password) = auth.password {
+                if let Some(value) = password.min_length {
+                    config.password_policy.min_length = value;
+                }
+                if let Some(value) = password.complexity_required {
+                    config.password_policy.complexity_required = value;
+                }
+                if let Some(value) = password.expires_days {
+                    config.password_policy.expires_days =
+                        if value == 0 { None } else { Some(value) };
+                }
+                if let Some(value) = password.force_change_after_reset {
+                    config.password_policy.force_change_after_reset = value;
+                }
+            }
+            if let Some(session) = auth.session {
+                if let Some(value) = session.ttl_secs {
+                    config.session_policy.ttl_secs = value;
+                }
+                if let Some(value) = session.idle_timeout_secs {
+                    config.session_policy.idle_timeout_secs =
+                        if value == 0 { None } else { Some(value) };
+                }
+                if let Some(value) = session.secure_cookie {
+                    config.session_policy.secure_cookie = value;
+                }
+            }
+        }
+        if let Ok(value) = std::env::var("LIGHTAI_EMERGENCY_CONTROL_TOKEN") {
+            config.emergency_control_token = non_empty_token(value);
+        }
         if let Some(logs) = file_config.logs {
             if let Some(value) = logs.dir {
                 config.log_policy.log_dir = value;
@@ -70,36 +111,91 @@ impl Config {
 
         Ok(config)
     }
+
+    pub fn validate_auth(&self) -> anyhow::Result<()> {
+        if let Some(token) = self.emergency_control_token.as_deref() {
+            if token.trim().len() < 16 {
+                anyhow::bail!("emergency control token must be at least 16 characters");
+            }
+        }
+        if self.password_policy.min_length < 8 {
+            anyhow::bail!("password min_length must be at least 8");
+        }
+        if self.session_policy.ttl_secs < 300 {
+            anyhow::bail!("session ttl_secs must be at least 300");
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct FileConfig {
     server: Option<ServerSection>,
     database: Option<DatabaseSection>,
     metrics: Option<MetricsSection>,
+    auth: Option<AuthSection>,
     logs: Option<LogsSection>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct ServerSection {
     listen_addr: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct DatabaseSection {
     url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct MetricsSection {
     retention_days: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AuthSection {
+    emergency_control_token: Option<String>,
+    password: Option<PasswordSection>,
+    session: Option<SessionSection>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PasswordSection {
+    min_length: Option<usize>,
+    complexity_required: Option<bool>,
+    expires_days: Option<i64>,
+    force_change_after_reset: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionSection {
+    ttl_secs: Option<i64>,
+    idle_timeout_secs: Option<i64>,
+    secure_cookie: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LogsSection {
     dir: Option<String>,
     level: Option<String>,
     max_file_bytes: Option<u64>,
     retention_files: Option<usize>,
     retention_days: Option<u64>,
+}
+
+fn non_empty_token(value: String) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_string())
+    }
 }

@@ -6,10 +6,12 @@ use uuid::Uuid;
 use crate::auth;
 use crate::models::{
     AgentConfig, AgentConfigPoliciesResponse, AgentConfigPolicy, AgentConfigPolicyView,
-    AuditEventView, AuditListResponse, AuditQuery, CollectorRegistryEntry, GpuMetricSample,
-    GpuMetricSamplesResponse, GpuMetrics, GpuView, HeartbeatRequest, NodeListResponse,
-    NodeMetricSample, NodeMetricSamplesResponse, NodeMetrics, NodeView, RegisterCollectorRequest,
-    RegisterRequest, RegisterResponse,
+    AuditEventView, AuditListResponse, AuditQuery, AuthUser, CollectorRegistryEntry,
+    GpuMetricSample, GpuMetricSamplesResponse, GpuMetrics, GpuView, HeartbeatRequest,
+    NodeListResponse, NodeMetricSample, NodeMetricSamplesResponse, NodeMetrics, NodeView,
+    RegisterCollectorRequest, RegisterRequest, RegisterResponse, UserCreateRequest,
+    UserGroupCreateRequest, UserGroupMembersRequest, UserGroupUpdateRequest, UserGroupView,
+    UserUpdateRequest,
 };
 use crate::platform_log;
 use crate::platform_log::LogPolicy;
@@ -17,6 +19,737 @@ use crate::platform_log::LogPolicy;
 const HEARTBEAT_INTERVAL_SECS: u64 = 15;
 pub const ONLINE_THRESHOLD_SECS: i64 = 60;
 const AGENT_CONFIG_VERSION: i64 = 1;
+const SESSION_TTL_SECS: i64 = 12 * 60 * 60;
+
+#[derive(Debug, Clone)]
+pub struct PasswordPolicy {
+    pub min_length: usize,
+    pub complexity_required: bool,
+    pub expires_days: Option<i64>,
+    pub force_change_after_reset: bool,
+}
+
+impl Default for PasswordPolicy {
+    fn default() -> Self {
+        Self {
+            min_length: 12,
+            complexity_required: false,
+            expires_days: None,
+            force_change_after_reset: true,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionPolicy {
+    pub ttl_secs: i64,
+    pub idle_timeout_secs: Option<i64>,
+    pub secure_cookie: bool,
+}
+
+impl Default for SessionPolicy {
+    fn default() -> Self {
+        Self {
+            ttl_secs: SESSION_TTL_SECS,
+            idle_timeout_secs: Some(2 * 60 * 60),
+            secure_cookie: false,
+        }
+    }
+}
+
+pub async fn user_count(pool: &SqlitePool) -> anyhow::Result<i64> {
+    Ok(sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(pool)
+        .await?)
+}
+
+pub async fn ensure_initial_admin(
+    pool: &SqlitePool,
+    username: &str,
+    password: &str,
+) -> anyhow::Result<Option<AuthUser>> {
+    if user_count(pool).await? > 0 {
+        return Ok(None);
+    }
+    create_user(
+        pool,
+        UserCreateRequest {
+            username: username.to_string(),
+            password: password.to_string(),
+            role: "admin".to_string(),
+        },
+    )
+    .await
+    .map(Some)
+}
+
+pub async fn setup_initial_admin(
+    pool: &SqlitePool,
+    username: &str,
+    password: &str,
+    policy: &PasswordPolicy,
+) -> anyhow::Result<AuthUser> {
+    validate_username(username)?;
+    validate_password(password, policy)?;
+    let mut tx = pool.begin().await?;
+    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
+        .fetch_one(&mut *tx)
+        .await?;
+    if count > 0 {
+        anyhow::bail!("setup already completed");
+    }
+    let now = now_unix_secs();
+    let id = Uuid::new_v4().to_string();
+    let password_hash = auth::hash_password(password)?;
+    sqlx::query(
+        r#"
+        INSERT INTO users (
+            id, username, password_hash, role, enabled, password_changed_at,
+            must_change_password, created_at, updated_at
+        )
+        VALUES (?, ?, ?, 'admin', 1, ?, 0, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(username.trim())
+    .bind(password_hash)
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .execute(&mut *tx)
+    .await?;
+    tx.commit().await?;
+    user_by_id(pool, &id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("created admin not found"))
+}
+
+pub async fn create_user(
+    pool: &SqlitePool,
+    request: UserCreateRequest,
+) -> anyhow::Result<AuthUser> {
+    create_user_with_policy(pool, request, &PasswordPolicy::default()).await
+}
+
+pub async fn create_user_with_policy(
+    pool: &SqlitePool,
+    request: UserCreateRequest,
+    policy: &PasswordPolicy,
+) -> anyhow::Result<AuthUser> {
+    validate_username(&request.username)?;
+    validate_password(&request.password, policy)?;
+    validate_role(&request.role)?;
+    let now = now_unix_secs();
+    let id = Uuid::new_v4().to_string();
+    let password_hash = auth::hash_password(&request.password)?;
+    sqlx::query(
+        r#"
+        INSERT INTO users (
+            id, username, password_hash, role, enabled, password_changed_at,
+            must_change_password, created_at, updated_at
+        )
+        VALUES (?, ?, ?, ?, 1, ?, 0, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(request.username.trim())
+    .bind(password_hash)
+    .bind(request.role.as_str())
+    .bind(now)
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    user_by_id(pool, &id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("created user not found"))
+}
+
+pub async fn list_users(pool: &SqlitePool) -> anyhow::Result<Vec<AuthUser>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, username, role, enabled, must_change_password
+        FROM users
+        ORDER BY username ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut users = Vec::with_capacity(rows.len());
+    for row in rows {
+        users.push(enrich_effective_role(pool, user_from_row(row)).await?);
+    }
+    Ok(users)
+}
+
+pub async fn update_user(
+    pool: &SqlitePool,
+    id: &str,
+    request: UserUpdateRequest,
+) -> anyhow::Result<AuthUser> {
+    update_user_with_policy(pool, id, request, &PasswordPolicy::default()).await
+}
+
+pub async fn update_user_with_policy(
+    pool: &SqlitePool,
+    id: &str,
+    request: UserUpdateRequest,
+    policy: &PasswordPolicy,
+) -> anyhow::Result<AuthUser> {
+    if let Some(role) = request.role.as_deref() {
+        validate_role(role)?;
+    }
+    if let Some(password) = request.password.as_deref() {
+        validate_password(password, policy)?;
+    }
+    let Some(existing) = user_by_id(pool, id).await? else {
+        anyhow::bail!("user not found");
+    };
+    let role = request.role.as_deref().unwrap_or(&existing.role);
+    let enabled = request.enabled.unwrap_or(existing.enabled);
+    if existing.role == "admin" && (!enabled || role != "admin") {
+        let other_admins: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM users WHERE id != ? AND role = 'admin' AND enabled = 1",
+        )
+        .bind(id)
+        .fetch_one(pool)
+        .await?;
+        if other_admins == 0 {
+            anyhow::bail!("cannot disable or demote the last enabled admin");
+        }
+    }
+    let now = now_unix_secs();
+    if let Some(password) = request.password.as_deref() {
+        let password_hash = auth::hash_password(password)?;
+        sqlx::query(
+            r#"
+            UPDATE users
+            SET password_hash = ?, role = ?, enabled = ?, password_changed_at = ?, must_change_password = 1, updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(password_hash)
+        .bind(role)
+        .bind(enabled)
+        .bind(now)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE users
+            SET role = ?, enabled = ?, updated_at = ?
+            WHERE id = ?
+            "#,
+        )
+        .bind(role)
+        .bind(enabled)
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    }
+    if !enabled {
+        sqlx::query(
+            "UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now)
+        .bind(id)
+        .execute(pool)
+        .await?;
+    }
+    user_by_id(pool, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("updated user not found"))
+}
+
+pub async fn login_user(
+    pool: &SqlitePool,
+    username: &str,
+    password: &str,
+    session_policy: &SessionPolicy,
+    password_policy: &PasswordPolicy,
+) -> anyhow::Result<Option<(AuthUser, String)>> {
+    let Some(row) = sqlx::query(
+        r#"
+        SELECT id, username, password_hash, role, enabled, password_changed_at, must_change_password
+        FROM users
+        WHERE username = ?
+        "#,
+    )
+    .bind(username.trim())
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    let password_hash: String = row.get("password_hash");
+    let enabled = row.get::<i64, _>("enabled") != 0;
+    if !enabled || !auth::verify_password(password, &password_hash) {
+        return Ok(None);
+    }
+    if let Some(days) = password_policy.expires_days {
+        let changed_at: i64 = row.get("password_changed_at");
+        if changed_at > 0 && now_unix_secs() - changed_at > days * 86_400 {
+            return Ok(None);
+        }
+    }
+
+    let user = enrich_effective_role(
+        pool,
+        AuthUser {
+            id: row.get("id"),
+            username: row.get("username"),
+            role: row.get("role"),
+            effective_role: "viewer".to_string(),
+            enabled,
+            must_change_password: row.get::<i64, _>("must_change_password") != 0,
+        },
+    )
+    .await?;
+    let session_token = auth::generate_agent_token();
+    let session_hash = auth::hash_token(&session_token);
+    let now = now_unix_secs();
+    sqlx::query(
+        r#"
+        INSERT INTO user_sessions (id, user_id, token_hash, created_at, last_seen_at, expires_at, revoked_at)
+        VALUES (?, ?, ?, ?, ?, ?, NULL)
+        "#,
+    )
+    .bind(Uuid::new_v4().to_string())
+    .bind(&user.id)
+    .bind(session_hash)
+    .bind(now)
+    .bind(now)
+    .bind(now + session_policy.ttl_secs)
+    .execute(pool)
+    .await?;
+    Ok(Some((user, session_token)))
+}
+
+pub async fn authenticate_session(
+    pool: &SqlitePool,
+    session_token: &str,
+    session_policy: &SessionPolicy,
+) -> anyhow::Result<Option<AuthUser>> {
+    let session_hash = auth::hash_token(session_token);
+    let now = now_unix_secs();
+    let row = sqlx::query(
+        r#"
+        SELECT users.id, users.username, users.role, users.enabled, users.password_changed_at, users.must_change_password,
+               user_sessions.last_seen_at
+        FROM user_sessions
+        JOIN users ON users.id = user_sessions.user_id
+        WHERE user_sessions.token_hash = ?
+          AND user_sessions.revoked_at IS NULL
+          AND user_sessions.expires_at > ?
+          AND users.enabled = 1
+        "#,
+    )
+    .bind(&session_hash)
+    .bind(now)
+    .fetch_optional(pool)
+    .await?;
+    if let Some(row) = &row {
+        if let Some(idle) = session_policy.idle_timeout_secs {
+            let last_seen_at: i64 = row.get("last_seen_at");
+            if now - last_seen_at > idle {
+                sqlx::query("UPDATE user_sessions SET revoked_at = ? WHERE token_hash = ?")
+                    .bind(now)
+                    .bind(&session_hash)
+                    .execute(pool)
+                    .await?;
+                return Ok(None);
+            }
+        }
+        sqlx::query("UPDATE user_sessions SET last_seen_at = ? WHERE token_hash = ?")
+            .bind(now)
+            .bind(session_hash)
+            .execute(pool)
+            .await?;
+    }
+    match row {
+        Some(row) => Ok(Some(enrich_effective_role(pool, user_from_row(row)).await?)),
+        None => Ok(None),
+    }
+}
+
+pub async fn reset_user_password(
+    pool: &SqlitePool,
+    username: &str,
+    password: &str,
+    policy: PasswordPolicy,
+) -> anyhow::Result<AuthUser> {
+    validate_password(password, &policy)?;
+    let Some(user) = sqlx::query("SELECT id FROM users WHERE username = ?")
+        .bind(username.trim())
+        .fetch_optional(pool)
+        .await?
+    else {
+        anyhow::bail!("user not found");
+    };
+    let user_id: String = user.get("id");
+    let now = now_unix_secs();
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET password_hash = ?, password_changed_at = ?, must_change_password = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(auth::hash_password(password)?)
+    .bind(now)
+    .bind(policy.force_change_after_reset)
+    .bind(now)
+    .bind(&user_id)
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+        .bind(now)
+        .bind(&user_id)
+        .execute(pool)
+        .await?;
+    user_by_id(pool, &user_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("updated user not found"))
+}
+
+pub async fn change_user_password(
+    pool: &SqlitePool,
+    user_id: &str,
+    current_password: &str,
+    new_password: &str,
+    policy: &PasswordPolicy,
+) -> anyhow::Result<()> {
+    validate_password(new_password, policy)?;
+    let Some(row) = sqlx::query("SELECT password_hash FROM users WHERE id = ? AND enabled = 1")
+        .bind(user_id)
+        .fetch_optional(pool)
+        .await?
+    else {
+        anyhow::bail!("user not found");
+    };
+    let password_hash: String = row.get("password_hash");
+    if !auth::verify_password(current_password, &password_hash) {
+        anyhow::bail!("current password is incorrect");
+    }
+    let now = now_unix_secs();
+    sqlx::query(
+        r#"
+        UPDATE users
+        SET password_hash = ?, password_changed_at = ?, must_change_password = 0, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(auth::hash_password(new_password)?)
+    .bind(now)
+    .bind(now)
+    .bind(user_id)
+    .execute(pool)
+    .await?;
+    sqlx::query("UPDATE user_sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+        .bind(now)
+        .bind(user_id)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn revoke_session(pool: &SqlitePool, session_token: &str) -> anyhow::Result<()> {
+    sqlx::query("UPDATE user_sessions SET revoked_at = ? WHERE token_hash = ?")
+        .bind(now_unix_secs())
+        .bind(auth::hash_token(session_token))
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn list_user_groups(pool: &SqlitePool) -> anyhow::Result<Vec<UserGroupView>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT id, name, role, enabled
+        FROM user_groups
+        ORDER BY name ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await?;
+    let mut groups = Vec::with_capacity(rows.len());
+    for row in rows {
+        groups.push(group_view_from_row(pool, row).await?);
+    }
+    Ok(groups)
+}
+
+pub async fn create_user_group(
+    pool: &SqlitePool,
+    request: UserGroupCreateRequest,
+) -> anyhow::Result<UserGroupView> {
+    validate_group_name(&request.name)?;
+    validate_role(&request.role)?;
+    let now = now_unix_secs();
+    let id = Uuid::new_v4().to_string();
+    sqlx::query(
+        r#"
+        INSERT INTO user_groups (id, name, role, enabled, created_at, updated_at)
+        VALUES (?, ?, ?, 1, ?, ?)
+        "#,
+    )
+    .bind(&id)
+    .bind(request.name.trim())
+    .bind(request.role.as_str())
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    user_group_by_id(pool, &id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("created group not found"))
+}
+
+pub async fn update_user_group(
+    pool: &SqlitePool,
+    id: &str,
+    request: UserGroupUpdateRequest,
+) -> anyhow::Result<UserGroupView> {
+    let Some(existing) = user_group_by_id(pool, id).await? else {
+        anyhow::bail!("group not found");
+    };
+    let name = request.name.as_deref().unwrap_or(&existing.name);
+    validate_group_name(name)?;
+    let role = request.role.as_deref().unwrap_or(&existing.role);
+    validate_role(role)?;
+    let enabled = request.enabled.unwrap_or(existing.enabled);
+    sqlx::query(
+        r#"
+        UPDATE user_groups
+        SET name = ?, role = ?, enabled = ?, updated_at = ?
+        WHERE id = ?
+        "#,
+    )
+    .bind(name.trim())
+    .bind(role)
+    .bind(enabled)
+    .bind(now_unix_secs())
+    .bind(id)
+    .execute(pool)
+    .await?;
+    user_group_by_id(pool, id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("updated group not found"))
+}
+
+pub async fn replace_user_group_members(
+    pool: &SqlitePool,
+    group_id: &str,
+    request: UserGroupMembersRequest,
+) -> anyhow::Result<UserGroupView> {
+    if user_group_by_id(pool, group_id).await?.is_none() {
+        anyhow::bail!("group not found");
+    }
+    let mut seen = HashSet::new();
+    for user_id in &request.user_ids {
+        if !seen.insert(user_id.clone()) {
+            continue;
+        }
+        if user_by_id(pool, user_id).await?.is_none() {
+            anyhow::bail!("user not found");
+        }
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("DELETE FROM user_group_members WHERE group_id = ?")
+        .bind(group_id)
+        .execute(&mut *tx)
+        .await?;
+    let now = now_unix_secs();
+    for user_id in seen {
+        sqlx::query(
+            "INSERT INTO user_group_members (group_id, user_id, created_at) VALUES (?, ?, ?)",
+        )
+        .bind(group_id)
+        .bind(user_id)
+        .bind(now)
+        .execute(&mut *tx)
+        .await?;
+    }
+    tx.commit().await?;
+    user_group_by_id(pool, group_id)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("updated group not found"))
+}
+
+pub async fn delete_user_group(pool: &SqlitePool, group_id: &str) -> anyhow::Result<()> {
+    let member_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM user_group_members WHERE group_id = ?")
+            .bind(group_id)
+            .fetch_one(pool)
+            .await?;
+    if member_count > 0 {
+        anyhow::bail!("group has members; remove members before deleting");
+    }
+    let result = sqlx::query("DELETE FROM user_groups WHERE id = ?")
+        .bind(group_id)
+        .execute(pool)
+        .await?;
+    if result.rows_affected() == 0 {
+        anyhow::bail!("group not found");
+    }
+    Ok(())
+}
+
+async fn user_group_by_id(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<UserGroupView>> {
+    let Some(row) = sqlx::query("SELECT id, name, role, enabled FROM user_groups WHERE id = ?")
+        .bind(id)
+        .fetch_optional(pool)
+        .await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(group_view_from_row(pool, row).await?))
+}
+
+async fn group_view_from_row(
+    pool: &SqlitePool,
+    row: sqlx::sqlite::SqliteRow,
+) -> anyhow::Result<UserGroupView> {
+    let id: String = row.get("id");
+    let members = group_members(pool, &id).await?;
+    Ok(UserGroupView {
+        id,
+        name: row.get("name"),
+        role: row.get("role"),
+        enabled: row.get::<i64, _>("enabled") != 0,
+        member_count: members.len() as i64,
+        members,
+    })
+}
+
+async fn group_members(pool: &SqlitePool, group_id: &str) -> anyhow::Result<Vec<AuthUser>> {
+    let rows = sqlx::query(
+        r#"
+        SELECT users.id, users.username, users.role, users.enabled, users.must_change_password
+        FROM user_group_members
+        JOIN users ON users.id = user_group_members.user_id
+        WHERE user_group_members.group_id = ?
+        ORDER BY users.username ASC
+        "#,
+    )
+    .bind(group_id)
+    .fetch_all(pool)
+    .await?;
+    let mut users = Vec::with_capacity(rows.len());
+    for row in rows {
+        users.push(enrich_effective_role(pool, user_from_row(row)).await?);
+    }
+    Ok(users)
+}
+
+async fn user_by_id(pool: &SqlitePool, id: &str) -> anyhow::Result<Option<AuthUser>> {
+    let Some(row) = sqlx::query(
+        "SELECT id, username, role, enabled, must_change_password FROM users WHERE id = ?",
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await?
+    else {
+        return Ok(None);
+    };
+    Ok(Some(enrich_effective_role(pool, user_from_row(row)).await?))
+}
+
+fn user_from_row(row: sqlx::sqlite::SqliteRow) -> AuthUser {
+    let role: String = row.get("role");
+    AuthUser {
+        id: row.get("id"),
+        username: row.get("username"),
+        effective_role: role.clone(),
+        role,
+        enabled: row.get::<i64, _>("enabled") != 0,
+        must_change_password: row.get::<i64, _>("must_change_password") != 0,
+    }
+}
+
+async fn enrich_effective_role(pool: &SqlitePool, mut user: AuthUser) -> anyhow::Result<AuthUser> {
+    let group_roles: Vec<String> = sqlx::query_scalar(
+        r#"
+        SELECT user_groups.role
+        FROM user_group_members
+        JOIN user_groups ON user_groups.id = user_group_members.group_id
+        WHERE user_group_members.user_id = ?
+          AND user_groups.enabled = 1
+        "#,
+    )
+    .bind(&user.id)
+    .fetch_all(pool)
+    .await?;
+    let mut effective = user.role.as_str();
+    for role in &group_roles {
+        if role_rank(role) > role_rank(effective) {
+            effective = role;
+        }
+    }
+    user.effective_role = effective.to_string();
+    Ok(user)
+}
+
+pub fn role_rank(role: &str) -> i32 {
+    match role {
+        "admin" => 3,
+        "operator" => 2,
+        "viewer" => 1,
+        _ => 0,
+    }
+}
+
+fn validate_username(username: &str) -> anyhow::Result<()> {
+    let username = username.trim();
+    if username.len() < 3 || username.len() > 64 {
+        anyhow::bail!("username must be 3-64 characters");
+    }
+    if !username
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.'))
+    {
+        anyhow::bail!("username may only contain letters, numbers, '.', '-' and '_'");
+    }
+    Ok(())
+}
+
+fn validate_group_name(name: &str) -> anyhow::Result<()> {
+    let name = name.trim();
+    if name.len() < 2 || name.len() > 80 {
+        anyhow::bail!("group name must be 2-80 characters");
+    }
+    if name.chars().any(char::is_control) {
+        anyhow::bail!("group name must not contain control characters");
+    }
+    Ok(())
+}
+
+fn validate_password(password: &str, policy: &PasswordPolicy) -> anyhow::Result<()> {
+    if password.len() < policy.min_length {
+        anyhow::bail!("password does not meet the configured password policy");
+    }
+    if policy.complexity_required {
+        let has_lower = password.chars().any(|ch| ch.is_ascii_lowercase());
+        let has_upper = password.chars().any(|ch| ch.is_ascii_uppercase());
+        let has_digit = password.chars().any(|ch| ch.is_ascii_digit());
+        if !(has_lower && has_upper && has_digit) {
+            anyhow::bail!("password does not meet the configured password policy");
+        }
+    }
+    Ok(())
+}
+
+fn validate_role(role: &str) -> anyhow::Result<()> {
+    if !matches!(role, "admin" | "operator" | "viewer") {
+        anyhow::bail!("role must be admin, operator or viewer");
+    }
+    Ok(())
+}
 
 pub struct AuditRecord<'a> {
     pub operation_type: &'a str,
@@ -28,6 +761,7 @@ pub struct AuditRecord<'a> {
     pub error_message: Option<&'a str>,
     pub detail_json: Option<String>,
     pub actor_type: Option<&'a str>,
+    pub actor_id: Option<&'a str>,
     pub source: Option<&'a str>,
 }
 
@@ -41,12 +775,13 @@ pub async fn record_audit(pool: &SqlitePool, record: AuditRecord<'_>) -> anyhow:
             id, occurred_at, actor_type, actor_id, actor_group_id, operation_type,
             target_type, target_id, node_id, instance_id, result, error_message, source, detail_json
         )
-        VALUES (?, ?, ?, 'local', NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
     )
     .bind(Uuid::new_v4().to_string())
     .bind(now)
     .bind(actor_type)
+    .bind(record.actor_id.unwrap_or("local"))
     .bind(record.operation_type)
     .bind(record.target_type)
     .bind(record.target_id)
@@ -71,12 +806,14 @@ pub async fn record_frontend_error(
     stack: Option<&str>,
     url: Option<&str>,
     occurred_at: i64,
+    user: Option<&AuthUser>,
 ) -> anyhow::Result<()> {
     let detail = serde_json::json!({
         "message": crate::platform_log::sanitize(message),
         "stack": stack.map(|s| s.chars().take(1024).collect::<String>()),
         "url": url.map(|u| u.chars().take(512).collect::<String>()),
         "client_ts": occurred_at,
+        "user": user.map(|u| u.username.clone()),
     });
     record_audit(
         pool,
@@ -89,7 +826,8 @@ pub async fn record_frontend_error(
             result: "failed",
             error_message: Some(message),
             detail_json: Some(detail.to_string()),
-            actor_type: Some("frontend"),
+            actor_type: Some(user.map(|_| "user").unwrap_or("frontend")),
+            actor_id: user.map(|user| user.id.as_str()),
             source: Some("frontend"),
         },
     )
@@ -366,11 +1104,10 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
             disk_total_bytes, disk_used_bytes, collector_errors_json, updated_at,
             agent_config_version, heartbeat_interval_secs, metrics_sample_interval_secs,
             task_poll_interval_secs, config_refresh_interval_secs, command_timeout_secs,
-            environment_check_timeout_secs, allowed_model_dirs_json, nvidia_collector_enabled,
-            custom_collector_script, collector_timeout_secs, collector_max_output_bytes,
-            last_config_updated_at
+            environment_check_timeout_secs, allowed_model_dirs_json, collector_timeout_secs,
+            collector_max_output_bytes, last_config_updated_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(node_id) DO UPDATE SET
             cpu_usage_percent = excluded.cpu_usage_percent,
             memory_total_bytes = excluded.memory_total_bytes,
@@ -387,8 +1124,6 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
             command_timeout_secs = excluded.command_timeout_secs,
             environment_check_timeout_secs = excluded.environment_check_timeout_secs,
             allowed_model_dirs_json = excluded.allowed_model_dirs_json,
-            nvidia_collector_enabled = excluded.nvidia_collector_enabled,
-            custom_collector_script = excluded.custom_collector_script,
             collector_timeout_secs = excluded.collector_timeout_secs,
             collector_max_output_bytes = excluded.collector_max_output_bytes,
             last_config_updated_at = excluded.last_config_updated_at
@@ -438,16 +1173,6 @@ pub async fn record_heartbeat(pool: &SqlitePool, request: HeartbeatRequest) -> a
             .as_ref()
             .map(|config| serde_json::to_string(&config.allowed_model_dirs))
             .transpose()?,
-    )
-    .bind(
-        agent_config
-            .as_ref()
-            .map(|config| config.nvidia_collector_enabled as i64),
-    )
-    .bind(
-        agent_config
-            .as_ref()
-            .and_then(|config| config.custom_collector_script.clone()),
     )
     .bind(
         agent_config
@@ -733,7 +1458,6 @@ pub async fn list_nodes(pool: &SqlitePool) -> anyhow::Result<NodeListResponse> {
                s.metrics_sample_interval_secs, s.task_poll_interval_secs,
                s.config_refresh_interval_secs, s.command_timeout_secs,
                s.environment_check_timeout_secs, s.allowed_model_dirs_json,
-               s.nvidia_collector_enabled, s.custom_collector_script,
                s.collector_timeout_secs, s.collector_max_output_bytes,
                s.last_config_updated_at
         FROM nodes n
@@ -792,11 +1516,6 @@ pub async fn list_nodes(pool: &SqlitePool) -> anyhow::Result<NodeListResponse> {
                     .get::<Option<String>, _>("allowed_model_dirs_json")
                     .and_then(|value| serde_json::from_str(&value).ok())
                     .unwrap_or_default(),
-                nvidia_collector_enabled: row
-                    .get::<Option<i64>, _>("nvidia_collector_enabled")
-                    .map(|value| value != 0)
-                    .unwrap_or(true),
-                custom_collector_script: row.get("custom_collector_script"),
                 collector_timeout_secs: row
                     .get::<Option<i64>, _>("collector_timeout_secs")
                     .unwrap_or(5) as u64,
@@ -1133,8 +1852,6 @@ async fn agent_config_policy_view(
             "command_timeout_secs",
             "environment_check_timeout_secs",
             "allowed_model_dirs",
-            "nvidia_collector_enabled",
-            "custom_collector_script",
             "collector_timeout_secs",
             "collector_max_output_bytes",
             "log_dir",
@@ -1227,12 +1944,6 @@ fn apply_policy_layer(config: &mut AgentConfig, policy: AgentConfigPolicy) {
     }
     if let Some(value) = policy.allowed_model_dirs {
         config.allowed_model_dirs = value;
-    }
-    if let Some(value) = policy.nvidia_collector_enabled {
-        config.nvidia_collector_enabled = value;
-    }
-    if let Some(value) = policy.custom_collector_script {
-        config.custom_collector_script = value.filter(|item| !item.trim().is_empty());
     }
     if let Some(value) = policy.collector_timeout_secs {
         config.collector_timeout_secs = value;

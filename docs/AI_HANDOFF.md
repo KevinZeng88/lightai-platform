@@ -3,9 +3,11 @@
 ## 当前真实状态
 
 - 仓库是 Rust workspace + Vue/Vite Web monorepo，主要目录为 `server/`、`agent/`、`web/`、`migrations/`、`deploy/`、`docs/`。
-- Server 使用 Axum + SQLite，提供 Agent 注册/心跳、节点与 GPU 指标、配置策略、Runtime、Model、Model File、Instance、Trash、日志、前端错误和审计 API。
+- 产品最终目标是企业级模型服务与 GPU 资源调度平台，不是单纯 GPU 服务器管理工具。当前代码处于第一阶段：GPU 服务器统一纳管、Agent 心跳/GPU 状态上报、基础模型/Runtime/实例管理、Web 控制台、本地用户、用户组和基础权限。
+- Server 使用 Axum + SQLite，提供本地用户/用户组登录与权限基础、Agent 注册/心跳、节点与 GPU 指标、配置策略、Runtime、Model、Model File、Instance、Trash、日志、前端错误和审计 API。
+- 控制面 API 使用本地用户会话保护；除 `/health`、`/api/setup/*`、`/api/auth/login` 与 `/api/agent/*` 外，所有 `/api/*` 请求都需要登录 cookie。空库首次访问 Web 进入 setup 页面，生产配置不支持 `initial_admin_password` 或 `LIGHTAI_ADMIN_PASSWORD`。可选 emergency control token 默认关闭，只用于测试、自动化或本机应急，审计 actor 标记为 `system-emergency`。
 - Agent 运行在 GPU 节点，主动注册 Server，按心跳上报 CPU/内存/磁盘/GPU 指标和受管实例状态，并通过任务轮询执行受控动作。
-- Web 是 Vue 3 + Vite + Element Plus 控制台，包含节点监控、Agent 配置、运行环境、模型、实例、垃圾箱、日志审计页面。
+- Web 是 Vue 3 + Vite + Element Plus 控制台，包含节点监控、Agent 配置、运行环境、模型、实例、垃圾箱、日志审计、用户与组页面。
 - Instance 顶层类型是 `external` 或 `local`；`local` 实例的启动方式来自 Runtime 的 `deploy_type`：`binary`、`script` 或 `docker`。
 - Docker 代码路径已实现，包括三层参数合并、`docker run --detach`、`docker stop`、`docker inspect`、`docker logs` 和 managed store 恢复；仍需真实 GPU 环境端到端验证。
 - 平台日志已实现脱敏、级别过滤、轮转和保留策略；Server 日志策略可在 Web 更新，Agent 日志策略通过 Agent 配置下发。
@@ -18,6 +20,9 @@
 4. Agent 离线不能把 running 实例误标为 failed；只展示“运行状态无法确认”。
 5. running / starting / stopping 的 Instance 及其引用的 Runtime、Model 不能修改。
 6. 文档和代码都应保持小改动、低抽象、无不必要依赖。
+7. 当前不要实现 API Gateway、API Key、配额、计量、调度优先级或计费；这些是后续阶段目标，不应在文档中写成永久范围外。
+8. 用户组只做成员关系和组角色继承，作为后续部门、项目、业务系统和 API Key 归属基础；不要扩展成复杂 IAM。
+9. 当前角色只有 `admin`、`operator`、`viewer`；后端统一计算 `effective_role`。`admin` 管理用户/组、配置和 Trash 清理，`operator` 管理 Runtime/模型/实例，`viewer` 只读。忘记密码通过服务器本机 `lightai-server --reset-password <USERNAME> <PASSWORD>` 恢复，重置后用户必须修改密码。
 
 ## 代码地图
 
@@ -25,7 +30,7 @@
 server/src/
   routes.rs              # Axum 路由和 HTTP handler
   models.rs              # API 请求/响应类型
-  repository.rs          # 节点注册、心跳、指标、配置、审计、reconcile
+  repository.rs          # 用户、用户组、会话、节点注册、心跳、指标、配置、审计、reconcile
   agent_tasks.rs         # Agent task poll/result/timeout/notify
   db.rs                  # SQLite 连接、SQL 迁移、幂等 schema 修正
   domain/
@@ -40,7 +45,7 @@ agent/src/
   main.rs                # Agent HTTP health、heartbeat loop、task loop 并行启动
   heartbeat.rs           # 注册、心跳、指标/GPU/managed report 上报、配置应用
   managed_process.rs     # 受管进程/容器记录持久化和恢复检查
-  gpu/                   # NVIDIA nvidia-smi 和 custom collector
+  gpu/                   # 脚本化 GPU collector 调度与 registry/hash 校验
   metrics.rs             # CPU/内存/磁盘采集
   tasks/
     mod.rs               # 任务分发
@@ -66,27 +71,34 @@ web/src/
 - `0002_stage2_nodes.sql` 创建节点、当前指标和历史指标表。
 - `0003_stage3a_models.sql` 创建 Runtime、Model、Model Instance、Model File、Agent Task、Trash 基础表。
 - `0004_stage3a_corrections.sql` 是历史修正参考，不由 `db.rs` 自动执行。
-- `server/src/db.rs` 启动时执行 0001-0003，并用代码内幂等逻辑补齐后续表/列、唯一索引、审计表、配置策略表和平台设置表。
+- `server/src/db.rs` 启动时执行 0001-0003，开启 foreign key 约束，并用代码内幂等逻辑补齐后续表/列、唯一索引、审计表、用户/用户组/会话表、配置策略表和平台设置表。
 - 当前没有正式 migration ledger，新增 schema 变更需要谨慎设计幂等升级路径。
 
 ## 已知限制和风险
 
 - Docker/vLLM 未在真实 GPU 环境完成完整验收。
 - 模型文件验证只证明路径存在并可读基础信息，不证明模型格式正确或推理服务可用。
-- Runtime 列表只把 `check_status === "available"` 作为本地实例可选项，Server 也接受 `version_unavailable`；这里存在前端选择范围偏窄。
 - 手工 kill local 受管进程后，状态同步到 Web 最坏约 33 秒（Agent monitor 3s + heartbeat 15s + Web refresh 15s）。
 - 模型垃圾箱不支持批量清理、定时清理或目录递归删除。
 - 前端错误上报是 fire-and-forget，网络失败时静默丢失。
 - 审计页面是基础列表和筛选，没有分页、详情展开或导出。
 - 历史指标没有自动清理、聚合或降采样。
+- 统一模型调用 API、API Key、额度、计量、调用延迟/错误率/吞吐统计、GPU 调度优先级、自动扩缩容、降级和费用归集仍未实现。
+
+## 后续阶段方向
+
+1. 第二阶段：模型服务管理与统一调用入口，包括 OpenAI-compatible Gateway、模型路由和调用认证。
+2. 第三阶段：API Key、部门/项目/业务系统归属、额度、限流、调用统计和基础计量。
+3. 第四阶段：GPU 资源调度、关键模型优先级、扩缩容和降级策略。
+4. 第五阶段：费用归集、SLA、审计分析、运营报表和企业级治理能力。
 
 ## 后续建议优先级
 
-1. 在真实 NVIDIA GPU 环境验证 Docker vLLM 端到端：创建 Runtime、模型目录、实例启动、健康检查、日志、停止、Agent 重启恢复、异常退出诊断。
+1. 在真实 NVIDIA GPU 环境验证脚本 collector + Docker vLLM 端到端：登记 collector、创建 Runtime、模型目录、实例启动、健康检查、日志、停止、Agent 重启恢复、异常退出诊断。
 2. 引入正式 migration ledger 或明确 schema 版本策略，减少 `db.rs` 中不断追加的修正逻辑。
 3. 缩短受管进程异常退出到 Server/Web 的同步延迟，例如心跳携带更明确的退出事件或任务结果。
 4. 增加历史指标清理和基础聚合，避免 SQLite 长期膨胀。
-5. 在本地运行层稳定后，再推进 OpenAI-compatible Gateway、API Key 和用量统计。
+5. 在本地运行层稳定后，再推进统一模型调用入口、API Key 和用量统计。
 
 ## 常用验证
 

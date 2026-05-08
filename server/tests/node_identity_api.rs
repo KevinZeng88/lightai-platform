@@ -182,7 +182,7 @@ async fn disk_sqlite_persistence_survives_restart_and_reconciles() {
             .await
             .unwrap();
         db::migrate(&pool).await.unwrap();
-        let app = routes::app(pool.clone());
+        let app = routes::app_with_emergency_token(pool.clone(), TEST_EMERGENCY_TOKEN.to_string());
         let registered = register_node_json(app.clone()).await;
         let nid = registered["node_id"].as_str().unwrap().to_string();
         let tok = registered["agent_token"].as_str().unwrap().to_string();
@@ -236,7 +236,7 @@ async fn disk_sqlite_persistence_survives_restart_and_reconciles() {
             .unwrap()
     };
     db::migrate(&pool).await.unwrap();
-    let app = routes::app(pool.clone());
+    let app = routes::app_with_emergency_token(pool.clone(), TEST_EMERGENCY_TOKEN.to_string());
 
     // 确认 node 和 instance 仍存在
     let (status, fetched) = request(

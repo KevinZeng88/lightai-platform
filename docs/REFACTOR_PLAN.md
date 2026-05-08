@@ -1,6 +1,6 @@
 # Refactor Plan
 
-本文件供 Codex / Claude Code 读取，用于指导后续代码结构整理。
+本文件是历史执行记录，用于了解已完成的结构整理。不要把其中的旧阶段约束当作当前必须遵守的开发计划；当前任务以 README、ARCHITECTURE、IMPLEMENTATION_NOTES 和用户请求为准。
 
 ## 已完成
 

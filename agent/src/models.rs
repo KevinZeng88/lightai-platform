@@ -39,10 +39,6 @@ pub struct AgentConfig {
     pub environment_check_timeout_secs: u64,
     #[serde(default)]
     pub allowed_model_dirs: Vec<String>,
-    #[serde(default = "default_nvidia_collector_enabled")]
-    pub nvidia_collector_enabled: bool,
-    #[serde(default)]
-    pub custom_collector_script: Option<String>,
     #[serde(default = "default_collector_timeout_secs")]
     pub collector_timeout_secs: u64,
     #[serde(default = "default_collector_max_output_bytes")]
@@ -63,18 +59,12 @@ impl Default for AgentConfig {
             command_timeout_secs: 5,
             environment_check_timeout_secs: 5,
             allowed_model_dirs: Vec::new(),
-            nvidia_collector_enabled: true,
-            custom_collector_script: None,
             collector_timeout_secs: default_collector_timeout_secs(),
             collector_max_output_bytes: default_collector_max_output_bytes(),
             log_policy: LogPolicy::default(),
             last_config_updated_at: None,
         }
     }
-}
-
-fn default_nvidia_collector_enabled() -> bool {
-    true
 }
 
 fn default_collector_timeout_secs() -> u64 {
