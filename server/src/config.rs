@@ -5,6 +5,7 @@ pub struct Config {
     pub listen_addr: String,
     pub database_url: String,
     pub metrics_retention_days: u32,
+    pub history_cleanup_interval_hours: u32,
     pub password_policy: crate::repository::PasswordPolicy,
     pub session_policy: crate::repository::SessionPolicy,
     pub log_policy: crate::platform_log::LogPolicy,
@@ -16,6 +17,7 @@ impl Default for Config {
             listen_addr: "0.0.0.0:10080".to_string(),
             database_url: "sqlite://./data/lightai.db".to_string(),
             metrics_retention_days: 7,
+            history_cleanup_interval_hours: 6,
             password_policy: crate::repository::PasswordPolicy::default(),
             session_policy: crate::repository::SessionPolicy::default(),
             log_policy: crate::platform_log::LogPolicy::default(),
@@ -60,7 +62,16 @@ impl Config {
 
         if let Some(metrics) = file_config.metrics {
             if let Some(value) = metrics.retention_days {
+                if value < 1 {
+                    anyhow::bail!("metrics.retention_days must be at least 1");
+                }
                 config.metrics_retention_days = value;
+            }
+            if let Some(value) = metrics.cleanup_interval_hours {
+                if value < 1 {
+                    anyhow::bail!("metrics.cleanup_interval_hours must be at least 1");
+                }
+                config.history_cleanup_interval_hours = value;
             }
         }
         if let Some(auth) = file_config.auth {
@@ -151,6 +162,7 @@ struct DatabaseSection {
 #[serde(deny_unknown_fields)]
 struct MetricsSection {
     retention_days: Option<u32>,
+    cleanup_interval_hours: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]

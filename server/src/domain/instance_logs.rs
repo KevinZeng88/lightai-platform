@@ -3,7 +3,7 @@ use tokio::time::{sleep, Duration, Instant};
 use uuid::Uuid;
 
 use super::{
-    model_instance, node_online, now_unix_secs, runtime_environment, Stage3Error,
+    model_instance, node_online, now_unix_secs, runtime_environment, DomainError,
     INSTANCE_LOG_TIMEOUT_SECS, LOG_READ_TIMEOUT_SECS,
 };
 use crate::agent_tasks;
@@ -12,9 +12,9 @@ pub async fn read_agent_log(
     pool: &SqlitePool,
     node_id: &str,
     max_bytes: usize,
-) -> Result<String, Stage3Error> {
+) -> Result<String, DomainError> {
     if !node_online(pool, node_id).await? {
-        return Err(Stage3Error::Conflict(
+        return Err(DomainError::Conflict(
             "Node Agent offline, cannot read Agent log".to_string(),
         ));
     }
@@ -60,7 +60,7 @@ pub async fn read_agent_log(
                     .to_string());
             }
             "failed" => {
-                return Err(Stage3Error::Conflict(
+                return Err(DomainError::Conflict(
                     row.get::<Option<String>, _>("error_message")
                         .unwrap_or_else(|| "Agent log read failed".to_string()),
                 ));
@@ -69,7 +69,7 @@ pub async fn read_agent_log(
         }
         if Instant::now() >= deadline {
             agent_tasks::mark_task_timed_out(pool, &task_id).await?;
-            return Err(Stage3Error::Conflict(
+            return Err(DomainError::Conflict(
                 "Agent log read timed out".to_string(),
             ));
         }
@@ -77,25 +77,25 @@ pub async fn read_agent_log(
     }
 }
 
-pub async fn refresh_instance_logs(pool: &SqlitePool, id: &str) -> Result<String, Stage3Error> {
+pub async fn refresh_instance_logs(pool: &SqlitePool, id: &str) -> Result<String, DomainError> {
     let instance = model_instance(pool, id).await?;
     if instance.deploy_type != "local" {
-        return Err(Stage3Error::BadRequest(
+        return Err(DomainError::BadRequest(
             "Only local instances support log refresh".to_string(),
         ));
     }
     let node_id = instance
         .node_id
         .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("Local instance missing node".to_string()))?;
+        .ok_or_else(|| DomainError::BadRequest("Local instance missing node".to_string()))?;
     if !node_online(pool, node_id).await? {
-        return Err(Stage3Error::Conflict(
+        return Err(DomainError::Conflict(
             "Node Agent offline, cannot refresh instance log".to_string(),
         ));
     }
 
     let runtime_environment_id = instance.runtime_environment_id.as_deref().ok_or_else(|| {
-        Stage3Error::BadRequest("Local instance missing runtime environment".to_string())
+        DomainError::BadRequest("Local instance missing runtime environment".to_string())
     })?;
     let env = runtime_environment(pool, runtime_environment_id).await?;
 
@@ -162,7 +162,7 @@ pub async fn refresh_instance_logs(pool: &SqlitePool, id: &str) -> Result<String
                 return Ok(log_tail);
             }
             "failed" => {
-                return Err(Stage3Error::Conflict(
+                return Err(DomainError::Conflict(
                     row.get::<Option<String>, _>("error_message")
                         .unwrap_or_else(|| "Instance log read failed".to_string()),
                 ));
@@ -171,7 +171,7 @@ pub async fn refresh_instance_logs(pool: &SqlitePool, id: &str) -> Result<String
         }
         if Instant::now() >= deadline {
             agent_tasks::mark_task_timed_out(pool, &task_id).await?;
-            return Err(Stage3Error::Conflict(
+            return Err(DomainError::Conflict(
                 "Instance log read timed out".to_string(),
             ));
         }
@@ -179,7 +179,7 @@ pub async fn refresh_instance_logs(pool: &SqlitePool, id: &str) -> Result<String
     }
 }
 
-pub async fn frontend_error_summary(pool: &SqlitePool) -> Result<String, Stage3Error> {
+pub async fn frontend_error_summary(pool: &SqlitePool) -> Result<String, DomainError> {
     let rows = sqlx::query(
         r#"
         SELECT occurred_at, error_message, detail_json
@@ -217,7 +217,7 @@ pub async fn frontend_error_summary(pool: &SqlitePool) -> Result<String, Stage3E
         .join("\n"))
 }
 
-pub async fn recent_error_summary(pool: &SqlitePool) -> Result<String, Stage3Error> {
+pub async fn recent_error_summary(pool: &SqlitePool) -> Result<String, DomainError> {
     let rows = sqlx::query(
         r#"
         SELECT 'instance' AS source, name AS target, last_error AS message, updated_at AS ts

@@ -1568,13 +1568,13 @@ impl From<anyhow::Error> for ApiError {
     }
 }
 
-impl From<domain::Stage3Error> for ApiError {
-    fn from(error: domain::Stage3Error) -> Self {
+impl From<domain::DomainError> for ApiError {
+    fn from(error: domain::DomainError) -> Self {
         match error {
-            domain::Stage3Error::BadRequest(message) => Self::BadRequest(message),
-            domain::Stage3Error::NotFound(message) => Self::NotFound(message),
-            domain::Stage3Error::Conflict(message) => Self::Conflict(message),
-            domain::Stage3Error::Internal(error) => Self::Internal(error),
+            domain::DomainError::BadRequest(message) => Self::BadRequest(message),
+            domain::DomainError::NotFound(message) => Self::NotFound(message),
+            domain::DomainError::Conflict(message) => Self::Conflict(message),
+            domain::DomainError::Internal(error) => Self::Internal(error),
         }
     }
 }

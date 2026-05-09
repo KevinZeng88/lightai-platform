@@ -433,7 +433,6 @@ pub struct RuntimeEnvironmentRequest {
     pub working_dir: Option<String>,
     pub log_dir: Option<String>,
     pub allowed_model_dirs_json: Option<String>,
-    pub config_json: Option<String>,
     pub params_json: Option<String>,
     pub enabled: Option<bool>,
 }
@@ -454,7 +453,6 @@ pub struct RuntimeEnvironmentView {
     pub working_dir: Option<String>,
     pub log_dir: Option<String>,
     pub allowed_model_dirs_json: Option<String>,
-    pub config_json: Option<String>,
     pub params_json: Option<String>,
     pub enabled: bool,
     pub last_checked_at: Option<i64>,
@@ -477,7 +475,6 @@ pub struct ModelRequest {
     pub model_path: Option<String>,
     pub description: Option<String>,
     pub default_backend: Option<String>,
-    pub config_json: Option<String>,
     #[serde(default)]
     pub params_json: Option<String>,
     pub initial_file: Option<ModelFileRequest>,
@@ -492,7 +489,6 @@ pub struct ModelView {
     pub model_path: Option<String>,
     pub description: Option<String>,
     pub default_backend: Option<String>,
-    pub config_json: Option<String>,
     pub params_json: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,

@@ -213,9 +213,4 @@ impl CollectorDir {
 
         EnableStatus::Allowed
     }
-
-    /// Legacy boolean check — use `check_enabled()` for detailed diagnostics.
-    pub fn is_enabled(&self, config: &CollectorConfig, registry: &[RegistryEntry]) -> bool {
-        self.check_enabled(config, registry) == EnableStatus::Allowed
-    }
 }

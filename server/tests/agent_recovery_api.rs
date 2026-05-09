@@ -1,10 +1,6 @@
-#![allow(unused_imports)]
-#![allow(dead_code)]
 use axum::body::{to_bytes, Body};
 use axum::http::{header, Request, StatusCode};
-use lightai_server::{db, routes};
 use serde_json::{json, Value};
-use sqlx::Row;
 use tower::ServiceExt;
 
 mod common;
@@ -541,12 +537,4 @@ async fn running_instance_on_online_node_shows_node_online_true() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(fetched["status"], "running");
     assert_eq!(fetched["node_online"], true);
-}
-
-async fn stage2_test_app() -> (sqlx::SqlitePool, axum::Router) {
-    let pool = sqlx::SqlitePool::connect("sqlite::memory:").await.unwrap();
-    db::migrate(&pool).await.unwrap();
-    ensure_initial_admin(&pool, "admin", "test-admin-pw-123").await;
-    let app = routes::app(pool.clone());
-    (pool, app)
 }

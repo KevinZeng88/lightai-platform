@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::Notify;
 use tokio::time::{timeout, Duration, Instant};
 
-use crate::domain::Stage3Error;
+use crate::domain::DomainError;
 use crate::models::{AgentTaskPollResponse, AgentTaskResultRequest, AgentTaskView};
 use crate::repository;
 
@@ -25,7 +25,7 @@ pub async fn poll_agent_task(
     pool: &SqlitePool,
     node_id: &str,
     current_config_version: Option<i64>,
-) -> Result<AgentTaskPollResponse, Stage3Error> {
+) -> Result<AgentTaskPollResponse, DomainError> {
     let deadline = Instant::now() + Duration::from_secs(AGENT_TASK_LONG_POLL_SECS);
     let row = loop {
         mark_timed_out_tasks(pool).await?;
@@ -115,7 +115,7 @@ pub async fn poll_agent_task(
 async fn next_queued_agent_task(
     pool: &SqlitePool,
     node_id: &str,
-) -> Result<Option<sqlx::sqlite::SqliteRow>, Stage3Error> {
+) -> Result<Option<sqlx::sqlite::SqliteRow>, DomainError> {
     Ok(sqlx::query(
         r#"
         SELECT * FROM agent_tasks
@@ -133,15 +133,15 @@ pub async fn record_agent_task_result(
     pool: &SqlitePool,
     task_id: &str,
     request: AgentTaskResultRequest,
-) -> Result<(), Stage3Error> {
+) -> Result<(), DomainError> {
     let task = sqlx::query("SELECT * FROM agent_tasks WHERE id = ? AND node_id = ?")
         .bind(task_id)
         .bind(&request.node_id)
         .fetch_optional(pool)
         .await?
-        .ok_or_else(|| Stage3Error::NotFound("agent task not found".to_string()))?;
+        .ok_or_else(|| DomainError::NotFound("agent task not found".to_string()))?;
     if !["succeeded", "failed"].contains(&request.status.as_str()) {
-        return Err(Stage3Error::BadRequest("status is invalid".to_string()));
+        return Err(DomainError::BadRequest("status is invalid".to_string()));
     }
 
     let now = crate::util::now_unix_secs();
@@ -175,7 +175,7 @@ pub async fn record_agent_task_result(
     if task.get::<String, _>("kind") == "verify_model_file" {
         let payload: serde_json::Value =
             serde_json::from_str(&task.get::<String, _>("payload_json"))
-                .map_err(|error| Stage3Error::Internal(error.into()))?;
+                .map_err(|error| DomainError::Internal(error.into()))?;
         let model_file_id = payload
             .get("model_file_id")
             .and_then(|value| value.as_str());
@@ -225,11 +225,11 @@ pub async fn record_agent_task_result(
     } else if task.get::<String, _>("kind") == "cleanup_model_file" {
         let payload: serde_json::Value =
             serde_json::from_str(&task.get::<String, _>("payload_json"))
-                .map_err(|error| Stage3Error::Internal(error.into()))?;
+                .map_err(|error| DomainError::Internal(error.into()))?;
         let trash_id = payload
             .get("trash_id")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| Stage3Error::BadRequest("task payload is invalid".to_string()))?;
+            .ok_or_else(|| DomainError::BadRequest("task payload is invalid".to_string()))?;
         let message = error_message
             .as_deref()
             .unwrap_or(if request.status == "succeeded" {
@@ -272,11 +272,11 @@ pub async fn record_agent_task_result(
     ) {
         let payload: serde_json::Value =
             serde_json::from_str(&task.get::<String, _>("payload_json"))
-                .map_err(|error| Stage3Error::Internal(error.into()))?;
+                .map_err(|error| DomainError::Internal(error.into()))?;
         let instance_id = payload
             .get("instance_id")
             .and_then(|value| value.as_str())
-            .ok_or_else(|| Stage3Error::BadRequest("task payload is invalid".to_string()))?;
+            .ok_or_else(|| DomainError::BadRequest("task payload is invalid".to_string()))?;
         let kind = task.get::<String, _>("kind");
         let next_status = request
             .result
@@ -392,7 +392,7 @@ pub async fn record_agent_task_result(
     Ok(())
 }
 
-pub(crate) async fn mark_timed_out_tasks(pool: &SqlitePool) -> Result<(), Stage3Error> {
+pub(crate) async fn mark_timed_out_tasks(pool: &SqlitePool) -> Result<(), DomainError> {
     let now = crate::util::now_unix_secs();
     let rows = sqlx::query(
         r#"
@@ -467,7 +467,7 @@ pub(crate) async fn mark_timed_out_tasks(pool: &SqlitePool) -> Result<(), Stage3
 pub(crate) async fn mark_task_timed_out(
     pool: &SqlitePool,
     task_id: &str,
-) -> Result<(), Stage3Error> {
+) -> Result<(), DomainError> {
     sqlx::query(
         "UPDATE agent_tasks SET status = 'timed_out', error_message = 'task execution timed out', updated_at = ? WHERE id = ? AND status IN ('queued', 'running')",
     )
@@ -478,10 +478,10 @@ pub(crate) async fn mark_task_timed_out(
     Ok(())
 }
 
-fn agent_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<AgentTaskView, Stage3Error> {
+fn agent_task_from_row(row: sqlx::sqlite::SqliteRow) -> Result<AgentTaskView, DomainError> {
     let payload_json: String = row.get("payload_json");
     let payload =
-        serde_json::from_str(&payload_json).map_err(|error| Stage3Error::Internal(error.into()))?;
+        serde_json::from_str(&payload_json).map_err(|error| DomainError::Internal(error.into()))?;
     Ok(AgentTaskView {
         id: row.get("id"),
         node_id: row.get("node_id"),

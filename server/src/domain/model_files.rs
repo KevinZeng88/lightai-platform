@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use super::{
     ensure_model_exists, ensure_node_exists, node_online, now_unix_secs, validate_non_empty,
-    validate_path, Stage3Error, MODEL_FILE_VERIFY_TIMEOUT_SECS,
+    validate_path, DomainError, MODEL_FILE_VERIFY_TIMEOUT_SECS,
 };
 use crate::agent_tasks;
 use crate::models::{ModelFileListResponse, ModelFileRequest, ModelFileView};
@@ -20,7 +20,7 @@ pub async fn create_model_file(
     pool: &SqlitePool,
     model_id: &str,
     request: ModelFileRequest,
-) -> Result<ModelFileView, Stage3Error> {
+) -> Result<ModelFileView, DomainError> {
     validate_non_empty("path", &request.path)?;
     validate_path("path", &request.path)?;
     ensure_model_exists(pool, model_id).await?;
@@ -57,7 +57,7 @@ pub async fn create_model_file(
 pub async fn list_model_files(
     pool: &SqlitePool,
     model_id: &str,
-) -> Result<ModelFileListResponse, Stage3Error> {
+) -> Result<ModelFileListResponse, DomainError> {
     ensure_model_exists(pool, model_id).await?;
     let rows = model_file_rows(pool, Some(model_id), None).await?;
     Ok(ModelFileListResponse {
@@ -65,19 +65,19 @@ pub async fn list_model_files(
     })
 }
 
-pub async fn model_file(pool: &SqlitePool, id: &str) -> Result<ModelFileView, Stage3Error> {
+pub async fn model_file(pool: &SqlitePool, id: &str) -> Result<ModelFileView, DomainError> {
     let rows = model_file_rows(pool, None, Some(id)).await?;
     rows.into_iter()
         .next()
         .map(model_file_from_row)
-        .ok_or_else(|| Stage3Error::NotFound("model file not found".to_string()))
+        .ok_or_else(|| DomainError::NotFound("model file not found".to_string()))
 }
 
 pub async fn update_model_file(
     pool: &SqlitePool,
     id: &str,
     request: ModelFileRequest,
-) -> Result<ModelFileView, Stage3Error> {
+) -> Result<ModelFileView, DomainError> {
     validate_non_empty("path", &request.path)?;
     validate_path("path", &request.path)?;
     ensure_node_exists(pool, &request.node_id).await?;
@@ -104,12 +104,12 @@ pub async fn update_model_file(
     .execute(pool)
     .await?;
     if result.rows_affected() == 0 {
-        return Err(Stage3Error::NotFound("model file not found".to_string()));
+        return Err(DomainError::NotFound("model file not found".to_string()));
     }
     model_file(pool, id).await
 }
 
-pub async fn delete_model_file(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error> {
+pub async fn delete_model_file(pool: &SqlitePool, id: &str) -> Result<(), DomainError> {
     super::model_trash::ensure_model_file_trash(
         pool,
         id,
@@ -125,7 +125,7 @@ pub async fn delete_model_file(pool: &SqlitePool, id: &str) -> Result<(), Stage3
         .execute(pool)
         .await?;
     if result.rows_affected() == 0 {
-        return Err(Stage3Error::NotFound("model file not found".to_string()));
+        return Err(DomainError::NotFound("model file not found".to_string()));
     }
     Ok(())
 }
@@ -133,7 +133,7 @@ pub async fn delete_model_file(pool: &SqlitePool, id: &str) -> Result<(), Stage3
 pub async fn queue_model_file_verification(
     pool: &SqlitePool,
     id: &str,
-) -> Result<ModelFileView, Stage3Error> {
+) -> Result<ModelFileView, DomainError> {
     let file = model_file(pool, id).await?;
     let task_id = Uuid::new_v4().to_string();
     let now = now_unix_secs();
@@ -184,9 +184,9 @@ pub(crate) async fn verify_model_file_before_save(
     pool: &SqlitePool,
     node_id: &str,
     path: &str,
-) -> Result<VerifiedModelFile, Stage3Error> {
+) -> Result<VerifiedModelFile, DomainError> {
     if !node_online(pool, node_id).await? {
-        return Err(Stage3Error::Conflict(
+        return Err(DomainError::Conflict(
             "Node Agent offline, cannot verify model file".to_string(),
         ));
     }
@@ -217,7 +217,7 @@ pub(crate) async fn verify_model_file_before_save(
 async fn wait_for_model_file_verification(
     pool: &SqlitePool,
     task_id: &str,
-) -> Result<VerifiedModelFile, Stage3Error> {
+) -> Result<VerifiedModelFile, DomainError> {
     let deadline = Instant::now() + Duration::from_secs(MODEL_FILE_VERIFY_TIMEOUT_SECS);
     loop {
         let row =
@@ -238,7 +238,7 @@ async fn wait_for_model_file_verification(
                     .and_then(|value| value.as_str())
                     .unwrap_or("verified");
                 if file_status != "verified" {
-                    return Err(Stage3Error::BadRequest(verification_error_message(&result)));
+                    return Err(DomainError::BadRequest(verification_error_message(&result)));
                 }
                 return Ok(VerifiedModelFile {
                     size_bytes: result.get("size_bytes").and_then(|value| value.as_i64()),
@@ -258,10 +258,10 @@ async fn wait_for_model_file_verification(
                     .map(|value| verification_error_message(&value))
                     .or_else(|| row.get::<Option<String>, _>("error_message"))
                     .unwrap_or_else(|| "Model file verification failed".to_string());
-                return Err(Stage3Error::BadRequest(message));
+                return Err(DomainError::BadRequest(message));
             }
             "timed_out" => {
-                return Err(Stage3Error::Conflict(
+                return Err(DomainError::Conflict(
                     "Model file verification timed out; confirm Agent is online and retry"
                         .to_string(),
                 ));
@@ -271,7 +271,7 @@ async fn wait_for_model_file_verification(
 
         if Instant::now() >= deadline {
             agent_tasks::mark_task_timed_out(pool, task_id).await?;
-            return Err(Stage3Error::Conflict(
+            return Err(DomainError::Conflict(
                 "Model file verification timed out; confirm Agent is online and retry".to_string(),
             ));
         }
@@ -299,7 +299,7 @@ pub(crate) struct ModelFileSummary {
 pub(crate) async fn model_file_summary(
     pool: &SqlitePool,
     model_id: &str,
-) -> Result<ModelFileSummary, Stage3Error> {
+) -> Result<ModelFileSummary, DomainError> {
     agent_tasks::mark_timed_out_tasks(pool).await?;
     let rows = sqlx::query(
         r#"
@@ -359,7 +359,7 @@ async fn model_file_rows(
     pool: &SqlitePool,
     model_id: Option<&str>,
     file_id: Option<&str>,
-) -> Result<Vec<sqlx::sqlite::SqliteRow>, Stage3Error> {
+) -> Result<Vec<sqlx::sqlite::SqliteRow>, DomainError> {
     agent_tasks::mark_timed_out_tasks(pool).await?;
     let now = now_unix_secs();
     let query = r#"

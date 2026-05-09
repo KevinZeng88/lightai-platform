@@ -4,6 +4,7 @@ pub mod collector_cli;
 pub mod config;
 pub mod db;
 pub mod domain;
+pub mod history_cleanup;
 pub mod http_check;
 pub mod models;
 pub mod platform_log;

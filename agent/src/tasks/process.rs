@@ -49,8 +49,7 @@ pub(super) struct InstanceLaunchParams {
 impl InstanceLaunchParams {
     fn from_payload(payload: &serde_json::Value) -> Result<Self, String> {
         let params = payload
-            .get("params")
-            .or_else(|| payload.get("params_json"))
+            .get("params_json")
             .unwrap_or(&serde_json::Value::Null);
         let parsed = if let Some(value) = params.as_str() {
             serde_json::from_str::<serde_json::Value>(value).unwrap_or(serde_json::Value::Null)
@@ -648,7 +647,7 @@ async fn resolve_docker_payload(payload: &serde_json::Value) -> docker_backend::
     });
 
     let overrides: Option<docker_backend::DockerInstanceOverrides> = {
-        let params = payload.get("params").or_else(|| payload.get("params_json"));
+        let params = payload.get("params_json");
         params.and_then(|v| {
             let val: serde_json::Value = if let Some(s) = v.as_str() {
                 serde_json::from_str(s).unwrap_or_default()
@@ -679,8 +678,7 @@ async fn resolve_docker_payload(payload: &serde_json::Value) -> docker_backend::
         }
     }
 
-    // Fallback: try old full DockerPayload format
-    docker_backend::parse_docker_payload(payload).unwrap_or_default()
+    docker_backend::DockerPayload::default()
 }
 
 async fn stop_docker_instance(

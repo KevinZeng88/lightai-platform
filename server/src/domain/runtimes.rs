@@ -5,7 +5,7 @@ use uuid::Uuid;
 use super::{
     bool_to_int, ensure_node_online, int_to_bool, node_online, now_unix_secs, validate_backend,
     validate_deploy_type, validate_json_field, validate_non_empty, validate_runtime_entrypoints,
-    Stage3Error, RUNTIME_ENVIRONMENT_CHECK_TIMEOUT_SECS,
+    DomainError, RUNTIME_ENVIRONMENT_CHECK_TIMEOUT_SECS,
 };
 use crate::agent_tasks;
 use crate::models::{
@@ -16,7 +16,7 @@ pub async fn create_runtime_environment(
     pool: &SqlitePool,
     node_id: &str,
     request: RuntimeEnvironmentRequest,
-) -> Result<RuntimeEnvironmentView, Stage3Error> {
+) -> Result<RuntimeEnvironmentView, DomainError> {
     validate_non_empty("name", &request.name)?;
     validate_backend(&request.backend)?;
     validate_deploy_type(&request.deploy_type)?;
@@ -25,7 +25,7 @@ pub async fn create_runtime_environment(
         "allowed_model_dirs_json",
         request.allowed_model_dirs_json.as_deref(),
     )?;
-    validate_json_field("config_json", request.config_json.as_deref())?;
+    validate_json_field("params_json", request.params_json.as_deref())?;
     ensure_node_online(pool, node_id).await?;
     let checked = check_runtime_environment_before_save(pool, node_id, &request).await?;
 
@@ -36,7 +36,7 @@ pub async fn create_runtime_environment(
         INSERT INTO runtime_environments (
             id, node_id, name, backend, deploy_type, version, base_url, health_url, endpoint_url,
             binary_path, docker_image, working_dir, log_dir, allowed_model_dirs_json,
-            config_json, enabled, last_checked_at, check_status, check_message, created_at, updated_at
+            params_json, enabled, last_checked_at, check_status, check_message, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
@@ -55,7 +55,7 @@ pub async fn create_runtime_environment(
     .bind(request.working_dir)
     .bind(request.log_dir)
     .bind(request.allowed_model_dirs_json)
-    .bind(request.params_json.or(request.config_json))
+    .bind(request.params_json)
     .bind(bool_to_int(request.enabled.unwrap_or(true)))
     .bind(checked.checked_at)
     .bind(checked.check_status)
@@ -71,7 +71,7 @@ pub async fn create_runtime_environment(
 pub async fn list_runtime_environments(
     pool: &SqlitePool,
     node_id: Option<&str>,
-) -> Result<RuntimeEnvironmentListResponse, Stage3Error> {
+) -> Result<RuntimeEnvironmentListResponse, DomainError> {
     let rows = match node_id {
         Some(node_id) => {
             sqlx::query(
@@ -100,12 +100,12 @@ pub async fn list_runtime_environments(
 pub async fn runtime_environment(
     pool: &SqlitePool,
     id: &str,
-) -> Result<RuntimeEnvironmentView, Stage3Error> {
+) -> Result<RuntimeEnvironmentView, DomainError> {
     let row = sqlx::query("SELECT * FROM runtime_environments WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
         .await?
-        .ok_or_else(|| Stage3Error::NotFound("runtime environment not found".to_string()))?;
+        .ok_or_else(|| DomainError::NotFound("runtime environment not found".to_string()))?;
     Ok(runtime_environment_from_row(row))
 }
 
@@ -113,7 +113,7 @@ pub async fn update_runtime_environment(
     pool: &SqlitePool,
     id: &str,
     request: RuntimeEnvironmentRequest,
-) -> Result<RuntimeEnvironmentView, Stage3Error> {
+) -> Result<RuntimeEnvironmentView, DomainError> {
     validate_non_empty("name", &request.name)?;
     validate_backend(&request.backend)?;
     validate_deploy_type(&request.deploy_type)?;
@@ -122,7 +122,7 @@ pub async fn update_runtime_environment(
         "allowed_model_dirs_json",
         request.allowed_model_dirs_json.as_deref(),
     )?;
-    validate_json_field("config_json", request.config_json.as_deref())?;
+    validate_json_field("params_json", request.params_json.as_deref())?;
 
     let running_instances: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM model_instances WHERE runtime_environment_id = ? AND status IN ('running', 'starting', 'stopping')",
@@ -131,7 +131,7 @@ pub async fn update_runtime_environment(
     .fetch_all(pool)
     .await?;
     if !running_instances.is_empty() {
-        return Err(Stage3Error::Conflict(format!(
+        return Err(DomainError::Conflict(format!(
             "Runtime in use by running instance {}. Cannot modify. Stop the instance first.",
             running_instances.join(", ")
         )));
@@ -143,7 +143,7 @@ pub async fn update_runtime_environment(
         UPDATE runtime_environments
         SET name = ?, backend = ?, deploy_type = ?, version = ?, base_url = ?,
             health_url = ?, endpoint_url = ?, binary_path = ?, docker_image = ?, working_dir = ?,
-            log_dir = ?, allowed_model_dirs_json = ?, config_json = ?, enabled = ?,
+            log_dir = ?, allowed_model_dirs_json = ?, params_json = ?, enabled = ?,
             updated_at = ?
         WHERE id = ?
         "#,
@@ -160,7 +160,7 @@ pub async fn update_runtime_environment(
     .bind(request.working_dir)
     .bind(request.log_dir)
     .bind(request.allowed_model_dirs_json)
-    .bind(request.params_json.or(request.config_json))
+    .bind(request.params_json)
     .bind(bool_to_int(request.enabled.unwrap_or(true)))
     .bind(now)
     .bind(id)
@@ -168,7 +168,7 @@ pub async fn update_runtime_environment(
     .await?;
 
     if result.rows_affected() == 0 {
-        return Err(Stage3Error::NotFound(
+        return Err(DomainError::NotFound(
             "runtime environment not found".to_string(),
         ));
     }
@@ -176,14 +176,14 @@ pub async fn update_runtime_environment(
     runtime_environment(pool, id).await
 }
 
-pub async fn delete_runtime_environment(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error> {
+pub async fn delete_runtime_environment(pool: &SqlitePool, id: &str) -> Result<(), DomainError> {
     let instance_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM model_instances WHERE runtime_environment_id = ?")
             .bind(id)
             .fetch_one(pool)
             .await?;
     if instance_count > 0 {
-        return Err(Stage3Error::Conflict(
+        return Err(DomainError::Conflict(
             "runtime environment is used by model instances".to_string(),
         ));
     }
@@ -193,7 +193,7 @@ pub async fn delete_runtime_environment(pool: &SqlitePool, id: &str) -> Result<(
         .execute(pool)
         .await?;
     if result.rows_affected() == 0 {
-        return Err(Stage3Error::NotFound(
+        return Err(DomainError::NotFound(
             "runtime environment not found".to_string(),
         ));
     }
@@ -203,12 +203,12 @@ pub async fn delete_runtime_environment(pool: &SqlitePool, id: &str) -> Result<(
 pub async fn check_runtime_environment(
     pool: &SqlitePool,
     id: &str,
-) -> Result<RuntimeEnvironmentView, Stage3Error> {
+) -> Result<RuntimeEnvironmentView, DomainError> {
     let environment = runtime_environment(pool, id).await?;
     let node_id = environment
         .node_id
         .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("Runtime must be bound to a node".to_string()))?;
+        .ok_or_else(|| DomainError::BadRequest("Runtime must be bound to a node".to_string()))?;
     if !node_online(pool, node_id).await? {
         update_runtime_environment_check(
             pool,
@@ -217,7 +217,7 @@ pub async fn check_runtime_environment(
             "Node Agent offline, cannot check runtime environment",
         )
         .await?;
-        return Err(Stage3Error::Conflict(
+        return Err(DomainError::Conflict(
             "Node Agent offline, cannot check runtime environment".to_string(),
         ));
     }
@@ -234,8 +234,7 @@ pub async fn check_runtime_environment(
         working_dir: environment.working_dir.clone(),
         log_dir: environment.log_dir.clone(),
         allowed_model_dirs_json: environment.allowed_model_dirs_json.clone(),
-        config_json: environment.config_json.clone(),
-        params_json: None,
+        params_json: environment.params_json.clone(),
         enabled: Some(environment.enabled),
     };
     let checked = check_runtime_environment_before_save(pool, node_id, &request).await?;
@@ -259,7 +258,7 @@ pub(super) async fn update_runtime_environment_check(
     id: &str,
     status: &str,
     message: &str,
-) -> Result<RuntimeEnvironmentView, Stage3Error> {
+) -> Result<RuntimeEnvironmentView, DomainError> {
     let now = now_unix_secs();
     sqlx::query(
         r#"
@@ -289,7 +288,7 @@ async fn check_runtime_environment_before_save(
     pool: &SqlitePool,
     node_id: &str,
     request: &RuntimeEnvironmentRequest,
-) -> Result<CheckedRuntimeEnvironment, Stage3Error> {
+) -> Result<CheckedRuntimeEnvironment, DomainError> {
     let task_id = Uuid::new_v4().to_string();
     let now = now_unix_secs();
     let payload = serde_json::json!({
@@ -300,7 +299,7 @@ async fn check_runtime_environment_before_save(
         "binary_path": request.binary_path,
         "docker_image": request.docker_image,
         "working_dir": request.working_dir,
-        "config_json": request.config_json,
+        "params_json": request.params_json,
     });
     sqlx::query(
         r#"
@@ -339,7 +338,7 @@ async fn check_runtime_environment_before_save(
                     .and_then(|value| value.as_str())
                     .unwrap_or("available");
                 if !matches!(check_status, "available" | "version_unavailable") {
-                    return Err(Stage3Error::BadRequest(runtime_check_message(&result)));
+                    return Err(DomainError::BadRequest(runtime_check_message(&result)));
                 }
                 return Ok(CheckedRuntimeEnvironment {
                     check_status: check_status.to_string(),
@@ -357,10 +356,10 @@ async fn check_runtime_environment_before_save(
                     .as_deref()
                     .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
                     .unwrap_or_else(|| serde_json::json!({}));
-                return Err(Stage3Error::BadRequest(runtime_check_message(&result)));
+                return Err(DomainError::BadRequest(runtime_check_message(&result)));
             }
             "timed_out" => {
-                return Err(Stage3Error::Conflict(
+                return Err(DomainError::Conflict(
                     "Runtime check timed out; confirm Agent is online and retry".to_string(),
                 ));
             }
@@ -368,7 +367,7 @@ async fn check_runtime_environment_before_save(
         }
         if Instant::now() >= deadline {
             agent_tasks::mark_task_timed_out(pool, &task_id).await?;
-            return Err(Stage3Error::Conflict(
+            return Err(DomainError::Conflict(
                 "Runtime check timed out; confirm Agent is online and retry".to_string(),
             ));
         }
@@ -401,8 +400,7 @@ pub(super) fn runtime_environment_from_row(row: sqlx::sqlite::SqliteRow) -> Runt
         working_dir: row.get("working_dir"),
         log_dir: row.get("log_dir"),
         allowed_model_dirs_json: row.get("allowed_model_dirs_json"),
-        config_json: row.get("config_json"),
-        params_json: row.get("config_json"),
+        params_json: row.get("params_json"),
         enabled: int_to_bool(row.get("enabled")),
         last_checked_at: row.get("last_checked_at"),
         check_status: row.get("check_status"),

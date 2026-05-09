@@ -4,7 +4,7 @@ use uuid::Uuid;
 
 use super::{
     node_online, now_unix_secs, runtime_environment, validate_backend, validate_json_field,
-    validate_non_empty, Stage3Error, MODEL_INSTANCE_TASK_TIMEOUT_SECS,
+    validate_non_empty, DomainError, MODEL_INSTANCE_TASK_TIMEOUT_SECS,
 };
 use crate::agent_tasks;
 use crate::http_check;
@@ -23,7 +23,7 @@ struct InstanceModelFile {
 pub async fn create_model_instance(
     pool: &SqlitePool,
     request: ModelInstanceCreateRequest,
-) -> Result<ModelInstanceView, Stage3Error> {
+) -> Result<ModelInstanceView, DomainError> {
     validate_non_empty("name", &request.name)?;
     validate_instance_status(request.status.as_deref().unwrap_or("unknown"))?;
     let deploy_type = request.deploy_type.as_deref().unwrap_or("external");
@@ -54,7 +54,7 @@ pub async fn create_model_instance(
                 .fetch_optional(pool)
                 .await?;
         if model_exists.is_none() {
-            return Err(Stage3Error::BadRequest("model not found".to_string()));
+            return Err(DomainError::BadRequest("model not found".to_string()));
         }
     }
 
@@ -97,34 +97,34 @@ pub async fn create_model_instance(
 async fn create_local_model_instance(
     pool: &SqlitePool,
     request: ModelInstanceCreateRequest,
-) -> Result<ModelInstanceView, Stage3Error> {
+) -> Result<ModelInstanceView, DomainError> {
     validate_json_field("params_json", request.params_json.as_deref())?;
     let params_json = request.params_json;
     parse_instance_params(params_json.as_deref())?;
     let node_id = request
         .node_id
         .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("Local instance requires a node".to_string()))?;
+        .ok_or_else(|| DomainError::BadRequest("Local instance requires a node".to_string()))?;
     let runtime_environment_id = request.runtime_environment_id.as_deref().ok_or_else(|| {
-        Stage3Error::BadRequest("Local instance requires a runtime environment".to_string())
+        DomainError::BadRequest("Local instance requires a runtime environment".to_string())
     })?;
     let model_file_id = request.model_file_id.as_deref().ok_or_else(|| {
-        Stage3Error::BadRequest("Local instance requires a verified model file".to_string())
+        DomainError::BadRequest("Local instance requires a verified model file".to_string())
     })?;
     let env = runtime_environment(pool, runtime_environment_id).await?;
     if env.node_id.as_deref() != Some(node_id) {
-        return Err(Stage3Error::BadRequest(
+        return Err(DomainError::BadRequest(
             "Runtime environment does not belong to the selected node".to_string(),
         ));
     }
     if !super::runtimes::runtime_environment_usable(env.check_status.as_deref()) {
-        return Err(Stage3Error::BadRequest(
+        return Err(DomainError::BadRequest(
             "Runtime environment has not passed Agent check".to_string(),
         ));
     }
     let file = verified_model_file_for_instance(pool, model_file_id).await?;
     if file.node_id != node_id {
-        return Err(Stage3Error::BadRequest(
+        return Err(DomainError::BadRequest(
             "Model file does not belong to the selected node".to_string(),
         ));
     }
@@ -161,7 +161,7 @@ async fn create_local_model_instance(
 
 pub async fn list_model_instances(
     pool: &SqlitePool,
-) -> Result<ModelInstanceListResponse, Stage3Error> {
+) -> Result<ModelInstanceListResponse, DomainError> {
     let rows = sqlx::query(
         r#"
         SELECT mi.*, m.name AS model_definition_name, mf.path AS model_file_path,
@@ -182,7 +182,7 @@ pub async fn list_model_instances(
     })
 }
 
-pub async fn model_instance(pool: &SqlitePool, id: &str) -> Result<ModelInstanceView, Stage3Error> {
+pub async fn model_instance(pool: &SqlitePool, id: &str) -> Result<ModelInstanceView, DomainError> {
     let row = sqlx::query(
         r#"
         SELECT mi.*, m.name AS model_definition_name, mf.path AS model_file_path,
@@ -199,7 +199,7 @@ pub async fn model_instance(pool: &SqlitePool, id: &str) -> Result<ModelInstance
     .bind(id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| Stage3Error::NotFound("model instance not found".to_string()))?;
+    .ok_or_else(|| DomainError::NotFound("model instance not found".to_string()))?;
     Ok(model_instance_from_row(row))
 }
 
@@ -207,7 +207,7 @@ pub async fn update_model_instance(
     pool: &SqlitePool,
     id: &str,
     request: ModelInstanceUpdateRequest,
-) -> Result<ModelInstanceView, Stage3Error> {
+) -> Result<ModelInstanceView, DomainError> {
     let current = model_instance(pool, id).await?;
     if matches!(current.status.as_str(), "running" | "starting" | "stopping") {
         let is_config_change = request.name.is_some()
@@ -219,7 +219,7 @@ pub async fn update_model_instance(
             || request.runtime_version.is_some()
             || request.model_name.is_some();
         if is_config_change {
-            return Err(Stage3Error::Conflict(
+            return Err(DomainError::Conflict(
                 "Cannot modify a running instance. Stop it first.".to_string(),
             ));
         }
@@ -299,13 +299,13 @@ pub async fn update_model_instance(
     model_instance(pool, id).await
 }
 
-pub async fn delete_model_instance(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error> {
+pub async fn delete_model_instance(pool: &SqlitePool, id: &str) -> Result<(), DomainError> {
     let instance = model_instance(pool, id).await?;
     if matches!(
         instance.status.as_str(),
         "running" | "starting" | "stopping"
     ) {
-        return Err(Stage3Error::Conflict(
+        return Err(DomainError::Conflict(
             "Cannot delete a running instance. Stop it first.".to_string(),
         ));
     }
@@ -314,7 +314,7 @@ pub async fn delete_model_instance(pool: &SqlitePool, id: &str) -> Result<(), St
         .execute(pool)
         .await?;
     if result.rows_affected() == 0 {
-        return Err(Stage3Error::NotFound(
+        return Err(DomainError::NotFound(
             "model instance not found".to_string(),
         ));
     }
@@ -324,7 +324,7 @@ pub async fn delete_model_instance(pool: &SqlitePool, id: &str) -> Result<(), St
 pub async fn check_model_instance(
     pool: &SqlitePool,
     id: &str,
-) -> Result<ModelInstanceView, Stage3Error> {
+) -> Result<ModelInstanceView, DomainError> {
     let instance = model_instance(pool, id).await?;
     if instance.deploy_type != "external" {
         if instance.status != "running" {
@@ -333,7 +333,7 @@ pub async fn check_model_instance(
         let node_id = instance
             .node_id
             .as_deref()
-            .ok_or_else(|| Stage3Error::BadRequest("Local instance missing node".to_string()))?;
+            .ok_or_else(|| DomainError::BadRequest("Local instance missing node".to_string()))?;
         if !node_online(pool, node_id).await? {
             let _ = crate::platform_log::append(
                 &crate::platform_log::global(),
@@ -374,27 +374,27 @@ pub async fn check_model_instance(
 pub async fn start_model_instance(
     pool: &SqlitePool,
     id: &str,
-) -> Result<ModelInstanceView, Stage3Error> {
+) -> Result<ModelInstanceView, DomainError> {
     run_local_instance_task(pool, id, "start_model_instance", "starting").await
 }
 
 pub async fn stop_model_instance(
     pool: &SqlitePool,
     id: &str,
-) -> Result<ModelInstanceView, Stage3Error> {
+) -> Result<ModelInstanceView, DomainError> {
     run_local_instance_task(pool, id, "stop_model_instance", "stopping").await
 }
 
 pub async fn test_model_instance(
     pool: &SqlitePool,
     id: &str,
-) -> Result<ModelInstanceView, Stage3Error> {
+) -> Result<ModelInstanceView, DomainError> {
     let instance = model_instance(pool, id).await?;
     if instance.deploy_type == "external" {
         return check_model_instance(pool, id).await;
     }
     if instance.status != "running" {
-        return Err(Stage3Error::BadRequest(
+        return Err(DomainError::BadRequest(
             "Local instance is not running, cannot test".to_string(),
         ));
     }
@@ -406,33 +406,33 @@ async fn run_local_instance_task(
     id: &str,
     task_kind: &str,
     pending_status: &str,
-) -> Result<ModelInstanceView, Stage3Error> {
+) -> Result<ModelInstanceView, DomainError> {
     let instance = model_instance(pool, id).await?;
     if instance.deploy_type != "local" {
-        return Err(Stage3Error::BadRequest(
+        return Err(DomainError::BadRequest(
             "External instances are not started or stopped by the platform".to_string(),
         ));
     }
     let node_id = instance
         .node_id
         .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("Local instance missing node".to_string()))?;
+        .ok_or_else(|| DomainError::BadRequest("Local instance missing node".to_string()))?;
     if !node_online(pool, node_id).await? {
-        return Err(Stage3Error::Conflict(
+        return Err(DomainError::Conflict(
             "Node Agent offline, cannot execute local instance task".to_string(),
         ));
     }
     let model_file_id = instance
         .model_file_id
         .as_deref()
-        .ok_or_else(|| Stage3Error::BadRequest("Local instance missing model file".to_string()))?;
+        .ok_or_else(|| DomainError::BadRequest("Local instance missing model file".to_string()))?;
     let file = verified_model_file_for_instance(pool, model_file_id).await?;
     let runtime_environment_id = instance.runtime_environment_id.as_deref().ok_or_else(|| {
-        Stage3Error::BadRequest("Local instance missing runtime environment".to_string())
+        DomainError::BadRequest("Local instance missing runtime environment".to_string())
     })?;
     let env = runtime_environment(pool, runtime_environment_id).await?;
     if !super::runtimes::runtime_environment_usable(env.check_status.as_deref()) {
-        return Err(Stage3Error::BadRequest(
+        return Err(DomainError::BadRequest(
             "Runtime environment has not passed Agent check".to_string(),
         ));
     }
@@ -501,7 +501,7 @@ async fn wait_for_model_instance_task(
     pool: &SqlitePool,
     instance_id: &str,
     task_id: &str,
-) -> Result<ModelInstanceView, Stage3Error> {
+) -> Result<ModelInstanceView, DomainError> {
     let deadline = Instant::now() + Duration::from_secs(MODEL_INSTANCE_TASK_TIMEOUT_SECS);
     loop {
         let row =
@@ -525,10 +525,10 @@ async fn wait_for_model_instance_task(
                     })
                     .or_else(|| row.get::<Option<String>, _>("error_message"))
                     .unwrap_or_else(|| "Local instance task failed".to_string());
-                return Err(Stage3Error::Conflict(message));
+                return Err(DomainError::Conflict(message));
             }
             "timed_out" => {
-                return Err(Stage3Error::Conflict(
+                return Err(DomainError::Conflict(
                     "Local instance task timed out; confirm Agent is online and retry".to_string(),
                 ));
             }
@@ -543,7 +543,7 @@ async fn wait_for_model_instance_task(
                 Some("local instance task timed out"),
             )
             .await?;
-            return Err(Stage3Error::Conflict(
+            return Err(DomainError::Conflict(
                 "Local instance task timed out; confirm Agent is online and retry".to_string(),
             ));
         }
@@ -556,7 +556,7 @@ pub(crate) async fn update_instance_check(
     id: &str,
     status: &str,
     error: Option<&str>,
-) -> Result<ModelInstanceView, Stage3Error> {
+) -> Result<ModelInstanceView, DomainError> {
     let now = now_unix_secs();
     sqlx::query(
         r#"
@@ -615,18 +615,18 @@ fn model_instance_from_row(row: sqlx::sqlite::SqliteRow) -> ModelInstanceView {
     }
 }
 
-fn validate_optional_non_empty(field: &str, value: Option<&str>) -> Result<(), Stage3Error> {
+fn validate_optional_non_empty(field: &str, value: Option<&str>) -> Result<(), DomainError> {
     match value {
         Some(value) if !value.trim().is_empty() => Ok(()),
-        _ => Err(Stage3Error::BadRequest(format!("{field} is required"))),
+        _ => Err(DomainError::BadRequest(format!("{field} is required"))),
     }
 }
 
-fn validate_instance_deploy_type(value: &str) -> Result<(), Stage3Error> {
+fn validate_instance_deploy_type(value: &str) -> Result<(), DomainError> {
     super::validate_one_of("deploy_type", value, &["external", "local"])
 }
 
-fn validate_instance_status(value: &str) -> Result<(), Stage3Error> {
+fn validate_instance_status(value: &str) -> Result<(), DomainError> {
     super::validate_one_of(
         "status",
         value,
@@ -640,7 +640,7 @@ fn validate_instance_urls(
     base_url: &Option<String>,
     endpoint_url: &Option<String>,
     health_url: &Option<String>,
-) -> Result<(), Stage3Error> {
+) -> Result<(), DomainError> {
     for (field, value) in [
         ("base_url", base_url.as_deref()),
         ("endpoint_url", endpoint_url.as_deref()),
@@ -653,57 +653,57 @@ fn validate_instance_urls(
     Ok(())
 }
 
-fn validate_base_url_required(base_url: &Option<String>) -> Result<(), Stage3Error> {
+fn validate_base_url_required(base_url: &Option<String>) -> Result<(), DomainError> {
     match base_url.as_deref() {
         Some(value) if !value.trim().is_empty() => Ok(()),
-        _ => Err(Stage3Error::BadRequest("base_url is required".to_string())),
+        _ => Err(DomainError::BadRequest("base_url is required".to_string())),
     }
 }
 
-fn validate_http_url(field: &str, value: &str) -> Result<(), Stage3Error> {
+fn validate_http_url(field: &str, value: &str) -> Result<(), DomainError> {
     let parsed = reqwest::Url::parse(value).map_err(|_| {
-        Stage3Error::BadRequest(format!("{field} must be a valid http:// or https:// URL"))
+        DomainError::BadRequest(format!("{field} must be a valid http:// or https:// URL"))
     })?;
     match parsed.scheme() {
         "http" | "https" => Ok(()),
-        _ => Err(Stage3Error::BadRequest(format!(
+        _ => Err(DomainError::BadRequest(format!(
             "{field} must use http:// or https://"
         ))),
     }
 }
 
-fn parse_instance_params(value: Option<&str>) -> Result<serde_json::Value, Stage3Error> {
+fn parse_instance_params(value: Option<&str>) -> Result<serde_json::Value, DomainError> {
     let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
         return Ok(serde_json::json!({}));
     };
     let parsed = serde_json::from_str::<serde_json::Value>(value)
-        .map_err(|_| Stage3Error::BadRequest("params_json must be valid JSON".to_string()))?;
+        .map_err(|_| DomainError::BadRequest("params_json must be valid JSON".to_string()))?;
     if !parsed.is_object() {
-        return Err(Stage3Error::BadRequest(
+        return Err(DomainError::BadRequest(
             "runtime params must be a JSON object".to_string(),
         ));
     }
     if let Some(host) = parsed.get("host").and_then(|value| value.as_str()) {
         if host.trim().is_empty() || host.len() > 128 || host.chars().any(char::is_control) {
-            return Err(Stage3Error::BadRequest(
+            return Err(DomainError::BadRequest(
                 "invalid listen address".to_string(),
             ));
         }
     }
     if let Some(port) = parsed.get("port").and_then(|value| value.as_u64()) {
         if port == 0 || port > u16::MAX as u64 {
-            return Err(Stage3Error::BadRequest("invalid listen port".to_string()));
+            return Err(DomainError::BadRequest("invalid listen port".to_string()));
         }
     }
     if let Some(extra_args) = parsed.get("extra_args").and_then(|value| value.as_array()) {
         for arg in extra_args {
             let Some(arg) = arg.as_str() else {
-                return Err(Stage3Error::BadRequest(
+                return Err(DomainError::BadRequest(
                     "extra args must be one string per line".to_string(),
                 ));
             };
             if arg.trim().is_empty() || arg.len() > 256 || arg.chars().any(char::is_control) {
-                return Err(Stage3Error::BadRequest("invalid extra args".to_string()));
+                return Err(DomainError::BadRequest("invalid extra args".to_string()));
             }
         }
     }
@@ -713,7 +713,7 @@ fn parse_instance_params(value: Option<&str>) -> Result<serde_json::Value, Stage
 async fn verified_model_file_for_instance(
     pool: &SqlitePool,
     model_file_id: &str,
-) -> Result<InstanceModelFile, Stage3Error> {
+) -> Result<InstanceModelFile, DomainError> {
     let row = sqlx::query(
         r#"
         SELECT model_id, node_id, path, path_type, status
@@ -724,10 +724,10 @@ async fn verified_model_file_for_instance(
     .bind(model_file_id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| Stage3Error::BadRequest("model file does not exist".to_string()))?;
+    .ok_or_else(|| DomainError::BadRequest("model file does not exist".to_string()))?;
     let status: String = row.get("status");
     if status != "verified" {
-        return Err(Stage3Error::BadRequest(
+        return Err(DomainError::BadRequest(
             "local instance requires a verified model file".to_string(),
         ));
     }

@@ -98,18 +98,15 @@ Agent 在 `agent/src/tasks/mod.rs` 中分发以下任务：
 
 ## 数据库状态
 
-启动时 `server/src/db.rs` 会：
+启动时 `server/src/db.rs` 执行 SQL 迁移文件创建所有表：
 
-- 创建 SQLite parent directory，开启 WAL，并开启 SQLite foreign key 约束。
-- 执行 `0001_init.sql`、`0002_stage2_nodes.sql`、`0003_stage3a_models.sql`。
-- 创建 `nodes.name` 和 `nodes.hostname` 唯一索引。
-- 用幂等代码补齐 node status 配置字段、runtime endpoint 字段、model file `deleted_at/path_type`、instance process/log/command 字段、trash 字段等。
-- 创建 `agent_config_policies`、`audit_events`、`users`、`user_sessions`、`user_groups`、`user_group_members`、`platform_settings`。
+- `0001_init.sql`
+- `0002_stage2_nodes.sql` — 节点、node_status、gpu_status、指标采样表
+- `0003_stage3a_models.sql` — Runtime、Model、Model Instance、Model File、Agent Task、Trash 表
+- `0005_platform.sql` — 用户、session、用户组、审计、配置策略、平台设置、collector registry 表
+- 创建 `nodes.name` 和 `nodes.hostname` 唯一索引
 
-注意：
-
-- `migrations/0004_stage3a_corrections.sql` 是历史参考，不会自动执行。
-- 当前没有 migration ledger；新增表结构变更时不要只追加 SQL 文件并假设会运行。
+不兼容历史数据库。旧数据库删除后 Server 会自动创建最新 schema。
 
 ## 数据流
 
@@ -144,7 +141,7 @@ Server 判定在线使用 `ONLINE_THRESHOLD_SECS = 60`。
 - 新增/编辑 Model File 同样同步等待 Agent 验证。
 - `POST /api/model-files/{id}/verify` 创建异步验证任务，Model File 状态变为 `verify_pending`。
 - 验证只确认路径存在、基础类型和大小；不验证模型格式或推理可用性。
-- **Model 元数据字段约定**：API/Wire 字段统一为 `params_json`（与 Instance 一致），DB `models` 表列保持 `config_json`，Server 在 `model_from_row` 和 `create/update` 中做透明映射。`ModelRequest`/`ModelView` 同时保留 `config_json` 字段仅用于旧调用方兼容，新接口不应依赖 `config_json`。
+- API/Wire 和 DB 字段统一使用 `params_json`。
 
 ### Instance 生命周期
 
@@ -264,10 +261,6 @@ managed store 路径由 Agent state path 派生，形如 `agent-state.toml.manag
 - Instances 页面维护 external/local 实例，支持 Docker Runtime 的结构化覆盖参数。
 - Instances 页面每 15 秒刷新，过渡态操作后额外轮询稳定状态。
 - LogsAudit 页面读取平台日志、实例日志、前端错误摘要和审计事件。
-
-当前前后端差异：
-
-- Runtime 的 `params_json` 在 Server 内部存入 `runtime_environments.config_json`，返回时映射为 `params_json`；这是当前兼容实现。
 
 ## GPU Collector 架构（脚本化）
 
@@ -414,6 +407,5 @@ Agent systemd 示例应使用 `KillMode=process`。如果使用默认 `control-g
 - 不要把用户输入拼成 shell 命令。
 - 不要让 Server 直接删除节点文件。
 - 不要在 Agent 离线时把运行中实例自动改为 failed。
-- 修改 schema 前先处理 migration ledger 缺失问题，至少保持启动时幂等。
 - 新增 GPU collector 时，创建 collector 目录 + 脚本（collector.toml + discover.sh + metrics.sh），通过 Web 登记 registry。**不要写 Rust Collector**。
 - 未经验证的厂商 collector 不默认启用，不在文档中宣称已支持。

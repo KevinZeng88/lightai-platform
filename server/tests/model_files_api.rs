@@ -500,7 +500,7 @@ async fn model_file_trash_records_specific_node_file_path() {
         ),
         Some(json!({
             "reason": "manual cleanup later",
-            "note": "do not physically delete in Stage 3A"
+            "note": "trash with manual cleanup"
         })),
     )
     .await;

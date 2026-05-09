@@ -279,10 +279,10 @@ pub(crate) struct DockerVolumeMapping {
 
 // ── Payload parsing ──
 
+#[allow(dead_code)]
 pub(crate) fn parse_docker_payload(payload: &serde_json::Value) -> Result<DockerPayload, String> {
     let params = payload
-        .get("params")
-        .or_else(|| payload.get("params_json"))
+        .get("params_json")
         .unwrap_or(&serde_json::Value::Null);
     let parsed: serde_json::Value = if let Some(value) = params.as_str() {
         serde_json::from_str(value).unwrap_or(serde_json::Value::Null)
@@ -856,7 +856,7 @@ mod tests {
     #[test]
     fn parses_docker_payload_with_defaults_for_missing_fields() {
         let payload = json!({
-            "params": json!({
+            "params_json": json!({
                 "docker": {"image": "nginx:latest"},
                 "vllm": {}
             })

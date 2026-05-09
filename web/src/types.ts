@@ -134,7 +134,6 @@ export interface RuntimeEnvironment {
   working_dir?: string | null
   log_dir?: string | null
   allowed_model_dirs_json?: string | null
-  config_json?: string | null
   params_json?: string | null
   enabled: boolean
   last_checked_at?: number | null
@@ -152,7 +151,6 @@ export interface ModelDefinition {
   model_path?: string | null
   description?: string | null
   default_backend?: string | null
-  config_json?: string | null
   params_json?: string | null
   created_at: number
   updated_at: number

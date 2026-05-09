@@ -76,14 +76,6 @@ impl Config {
         Ok((Self::default(), ConfigSource::BuiltInDefault))
     }
 
-    /// Legacy load method — uses env var only, for backward compat in tests.
-    pub fn load() -> anyhow::Result<Self> {
-        match std::env::var("LIGHTAI_AGENT_CONFIG") {
-            Ok(path) if !path.trim().is_empty() => Self::from_file(path),
-            _ => Ok(Self::default()),
-        }
-    }
-
     pub fn from_file(path: impl AsRef<std::path::Path>) -> anyhow::Result<Self> {
         let content = std::fs::read_to_string(path.as_ref()).map_err(|e| {
             anyhow::anyhow!("cannot read config file '{}': {e}", path.as_ref().display())

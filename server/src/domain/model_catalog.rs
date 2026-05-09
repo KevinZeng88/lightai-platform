@@ -3,14 +3,14 @@ use uuid::Uuid;
 
 use super::{
     ensure_node_exists, map_sqlx_conflict, now_unix_secs, validate_backend, validate_json_field,
-    validate_model_type, validate_non_empty, validate_path, Stage3Error,
+    validate_model_type, validate_non_empty, validate_path, DomainError,
 };
 use crate::models::{ModelListResponse, ModelRequest, ModelView};
 
 pub async fn create_model(
     pool: &SqlitePool,
     request: ModelRequest,
-) -> Result<ModelView, Stage3Error> {
+) -> Result<ModelView, DomainError> {
     validate_non_empty("name", &request.name)?;
     validate_model_type(&request.model_type)?;
     if let Some(default_backend) = request.default_backend.as_deref() {
@@ -19,11 +19,10 @@ pub async fn create_model(
     if let Some(model_path) = request.model_path.as_deref() {
         validate_path("model_path", model_path)?;
     }
-    let model_params = request.params_json.or(request.config_json);
-    validate_json_field("params_json", model_params.as_deref())?;
+    validate_json_field("params_json", request.params_json.as_deref())?;
     let initial_file = request
         .initial_file
-        .ok_or_else(|| Stage3Error::BadRequest("initial_file is required".to_string()))?;
+        .ok_or_else(|| DomainError::BadRequest("initial_file is required".to_string()))?;
     validate_non_empty("initial_file.path", &initial_file.path)?;
     validate_path("initial_file.path", &initial_file.path)?;
     ensure_node_exists(pool, &initial_file.node_id).await?;
@@ -53,7 +52,7 @@ pub async fn create_model(
         r#"
         INSERT INTO models (
             id, name, display_name, model_type, model_path, description,
-            default_backend, config_json, created_at, updated_at
+            default_backend, params_json, created_at, updated_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
@@ -65,7 +64,7 @@ pub async fn create_model(
     .bind(request.model_path)
     .bind(request.description)
     .bind(request.default_backend)
-    .bind(model_params)
+    .bind(request.params_json)
     .bind(now)
     .bind(now)
     .execute(&mut *tx)
@@ -96,7 +95,7 @@ pub async fn create_model(
     model(pool, &id).await
 }
 
-pub async fn list_models(pool: &SqlitePool) -> Result<ModelListResponse, Stage3Error> {
+pub async fn list_models(pool: &SqlitePool) -> Result<ModelListResponse, DomainError> {
     let rows = sqlx::query("SELECT * FROM models WHERE deleted_at IS NULL ORDER BY name")
         .fetch_all(pool)
         .await?;
@@ -107,12 +106,12 @@ pub async fn list_models(pool: &SqlitePool) -> Result<ModelListResponse, Stage3E
     Ok(ModelListResponse { models })
 }
 
-pub async fn model(pool: &SqlitePool, id: &str) -> Result<ModelView, Stage3Error> {
+pub async fn model(pool: &SqlitePool, id: &str) -> Result<ModelView, DomainError> {
     let row = sqlx::query("SELECT * FROM models WHERE id = ?")
         .bind(id)
         .fetch_optional(pool)
         .await?
-        .ok_or_else(|| Stage3Error::NotFound("model not found".to_string()))?;
+        .ok_or_else(|| DomainError::NotFound("model not found".to_string()))?;
     model_from_row(pool, row).await
 }
 
@@ -120,7 +119,7 @@ pub async fn update_model(
     pool: &SqlitePool,
     id: &str,
     request: ModelRequest,
-) -> Result<ModelView, Stage3Error> {
+) -> Result<ModelView, DomainError> {
     validate_non_empty("name", &request.name)?;
     validate_model_type(&request.model_type)?;
     if let Some(default_backend) = request.default_backend.as_deref() {
@@ -129,8 +128,7 @@ pub async fn update_model(
     if let Some(model_path) = request.model_path.as_deref() {
         validate_path("model_path", model_path)?;
     }
-    let model_params = request.params_json.or(request.config_json);
-    validate_json_field("params_json", model_params.as_deref())?;
+    validate_json_field("params_json", request.params_json.as_deref())?;
 
     let running_instances: Vec<String> = sqlx::query_scalar(
         "SELECT name FROM model_instances WHERE model_id = ? AND status IN ('running', 'starting', 'stopping')",
@@ -139,7 +137,7 @@ pub async fn update_model(
     .fetch_all(pool)
     .await?;
     if !running_instances.is_empty() {
-        return Err(Stage3Error::Conflict(format!(
+        return Err(DomainError::Conflict(format!(
             "Model in use by running instance {}. Cannot modify. Stop the instance first.",
             running_instances.join(", ")
         )));
@@ -150,7 +148,7 @@ pub async fn update_model(
         r#"
         UPDATE models
         SET name = ?, display_name = ?, model_type = ?, model_path = ?,
-            description = ?, default_backend = ?, config_json = ?, updated_at = ?
+            description = ?, default_backend = ?, params_json = ?, updated_at = ?
         WHERE id = ? AND deleted_at IS NULL
         "#,
     )
@@ -160,7 +158,7 @@ pub async fn update_model(
     .bind(request.model_path)
     .bind(request.description)
     .bind(request.default_backend)
-    .bind(model_params)
+    .bind(request.params_json)
     .bind(now)
     .bind(id)
     .execute(pool)
@@ -168,12 +166,12 @@ pub async fn update_model(
     .map_err(map_sqlx_conflict)?;
 
     if result.rows_affected() == 0 {
-        return Err(Stage3Error::NotFound("model not found".to_string()));
+        return Err(DomainError::NotFound("model not found".to_string()));
     }
     model(pool, id).await
 }
 
-pub async fn delete_model(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error> {
+pub async fn delete_model(pool: &SqlitePool, id: &str) -> Result<(), DomainError> {
     let protected_count: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(*) FROM model_instances
@@ -184,7 +182,7 @@ pub async fn delete_model(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error
     .fetch_one(pool)
     .await?;
     if protected_count > 0 {
-        return Err(Stage3Error::Conflict(
+        return Err(DomainError::Conflict(
             "model has starting or running instances".to_string(),
         ));
     }
@@ -195,7 +193,7 @@ pub async fn delete_model(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error
             .fetch_optional(pool)
             .await?;
     if model_exists.is_none() {
-        return Err(Stage3Error::NotFound("model not found".to_string()));
+        return Err(DomainError::NotFound("model not found".to_string()));
     }
 
     let file_ids: Vec<String> = sqlx::query_scalar(
@@ -232,7 +230,7 @@ pub async fn delete_model(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error
     .execute(pool)
     .await?;
     if result.rows_affected() == 0 {
-        return Err(Stage3Error::NotFound("model not found".to_string()));
+        return Err(DomainError::NotFound("model not found".to_string()));
     }
     Ok(())
 }
@@ -240,7 +238,7 @@ pub async fn delete_model(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error
 async fn model_from_row(
     pool: &SqlitePool,
     row: sqlx::sqlite::SqliteRow,
-) -> Result<ModelView, Stage3Error> {
+) -> Result<ModelView, DomainError> {
     let id: String = row.get("id");
     let summary = super::model_files::model_file_summary(pool, &id).await?;
     Ok(ModelView {
@@ -251,8 +249,7 @@ async fn model_from_row(
         model_path: row.get("model_path"),
         description: row.get("description"),
         default_backend: row.get("default_backend"),
-        config_json: row.get("config_json"),
-        params_json: row.get("config_json"),
+        params_json: row.get("params_json"),
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
         deleted_at: row.get("deleted_at"),

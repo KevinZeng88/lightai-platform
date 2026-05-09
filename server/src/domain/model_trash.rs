@@ -2,7 +2,7 @@ use sqlx::{Row, SqlitePool};
 use tokio::time::{sleep, Duration, Instant};
 use uuid::Uuid;
 
-use super::{model_file, node_online, now_unix_secs, Stage3Error, MODEL_FILE_CLEANUP_TIMEOUT_SECS};
+use super::{model_file, node_online, now_unix_secs, DomainError, MODEL_FILE_CLEANUP_TIMEOUT_SECS};
 use crate::agent_tasks;
 use crate::models::{ModelFileTrashListResponse, ModelFileTrashRequest, ModelFileTrashView};
 
@@ -10,7 +10,7 @@ pub async fn create_model_file_trash(
     pool: &SqlitePool,
     model_file_id: &str,
     request: ModelFileTrashRequest,
-) -> Result<ModelFileTrashView, Stage3Error> {
+) -> Result<ModelFileTrashView, DomainError> {
     ensure_model_file_trash(pool, model_file_id, request.reason, request.note).await
 }
 
@@ -19,7 +19,7 @@ pub(super) async fn ensure_model_file_trash(
     model_file_id: &str,
     reason: Option<String>,
     note: Option<String>,
-) -> Result<ModelFileTrashView, Stage3Error> {
+) -> Result<ModelFileTrashView, DomainError> {
     if let Some(existing_id) = sqlx::query_scalar::<_, String>(
         "SELECT id FROM model_file_trash WHERE model_file_id = ? ORDER BY created_at DESC LIMIT 1",
     )
@@ -58,7 +58,7 @@ pub(super) async fn ensure_model_file_trash(
 
 pub async fn list_model_file_trash(
     pool: &SqlitePool,
-) -> Result<ModelFileTrashListResponse, Stage3Error> {
+) -> Result<ModelFileTrashListResponse, DomainError> {
     let rows = sqlx::query(
         r#"
         SELECT
@@ -85,19 +85,19 @@ pub async fn list_model_file_trash(
 pub async fn cleanup_model_file_trash(
     pool: &SqlitePool,
     id: &str,
-) -> Result<ModelFileTrashView, Stage3Error> {
+) -> Result<ModelFileTrashView, DomainError> {
     let item = model_file_trash_item(pool, id).await?;
     let node_id = item
         .node_id
         .clone()
-        .ok_or_else(|| Stage3Error::BadRequest("trash item has no node".to_string()))?;
+        .ok_or_else(|| DomainError::BadRequest("trash item has no node".to_string()))?;
     if item.file_deleted_at.is_some() {
         return Ok(item);
     }
     if !node_online(pool, &node_id).await? {
         let message = "Node Agent offline, cannot clean up file";
         update_trash_failure(pool, id, "cleanup_failed", message).await?;
-        return Err(Stage3Error::Conflict(message.to_string()));
+        return Err(DomainError::Conflict(message.to_string()));
     }
 
     let task_id = Uuid::new_v4().to_string();
@@ -138,13 +138,13 @@ pub async fn cleanup_model_file_trash(
     wait_for_model_file_cleanup(pool, id, &task_id).await
 }
 
-pub async fn delete_model_file_trash(pool: &SqlitePool, id: &str) -> Result<(), Stage3Error> {
+pub async fn delete_model_file_trash(pool: &SqlitePool, id: &str) -> Result<(), DomainError> {
     let result = sqlx::query("DELETE FROM model_file_trash WHERE id = ?")
         .bind(id)
         .execute(pool)
         .await?;
     if result.rows_affected() == 0 {
-        return Err(Stage3Error::NotFound("trash item not found".to_string()));
+        return Err(DomainError::NotFound("trash item not found".to_string()));
     }
     Ok(())
 }
@@ -152,7 +152,7 @@ pub async fn delete_model_file_trash(pool: &SqlitePool, id: &str) -> Result<(), 
 async fn model_file_trash_item(
     pool: &SqlitePool,
     id: &str,
-) -> Result<ModelFileTrashView, Stage3Error> {
+) -> Result<ModelFileTrashView, DomainError> {
     let row = sqlx::query(
         r#"
         SELECT
@@ -172,7 +172,7 @@ async fn model_file_trash_item(
     .bind(id)
     .fetch_optional(pool)
     .await?
-    .ok_or_else(|| Stage3Error::NotFound("trash item not found".to_string()))?;
+    .ok_or_else(|| DomainError::NotFound("trash item not found".to_string()))?;
     Ok(model_file_trash_from_row(row))
 }
 
@@ -180,7 +180,7 @@ async fn wait_for_model_file_cleanup(
     pool: &SqlitePool,
     trash_id: &str,
     task_id: &str,
-) -> Result<ModelFileTrashView, Stage3Error> {
+) -> Result<ModelFileTrashView, DomainError> {
     let deadline = Instant::now() + Duration::from_secs(MODEL_FILE_CLEANUP_TIMEOUT_SECS);
     loop {
         let row =
@@ -204,10 +204,10 @@ async fn wait_for_model_file_cleanup(
                     })
                     .or_else(|| row.get::<Option<String>, _>("error_message"))
                     .unwrap_or_else(|| "File cleanup failed".to_string());
-                return Err(Stage3Error::Conflict(message));
+                return Err(DomainError::Conflict(message));
             }
             "timed_out" => {
-                return Err(Stage3Error::Conflict(
+                return Err(DomainError::Conflict(
                     "file cleanup timed out; confirm Agent is online and retry".to_string(),
                 ));
             }
@@ -218,7 +218,7 @@ async fn wait_for_model_file_cleanup(
             agent_tasks::mark_task_timed_out(pool, task_id).await?;
             update_trash_failure(pool, trash_id, "cleanup_timeout", "file cleanup timed out")
                 .await?;
-            return Err(Stage3Error::Conflict(
+            return Err(DomainError::Conflict(
                 "file cleanup timed out; confirm Agent is online and retry".to_string(),
             ));
         }
@@ -231,7 +231,7 @@ pub(crate) async fn update_trash_failure(
     trash_id: &str,
     status: &str,
     message: &str,
-) -> Result<(), Stage3Error> {
+) -> Result<(), DomainError> {
     sqlx::query(
         "UPDATE model_file_trash SET status = ?, last_error = ?, updated_at = ? WHERE id = ?",
     )

@@ -12,7 +12,7 @@ use common::*;
 
 #[tokio::test]
 async fn register_node_reuses_node_id_for_same_name_and_hostname() {
-    let (pool, app) = stage2_test_app().await;
+    let (app, pool) = test_app_with_pool().await;
     let first = register_node_json(app.clone()).await;
     let first_id = first["node_id"].as_str().unwrap();
     let first_token = first["agent_token"].as_str().unwrap();
@@ -53,7 +53,7 @@ async fn register_with_name_hostname(
 
 #[tokio::test]
 async fn register_node_rejects_same_name_different_hostname() {
-    let (_pool, app) = stage2_test_app().await;
+    let (app, _pool) = test_app_with_pool().await;
     // Register node-a @ gpu-node-a
     let (status1, _) = register_with_name_hostname(app.clone(), "node-a", "gpu-node-a").await;
     assert_eq!(status1, StatusCode::OK);
@@ -68,7 +68,7 @@ async fn register_node_rejects_same_name_different_hostname() {
 
 #[tokio::test]
 async fn register_node_rejects_different_name_same_hostname() {
-    let (_pool, app) = stage2_test_app().await;
+    let (app, _pool) = test_app_with_pool().await;
     // Register node-a @ gpu-node-a
     let (status1, _) = register_with_name_hostname(app.clone(), "node-a", "gpu-node-a").await;
     assert_eq!(status1, StatusCode::OK);
@@ -83,7 +83,7 @@ async fn register_node_rejects_different_name_same_hostname() {
 
 #[tokio::test]
 async fn register_node_creates_new_node_for_different_name() {
-    let (_pool, app) = stage2_test_app().await;
+    let (app, _pool) = test_app_with_pool().await;
     let first = register_node_json(app.clone()).await;
     let second = register_second_node_json(app.clone()).await;
     assert_ne!(second["node_id"], first["node_id"]);
@@ -93,7 +93,7 @@ async fn register_node_creates_new_node_for_different_name() {
 
 #[tokio::test]
 async fn nodes_name_unique_constraint_rejects_duplicate_name() {
-    let (_pool, app) = stage2_test_app().await;
+    let (app, _pool) = test_app_with_pool().await;
     let (s1, _) = register_with_name_hostname(app.clone(), "agent-1", "host-a").await;
     assert_eq!(s1, StatusCode::OK);
     // Same name different hostname → rejected by UNIQUE(name) constraint
@@ -107,7 +107,7 @@ async fn nodes_name_unique_constraint_rejects_duplicate_name() {
 
 #[tokio::test]
 async fn nodes_hostname_unique_constraint_rejects_duplicate_hostname() {
-    let (_pool, app) = stage2_test_app().await;
+    let (app, _pool) = test_app_with_pool().await;
     let (s1, _) = register_with_name_hostname(app.clone(), "agent-1", "host-a").await;
     assert_eq!(s1, StatusCode::OK);
     // Same hostname different name → rejected by UNIQUE(hostname) constraint
@@ -121,7 +121,7 @@ async fn nodes_hostname_unique_constraint_rejects_duplicate_hostname() {
 
 #[tokio::test]
 async fn register_node_idempotent_same_name_and_hostname() {
-    let (_pool, app) = stage2_test_app().await;
+    let (app, _pool) = test_app_with_pool().await;
     let (s1, first) = register_with_name_hostname(app.clone(), "agent-1", "host-a").await;
     assert_eq!(s1, StatusCode::OK);
     // Re-registration → reuse node_id, update token
@@ -137,7 +137,7 @@ async fn register_node_idempotent_same_name_and_hostname() {
 
 #[tokio::test]
 async fn register_node_recovers_from_unique_constraint_on_concurrent_same_node() {
-    let (pool, app) = stage2_test_app().await;
+    let (app, pool) = test_app_with_pool().await;
     // Simulate concurrency: insert row occupying name+hostname, then register_node should reuse that node_id
     let preexisting_id = uuid::Uuid::new_v4().to_string();
     sqlx::query(

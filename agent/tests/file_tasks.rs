@@ -96,7 +96,7 @@ async fn script_instance_starts_with_argv_and_can_be_stopped() {
         "deploy_type": "script",
         "binary_path": script.to_str().unwrap(),
         "model_path": model.to_str().unwrap(),
-        "params": {
+        "params_json": {
             "host": "127.0.0.1",
             "port": 19091,
             "extra_args": ["--flag", "value"]
@@ -134,7 +134,7 @@ async fn managed_instance_start_persists_process_reference_for_restart_recovery(
         "deploy_type": "script",
         "binary_path": script.to_str().unwrap(),
         "model_path": model.to_str().unwrap(),
-        "params": {
+        "params_json": {
             "host": "127.0.0.1",
             "port": 19094
         }
@@ -246,7 +246,7 @@ async fn failed_instance_start_returns_stderr_and_command_summary() {
         "deploy_type": "binary",
         "binary_path": script.to_str().unwrap(),
         "model_path": model.to_str().unwrap(),
-        "params": {
+        "params_json": {
             "host": "127.0.0.1",
             "port": 19092
         }
@@ -293,7 +293,7 @@ async fn failed_instance_start_writes_stderr_to_controlled_log_dir() {
         "binary_path": script.to_str().unwrap(),
         "model_path": model.to_str().unwrap(),
         "log_dir": log_dir.to_str().unwrap(),
-        "params": {
+        "params_json": {
             "host": "127.0.0.1",
             "port": 19093
         }

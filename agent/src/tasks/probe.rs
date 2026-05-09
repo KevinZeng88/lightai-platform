@@ -46,8 +46,7 @@ impl Default for ProbeConfig {
 impl ProbeConfig {
     pub(crate) fn from_payload(payload: &serde_json::Value) -> Self {
         let params = payload
-            .get("params")
-            .or_else(|| payload.get("params_json"))
+            .get("params_json")
             .unwrap_or(&serde_json::Value::Null);
         let parsed = if let Some(value) = params.as_str() {
             serde_json::from_str::<serde_json::Value>(value).unwrap_or(serde_json::Value::Null)

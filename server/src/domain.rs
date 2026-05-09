@@ -29,7 +29,7 @@ pub use runtimes::{
     check_runtime_environment, create_runtime_environment, delete_runtime_environment,
     list_runtime_environments, runtime_environment, update_runtime_environment,
 };
-pub use support::Stage3Error;
+pub use support::DomainError;
 
 pub(crate) use instances::update_instance_check;
 pub(crate) use model_trash::update_trash_failure;

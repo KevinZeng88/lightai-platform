@@ -203,36 +203,11 @@ fn parse_linux_stat_start_time(stat: &str) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::parse_linux_stat_start_time;
-    use super::ManagedProcessRecord;
 
     #[test]
     fn parses_linux_proc_stat_start_time() {
         let stat = "123 (cmd with space) S 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 987654 20";
 
         assert_eq!(parse_linux_stat_start_time(stat), Some(987654));
-    }
-
-    #[test]
-    fn managed_record_backward_compat_without_docker_fields() {
-        let old_json = r#"{
-            "instance_id": "inst-1",
-            "process_id": 12345,
-            "process_start_time": 987654,
-            "base_url": "http://127.0.0.1:18080",
-            "endpoint_url": "http://127.0.0.1:18080",
-            "command": "[\"/usr/local/bin/llama-server\",\"-m\",\"/models/test.gguf\"]",
-            "log_path": "/tmp/instance.log",
-            "started_at": 1700000000
-        }"#;
-        let record: ManagedProcessRecord = serde_json::from_str(old_json).unwrap();
-        assert_eq!(record.instance_id, "inst-1");
-        assert_eq!(record.process_id, 12345);
-        assert_eq!(record.process_start_time, Some(987654));
-        assert_eq!(record.base_url.as_deref(), Some("http://127.0.0.1:18080"));
-        assert!(record.container_id.is_none());
-        assert!(record.container_name.is_none());
-        assert!(record.deploy_type.is_none());
-        // Old local record should NOT be treated as Docker
-        assert_ne!(record.deploy_type.as_deref(), Some("docker"));
     }
 }

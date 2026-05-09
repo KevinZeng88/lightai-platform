@@ -72,11 +72,10 @@ web/src/
 ## 数据库与迁移
 
 - `migrations/0001_init.sql` 是占位。
-- `0002_stage2_nodes.sql` 创建节点、当前指标和历史指标表。
-- `0003_stage3a_models.sql` 创建 Runtime、Model、Model Instance、Model File、Agent Task、Trash 基础表。
-- `0004_stage3a_corrections.sql` 是历史修正参考，不由 `db.rs` 自动执行。
-- `server/src/db.rs` 启动时执行 0001-0003，开启 foreign key 约束，并用代码内幂等逻辑补齐后续表/列、唯一索引、审计表、用户/用户组/会话表、配置策略表和平台设置表。
-- 当前没有正式 migration ledger，新增 schema 变更需要谨慎设计幂等升级路径。
+- `0002_stage2_nodes.sql` — 节点、node_status（含所有配置字段）、gpu_status、指标采样表。
+- `0003_stage3a_models.sql` — Runtime、Model、Model Instance、Model File、Agent Task、Trash 表。
+- `0005_platform.sql` — 用户、session、用户组、审计、配置策略、平台设置、collector registry 表。
+- `server/src/db.rs` 启动时按序执行上述 SQL 文件并创建唯一索引。不兼容历史数据库，旧数据库删除后重建。
 
 ## 已知限制和风险
 
@@ -99,8 +98,7 @@ web/src/
 ## 后续建议优先级
 
 1. 在真实 NVIDIA GPU 环境验证脚本 collector + Docker vLLM 端到端：登记 collector、创建 Runtime、模型目录、实例启动、健康检查、日志、停止、Agent 重启恢复、异常退出诊断。
-2. 引入正式 migration ledger 或明确 schema 版本策略，减少 `db.rs` 中不断追加的修正逻辑。
-3. 缩短受管进程异常退出到 Server/Web 的同步延迟，例如心跳携带更明确的退出事件或任务结果。
+2. 缩短受管进程异常退出到 Server/Web 的同步延迟，例如心跳携带更明确的退出事件或任务结果。
 4. 增加历史指标清理和基础聚合，避免 SQLite 长期膨胀。
 5. 在本地运行层稳定后，再推进统一模型调用入口、API Key 和用量统计。
 

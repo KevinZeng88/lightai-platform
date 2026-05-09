@@ -1,6 +1,6 @@
 use std::net::SocketAddr;
 
-use lightai_server::{config::Config, db, platform_log, repository, routes};
+use lightai_server::{config::Config, db, history_cleanup, platform_log, repository, routes};
 
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -17,8 +17,10 @@ listen_addr = "0.0.0.0:10080"
 url = "sqlite://./data/lightai.db"
 
 [metrics]
-# Number of days to retain historical metric samples.
+# Days of historical metric samples to retain (minimum 1).
 retention_days = 7
+# How often to run the cleanup task, in hours (minimum 1).
+cleanup_interval_hours = 6
 
 # ── Authentication ──
 [auth.password]
@@ -163,6 +165,11 @@ async fn main() -> anyhow::Result<()> {
     platform_log::append(&config.log_policy, "server.log", "info", "Server starting").await?;
     let listen_addr: SocketAddr = config.listen_addr.parse()?;
     let pool = db::connect(&config.database_url).await?;
+    history_cleanup::spawn_cleanup_task(
+        pool.clone(),
+        config.metrics_retention_days,
+        config.history_cleanup_interval_hours,
+    );
     let listener = tokio::net::TcpListener::bind(listen_addr).await?;
 
     tracing::info!(
@@ -170,6 +177,7 @@ async fn main() -> anyhow::Result<()> {
         listen_addr = %listen_addr,
         database_url = %config.database_url,
         metrics_retention_days = config.metrics_retention_days,
+        history_cleanup_interval_hours = config.history_cleanup_interval_hours,
         "starting lightai server"
     );
 

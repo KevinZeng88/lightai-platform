@@ -146,8 +146,6 @@ Agent 本地 TOML 主要是 bootstrap：Server 地址、节点名、监听地址
 部分完成：
 
 - Docker/vLLM 后端已有实现和测试，但仍缺真实 GPU 环境端到端验证。
-- 模型元数据 UI 已有表单，但前后端字段尚未统一，兼容性判断不能作为强约束依据。
-- SQLite schema 有迁移 SQL 和代码内幂等修正，但还没有正式 migration ledger。
 
 当前阶段暂未实现，作为后续阶段目标保留：
 

@@ -651,8 +651,3 @@ pub async fn register_with_name_hostname(
     )
     .await
 }
-
-pub async fn stage2_test_app() -> (sqlx::SqlitePool, axum::Router) {
-    let (app, pool) = test_app_with_pool().await;
-    (pool, app)
-}
