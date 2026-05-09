@@ -25,10 +25,19 @@
               @keyup.enter="submitSetup"
             />
           </el-form-item>
+          <el-form-item label="确认密码">
+            <el-input
+              v-model="setupForm.confirmPassword"
+              type="password"
+              show-password
+              autocomplete="new-password"
+              @keyup.enter="submitSetup"
+            />
+          </el-form-item>
           <el-button
             type="primary"
             :loading="authLoading"
-            :disabled="!setupForm.username.trim() || !setupForm.password"
+            :disabled="!setupForm.username.trim() || !setupForm.password || !setupForm.confirmPassword"
             @click="submitSetup"
           >
             创建管理员
@@ -148,9 +157,6 @@
         <el-tab-pane label="日志审计" name="logs">
           <LogsAuditPanel ref="logsPanel" :role="currentUser.effective_role" />
         </el-tab-pane>
-        <el-tab-pane label="采集器登记" name="collectors">
-          <CollectorRegistryPanel ref="collectorsPanel" :role="currentUser.effective_role" />
-        </el-tab-pane>
         <el-tab-pane v-if="currentUser.effective_role === 'admin'" label="用户与组" name="users">
           <UsersPanel ref="usersPanel" />
         </el-tab-pane>
@@ -170,7 +176,6 @@ import NodesPanel from './components/NodesPanel.vue'
 import RuntimeEnvironmentsPanel from './components/RuntimeEnvironmentsPanel.vue'
 import TrashPanel from './components/TrashPanel.vue'
 import LogsAuditPanel from './components/LogsAuditPanel.vue'
-import CollectorRegistryPanel from './components/CollectorRegistryPanel.vue'
 import UsersPanel from './components/UsersPanel.vue'
 import {
   changePassword,
@@ -194,7 +199,8 @@ const loginForm = ref({
 })
 const setupForm = ref({
   username: 'admin',
-  password: ''
+  password: '',
+  confirmPassword: ''
 })
 const passwordForm = ref({
   currentPassword: '',
@@ -208,7 +214,6 @@ const modelsPanel = ref<InstanceType<typeof ModelsPanel> | null>(null)
 const instancesPanel = ref<InstanceType<typeof InstancesPanel> | null>(null)
 const trashPanel = ref<InstanceType<typeof TrashPanel> | null>(null)
 const logsPanel = ref<InstanceType<typeof LogsAuditPanel> | null>(null)
-const collectorsPanel = ref<InstanceType<typeof CollectorRegistryPanel> | null>(null)
 const usersPanel = ref<InstanceType<typeof UsersPanel> | null>(null)
 
 function refreshActiveTab(name: string | number) {
@@ -220,7 +225,6 @@ function refreshActiveTab(name: string | number) {
     instances: instancesPanel.value?.refresh,
     trash: trashPanel.value?.refresh,
     logs: logsPanel.value?.refresh,
-    collectors: collectorsPanel.value?.refresh,
     users: usersPanel.value?.refresh
   }
   void refreshers[String(name)]?.()
@@ -252,8 +256,13 @@ async function submitSetup() {
   authLoading.value = true
   authMessage.value = ''
   try {
+    if (setupForm.value.password !== setupForm.value.confirmPassword) {
+      authMessage.value = '两次输入的密码不一致'
+      return
+    }
     currentUser.value = await setupAdmin(setupForm.value.username, setupForm.value.password)
     setupForm.value.password = ''
+    setupForm.value.confirmPassword = ''
     setupRequired.value = false
     refreshActiveTab(activeTab.value)
   } catch (error) {

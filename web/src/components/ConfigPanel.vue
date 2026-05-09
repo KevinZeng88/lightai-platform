@@ -1,8 +1,8 @@
 <template>
   <section class="panel-header">
     <div>
-      <h2>Agent 配置</h2>
-      <p>全局默认填写具体默认值；节点级覆盖按节点配置，空值继承全局，有值覆盖全局。</p>
+      <h2>平台配置</h2>
+      <p>全局 Agent 策略、节点覆盖、采集器登记、历史指标清理等配置。</p>
     </div>
     <el-button :loading="loading" type="primary" @click="loadData">刷新</el-button>
   </section>
@@ -16,61 +16,72 @@
     class="alert"
   />
 
-  <el-alert
-    title="GPU 采集只通过 Agent 本地 [gpu_collectors] 脚本目录和 Server registry/hash 校验启用；本页只配置在线策略，不下发任意采集脚本路径。"
-    type="info"
-    show-icon
-    class="alert"
-  />
+  <el-collapse v-model="activeCollapse" class="config-collapse">
+    <!-- 全局默认策略 -->
+    <el-collapse-item title="全局默认策略" name="global">
+      <el-form label-width="170px" class="config-form">
+        <PolicyFields v-model="globalForm" :allow-inherit="false" />
+        <el-form-item>
+          <el-button v-if="role === 'admin'" type="primary" :loading="savingGlobal" @click="saveGlobal">保存全局策略</el-button>
+          <span class="muted">版本：{{ policies?.global.version ?? '-' }}</span>
+        </el-form-item>
+      </el-form>
+    </el-collapse-item>
 
-  <el-card shadow="never" class="section-card">
-    <template #header>全局默认策略</template>
-    <el-form label-width="170px" class="config-form">
-      <PolicyFields v-model="globalForm" :allow-inherit="false" />
-      <el-form-item>
-        <el-button v-if="role === 'admin'" type="primary" :loading="savingGlobal" @click="saveGlobal">保存全局策略</el-button>
-        <span class="muted">版本：{{ policies?.global.version ?? '-' }}</span>
+    <!-- 节点覆盖策略 -->
+    <el-collapse-item title="节点覆盖策略" name="node">
+      <el-form-item label="选择节点" label-width="100px">
+        <el-select v-model="selectedNodeId" filterable placeholder="选择节点" class="node-config-select">
+          <el-option v-for="node in nodes" :key="node.id" :label="node.name" :value="node.id" />
+        </el-select>
       </el-form-item>
-    </el-form>
-  </el-card>
 
-  <el-card shadow="never" class="section-card">
-    <template #header>选择节点</template>
-    <el-select v-model="selectedNodeId" filterable placeholder="选择节点" class="node-config-select">
-      <el-option v-for="node in nodes" :key="node.id" :label="node.name" :value="node.id" />
-    </el-select>
-  </el-card>
+      <template v-if="selectedNode">
+        <el-form label-width="170px" class="config-form">
+          <PolicyFields v-model="nodeForm" :allow-inherit="true" />
+          <el-form-item>
+            <el-button v-if="role === 'admin'" type="primary" :loading="savingNode" @click="saveNode">保存节点覆盖</el-button>
+            <span class="muted">留空表示继承全局默认；保存后 Agent 会通过主动控制通道获取最新有效配置。</span>
+          </el-form-item>
+        </el-form>
 
-  <el-card v-if="selectedNode" shadow="never" class="section-card">
-    <template #header>节点覆盖策略 · {{ selectedNode.name }}</template>
-    <el-form label-width="170px" class="config-form">
-      <PolicyFields v-model="nodeForm" :allow-inherit="true" />
-      <el-form-item>
-        <el-button v-if="role === 'admin'" type="primary" :loading="savingNode" @click="saveNode">保存节点覆盖</el-button>
-        <span class="muted">留空表示继承全局默认；保存后 Agent 会通过主动控制通道获取最新有效配置。</span>
-      </el-form-item>
-    </el-form>
-  </el-card>
+        <h4>最终生效配置 · {{ selectedNode.name }}</h4>
+        <div class="detail-grid">
+          <div><span class="muted">同步状态</span><p>{{ syncLabel(selectedNode.config_sync_status) }}</p></div>
+          <div><span class="muted">生效版本</span><p>{{ selectedNode.effective_agent_config.config_version }}</p></div>
+          <div><span class="muted">Agent 上报版本</span><p>{{ selectedNode.agent_config?.config_version ?? '-' }}</p></div>
+          <div><span class="muted">心跳 / 采样</span><p>{{ selectedNode.effective_agent_config.heartbeat_interval_secs }}s / {{ selectedNode.effective_agent_config.metrics_sample_interval_secs }}s</p></div>
+          <div><span class="muted">命令 / 环境检查</span><p>{{ selectedNode.effective_agent_config.command_timeout_secs }}s / {{ selectedNode.effective_agent_config.environment_check_timeout_secs }}s</p></div>
+          <div class="wide-detail"><span class="muted">Allowed dirs</span><p>{{ selectedNode.effective_agent_config.allowed_model_dirs.join(', ') || '未配置' }}</p></div>
+          <div><span class="muted">日志级别</span><p>{{ selectedNode.effective_agent_config.log_level }}</p></div>
+          <div class="wide-detail"><span class="muted">日志目录</span><p>{{ selectedNode.effective_agent_config.log_dir }}</p></div>
+          <div><span class="muted">日志轮转</span><p>{{ selectedNode.effective_agent_config.log_max_file_bytes }} bytes / {{ selectedNode.effective_agent_config.log_retention_files }} 个 / {{ selectedNode.effective_agent_config.log_retention_days }} 天</p></div>
+        </div>
+      </template>
+    </el-collapse-item>
 
-  <el-card v-if="selectedNode" shadow="never" class="section-card">
-    <template #header>最终生效配置与同步状态 · {{ selectedNode.name }}</template>
-    <div class="detail-grid">
-      <div><span class="muted">同步状态</span><p>{{ syncLabel(selectedNode.config_sync_status) }}</p></div>
-      <div><span class="muted">生效版本</span><p>{{ selectedNode.effective_agent_config.config_version }}</p></div>
-      <div><span class="muted">Agent 上报版本</span><p>{{ selectedNode.agent_config?.config_version ?? '-' }}</p></div>
-      <div><span class="muted">心跳 / 采样</span><p>{{ selectedNode.effective_agent_config.heartbeat_interval_secs }}s / {{ selectedNode.effective_agent_config.metrics_sample_interval_secs }}s</p></div>
-      <div><span class="muted">命令 / 环境检查</span><p>{{ selectedNode.effective_agent_config.command_timeout_secs }}s / {{ selectedNode.effective_agent_config.environment_check_timeout_secs }}s</p></div>
-      <div class="wide-detail"><span class="muted">Allowed dirs</span><p>{{ selectedNode.effective_agent_config.allowed_model_dirs.join(', ') || '未配置' }}</p></div>
-      <div><span class="muted">日志级别</span><p>{{ selectedNode.effective_agent_config.log_level }}</p></div>
-      <div class="wide-detail"><span class="muted">日志目录</span><p>{{ selectedNode.effective_agent_config.log_dir }}</p></div>
-      <div><span class="muted">日志轮转</span><p>{{ selectedNode.effective_agent_config.log_max_file_bytes }} bytes / {{ selectedNode.effective_agent_config.log_retention_files }} 个 / {{ selectedNode.effective_agent_config.log_retention_days }} 天</p></div>
-    </div>
-  </el-card>
+    <!-- 采集器登记 -->
+    <el-collapse-item title="采集器登记" name="collectors">
+      <CollectorRegistryPanel :role="role" />
+    </el-collapse-item>
+
+    <!-- 角色与权限说明 -->
+    <el-collapse-item title="角色与权限说明" name="roles">
+      <el-table :data="roleDescriptions" border size="small">
+        <el-table-column prop="role" label="角色" width="180" />
+        <el-table-column prop="desc" label="权限说明" />
+      </el-table>
+      <el-alert
+        title="当前 MVP 使用固定三角色，暂不支持自定义角色。后续如需扩展权限模型，将结合 API Key、租户和计费统一设计。"
+        type="info"
+        show-icon
+        class="alert"
+      />
+    </el-collapse-item>
+  </el-collapse>
 </template>
 
 <script setup lang="ts">
-defineProps<{ role: string }>()
-
 import { computed, defineComponent, h, onMounted, ref, watch } from 'vue'
 import { ElFormItem } from 'element-plus/es/components/form/index'
 import { ElInput } from 'element-plus/es/components/input/index'
@@ -83,6 +94,17 @@ import {
   updateNodeAgentConfigPolicy
 } from '../api'
 import type { AgentConfigPoliciesResponse, AgentConfigPolicy, NodeStatus } from '../types'
+import CollectorRegistryPanel from './CollectorRegistryPanel.vue'
+
+const props = defineProps<{ role: string }>()
+
+const activeCollapse = ref(['global'])
+
+const roleDescriptions = [
+  { role: '管理员 admin', desc: '拥有系统管理权限，可管理用户、用户组、Agent 配置、collector registry、Trash 物理清理、模型、Runtime、实例、审计等全部能力。' },
+  { role: '运维 operator', desc: '负责日常运维操作，可管理模型、Runtime、实例启停、状态检查和日志查看，但不能管理用户和关键系统设置。' },
+  { role: '只读 viewer', desc: '只读查看节点、GPU、模型、Runtime、实例、日志和配置摘要，不执行写操作。' },
+]
 
 const emptyPolicy = (): AgentConfigPolicy => ({
   heartbeat_interval_secs: null,
@@ -257,13 +279,30 @@ function syncLabel(status: string) {
   return '待上报'
 }
 
-function syncType(status: string) {
-  if (status === 'synced') return 'success'
-  if (status === 'out_of_sync') return 'warning'
-  return 'info'
-}
-
 watch(selectedNodeId, syncNodeForm)
 onMounted(loadData)
 defineExpose({ refresh: loadData })
 </script>
+
+<style scoped>
+.config-collapse {
+  margin-top: 12px;
+}
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
+  gap: 8px 16px;
+  margin-top: 12px;
+}
+.wide-detail {
+  grid-column: span 2;
+}
+.muted {
+  color: #909399;
+  font-size: 12px;
+}
+h4 {
+  margin-top: 16px;
+  margin-bottom: 8px;
+}
+</style>

@@ -15,7 +15,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen_addr: "0.0.0.0:10080".to_string(),
+            listen_addr: "0.0.0.0:18080".to_string(),
             database_url: "sqlite://./data/lightai.db".to_string(),
             web_dist_dir: None,
             metrics_retention_days: 7,

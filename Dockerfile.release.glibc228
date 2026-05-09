@@ -1,0 +1,25 @@
+# Build environment for glibc 2.28 compatible release binaries.
+# Target: RHEL 8 / Rocky Linux 8 / AlmaLinux 8 and newer.
+#
+# Usage (via wrapper):
+#   bash scripts/package-release-docker.sh v0.1.0
+
+FROM rockylinux:8
+
+# Install C/C++ build toolchain (for libsqlite3-sys bundled, ring, aws-lc-rs).
+RUN dnf install -y --setopt=install_weak_deps=0 \
+        gcc gcc-c++ make cmake curl ca-certificates && \
+    dnf clean all
+
+# Install Rust (stable).
+ENV RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
+ENV PATH="${CARGO_HOME}/bin:${PATH}"
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --default-toolchain stable --profile default
+
+# Install Node.js 20 LTS (Rocky 8 AppStream module).
+RUN dnf module enable -y nodejs:20 && \
+    dnf install -y --setopt=install_weak_deps=0 nodejs npm && \
+    dnf clean all
+
+WORKDIR /build

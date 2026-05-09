@@ -1,13 +1,13 @@
 [server]
 # Listen address.  Use 0.0.0.0 to accept external connections.
 # This is the control-plane port — deploy behind firewall/VPN/HTTPS reverse proxy in production.
-listen_addr = "0.0.0.0:10080"
+listen_addr = "0.0.0.0:18080"
 
 [web]
-# Optional: directory containing web frontend static files (web/dist).
-# When set, the server serves the Web console at the root path.
-# When omitted or commented out, static file serving is disabled.
-# dist_dir = "web/dist"
+# Directory containing web frontend static files (web/dist).
+# Server serves the Web console at the root path when set.
+# Comment out to disable static file serving.
+dist_dir = "web/dist"
 
 [database]
 # SQLite database path.  Relative paths are resolved against the process CWD.

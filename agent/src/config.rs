@@ -24,8 +24,8 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen_addr: "127.0.0.1:10081".to_string(),
-            server_url: "http://127.0.0.1:10080".to_string(),
+            listen_addr: "127.0.0.1:18081".to_string(),
+            server_url: "http://127.0.0.1:18080".to_string(),
             node_name: hostname(),
             state_path: "data/agent-state.toml".to_string(),
             collector_root: Some("./collectors/gpu".to_string()),
@@ -172,10 +172,10 @@ pub const CONFIG_TEMPLATE: &str = r#"# LightAI Agent configuration.
 
 [agent]
 # Agent local listen address.
-listen_addr = "127.0.0.1:10081"
+listen_addr = "127.0.0.1:18081"
 
 # LightAI Server URL.
-server_url = "http://127.0.0.1:10080"
+server_url = "http://127.0.0.1:18080"
 
 # Node name.  Defaults to hostname if omitted or empty.
 # node_name = "gpu-node-01"
@@ -268,7 +268,7 @@ disabled = ["example-disabled"]
     #[test]
     fn config_template_parses() {
         let config = Config::from_toml(CONFIG_TEMPLATE).unwrap();
-        assert_eq!(config.listen_addr, "127.0.0.1:10081");
+        assert_eq!(config.listen_addr, "127.0.0.1:18081");
         assert_eq!(config.collector_root.as_deref(), Some("./collectors/gpu"));
     }
 
@@ -342,7 +342,7 @@ disabled = ["example-disabled"]
         let (config, source) = Config::load_with_priority(None).unwrap();
         assert_eq!(source, ConfigSource::BuiltInDefault);
         // defaults
-        assert_eq!(config.listen_addr, "127.0.0.1:10081");
+        assert_eq!(config.listen_addr, "127.0.0.1:18081");
     }
 
     #[test]

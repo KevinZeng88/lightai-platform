@@ -26,7 +26,7 @@ Language convention:
 6. 文档和代码都应保持小改动、低抽象、无不必要依赖。
 7. 当前不要实现 API Gateway、API Key、配额、计量、调度优先级或计费；这些是后续阶段目标，不应在文档中写成永久范围外。
 8. 用户组只做成员关系和组角色继承，作为后续部门、项目、业务系统和 API Key 归属基础；不要扩展成复杂 IAM。
-9. 当前角色只有 `admin`、`operator`、`viewer`；后端统一计算 `effective_role`。`admin` 管理用户/组、配置和 Trash 清理，`operator` 管理 Runtime/模型/实例，`viewer` 只读。忘记密码通过服务器本机 `lightai-server --reset-password <USERNAME> <PASSWORD>` 恢复，重置后用户必须修改密码。
+9. 当前角色只有 `admin`、`operator`、`viewer`；后端统一计算 `effective_role`。`admin` 管理用户/组、配置和 Trash 清理，`operator` 管理 Runtime/模型/实例，`viewer` 只读。这是轻量内置角色，不是完整 RBAC。后续不要轻易把当前三角色扩展成可配置权限矩阵；如需扩展权限，应先设计 API Key、租户和计费边界。忘记密码通过服务器本机 `lightai-server --reset-password <USERNAME> <PASSWORD>` 恢复，重置后用户必须修改密码。后端已实现最后一个 admin 保护（不能禁用或降级最后一个启用的管理员），当前无用户删除功能。
 
 ## 代码地图
 
@@ -116,5 +116,13 @@ cd web && npm run build
 ```bash
 bash scripts/dev_check_nvidia.sh
 ```
+
+## Release 打包
+
+- **glibc2.28 包**（推荐）：`bash scripts/package-release-docker.sh v0.1.0` — 在 Rocky Linux 8 容器内编译，生成企业兼容包。
+- **native 包**：`bash scripts/package-release.sh v0.1.0 native` — 宿主机直接编译，仅限本机测试。
+- 不建议直接分发 native 包给老系统。跨服务器测试优先使用 glibc2.28 包。
+- 如果目标服务器仍报 `GLIBC_x.xx not found`，先记录 `getconf GNU_LIBC_VERSION` 和 `ldd --version`，不要建议升级 glibc。
+- 详见 [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) 的 "Release 包类型" 章节。
 
 实现细节见 [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md)；真实环境步骤见 [LOCAL_TEST_ENV.md](LOCAL_TEST_ENV.md)。

@@ -12,17 +12,9 @@ export default defineConfig({
           if (id.includes('/node_modules/echarts/') || id.includes('/node_modules/zrender/')) {
             return 'echarts'
           }
-          if (id.includes('/node_modules/element-plus/')) {
-            if (id.includes('/components/table/')) return 'element-plus-table'
-            if (
-              id.includes('/components/select/') ||
-              id.includes('/components/option/') ||
-              id.includes('/components/date-picker/')
-            ) {
-              return 'element-plus-inputs'
-            }
-            return 'element-plus-core'
-          }
+          // Element Plus is merged into one chunk to avoid circular deps
+          // (element-plus-core <-> element-plus-inputs <-> element-plus-table).
+          if (id.includes('/node_modules/element-plus/')) return 'element-plus'
         }
       }
     }
@@ -31,7 +23,7 @@ export default defineConfig({
     host: '127.0.0.1',
     port: 5173,
     proxy: {
-      '/api': 'http://127.0.0.1:10080'
+      '/api': 'http://127.0.0.1:18080'
     }
   }
 })

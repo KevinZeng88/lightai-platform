@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SERVER_URL="${LIGHTAI_SERVER_URL:-http://127.0.0.1:10080}"
-AGENT_URL="${LIGHTAI_AGENT_URL:-http://127.0.0.1:10081}"
+SERVER_URL="${LIGHTAI_SERVER_URL:-http://127.0.0.1:18080}"
+AGENT_URL="${LIGHTAI_AGENT_URL:-http://127.0.0.1:18081}"
 
 echo "Checking nvidia-smi..."
 if ! command -v nvidia-smi >/dev/null 2>&1; then

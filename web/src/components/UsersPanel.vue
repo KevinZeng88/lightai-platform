@@ -15,12 +15,16 @@
       <el-form-item label="密码">
         <el-input v-model="form.password" type="password" show-password placeholder="至少 12 位" />
       </el-form-item>
+      <el-form-item label="确认密码">
+        <el-input v-model="form.confirmPassword" type="password" show-password placeholder="请再次输入密码" />
+      </el-form-item>
       <el-form-item label="角色">
-        <el-select v-model="form.role" style="width: 120px">
-          <el-option label="只读" value="viewer" />
-          <el-option label="运维" value="operator" />
-          <el-option label="管理员" value="admin" />
+        <el-select v-model="form.role" style="width: 180px">
+          <el-option label="管理员 admin" value="admin" />
+          <el-option label="运维 operator" value="operator" />
+          <el-option label="只读 viewer" value="viewer" />
         </el-select>
+        <span class="muted">{{ roleDesc(form.role) }}</span>
       </el-form-item>
       <el-form-item>
         <el-button type="primary" :loading="saving" @click="submitCreate">新增用户</el-button>
@@ -49,7 +53,7 @@
             {{ row.enabled ? '禁用' : '启用' }}
           </el-button>
           <el-button size="small" @click="toggleRole(row)">
-            设为{{ row.role === 'admin' ? '只读' : '管理员' }}
+            {{ row.role === 'admin' ? '设为只读' : '设为管理员' }}
           </el-button>
         </template>
       </el-table-column>
@@ -168,6 +172,7 @@ const savingGroup = ref(false)
 const form = ref({
   username: '',
   password: '',
+  confirmPassword: '',
   role: 'viewer' as Role
 })
 const groupForm = ref({
@@ -194,9 +199,15 @@ async function refreshGroups() {
 }
 
 function roleLabel(role: Role) {
-  if (role === 'admin') return '管理员'
-  if (role === 'operator') return '运维'
-  return '只读'
+  if (role === 'admin') return '管理员 admin'
+  if (role === 'operator') return '运维 operator'
+  return '只读 viewer'
+}
+
+function roleDesc(role: Role) {
+  if (role === 'admin') return '可管理用户、配置、节点、模型、实例、审计'
+  if (role === 'operator') return '可管理模型、Runtime、实例启停和状态检查'
+  return '只读查看节点、GPU、模型、实例、日志和配置'
 }
 
 function groupMemberIds(group: UserGroup) {
@@ -204,6 +215,10 @@ function groupMemberIds(group: UserGroup) {
 }
 
 async function submitCreate() {
+  if (form.value.password !== form.value.confirmPassword) {
+    ElMessage.error('两次输入的密码不一致')
+    return
+  }
   saving.value = true
   try {
     await createUser({
@@ -213,6 +228,7 @@ async function submitCreate() {
     })
     form.value.username = ''
     form.value.password = ''
+    form.value.confirmPassword = ''
     form.value.role = 'viewer'
     ElMessage.success('用户已创建')
     await Promise.all([refresh(), refreshGroups()])
