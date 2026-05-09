@@ -108,6 +108,19 @@ Agent 在 `agent/src/tasks/mod.rs` 中分发以下任务：
 
 不兼容历史数据库。旧数据库删除后 Server 会自动创建最新 schema。
 
+### 历史指标自动清理
+
+Server 启动后运行后台清理任务，定期删除过期的历史指标采样数据：
+
+- 只清理 `node_metric_samples` 和 `gpu_metric_samples` 两张历史采样表。
+- 不影响 `node_status`、`gpu_status` 最新状态表，也不影响模型、Runtime、实例、审计、用户等业务数据。
+- 默认保留 7 天，可通过 `[metrics].retention_days` 配置（最少 1 天）。
+- 默认每 6 小时执行一次，可通过 `[metrics].cleanup_interval_hours` 配置（最少 1 小时）。
+- Server 启动后 30 秒执行首次清理，之后按间隔周期执行。
+- 清理失败只记录日志，不影响 Server 正常运行。
+- 当前只做原始数据保留清理，不做小时聚合、降采样或长期报表。
+- 两张采样表各有一个 `sampled_at` 单列索引，清理查询走索引不扫全表。
+
 ## 数据流
 
 ### 注册和心跳
@@ -261,6 +274,15 @@ managed store 路径由 Agent state path 派生，形如 `agent-state.toml.manag
 - Instances 页面维护 external/local 实例，支持 Docker Runtime 的结构化覆盖参数。
 - Instances 页面每 15 秒刷新，过渡态操作后额外轮询稳定状态。
 - LogsAudit 页面读取平台日志、实例日志、前端错误摘要和审计事件。
+
+### tower-http 用途与边界
+
+当前 Server 使用 `tower-http` 0.6（仅 `fs` feature）：
+
+- **静态文件托管**：通过 `tower_http::services::ServeDir` 提供 `web/dist` 静态文件，支持 SPA 深链接 fallback 到 `index.html`。
+- **tower-http 承担的角色**：HTTP 基础设施层——静态文件服务、未来可按需启用 CORS、Trace、请求体大小限制、超时等通用 HTTP 中间件。
+- **tower-http 不承担的角色**：API Key 鉴权、租户隔离、额度控制、用量统计、计费、账单。这些是业务域概念，应设计为独立的领域模块或中间件。
+- 当前不实现计费，不新增 API Key，不新增额度控制，不新增账单表。
 
 ## GPU Collector 架构（脚本化）
 

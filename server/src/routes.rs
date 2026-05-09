@@ -6,6 +6,7 @@ use axum::response::{IntoResponse, Response};
 use axum::{routing::delete, routing::get, routing::post, routing::put, Json, Router};
 use serde::Serialize;
 use sqlx::SqlitePool;
+use tower_http::services::ServeDir;
 
 use crate::domain;
 use crate::models::{
@@ -40,8 +41,17 @@ pub fn app_with_auth_policies(
     password_policy: repository::PasswordPolicy,
     session_policy: repository::SessionPolicy,
 ) -> Router {
+    app_with_web(pool, password_policy, session_policy, None)
+}
+
+pub fn app_with_web(
+    pool: SqlitePool,
+    password_policy: repository::PasswordPolicy,
+    session_policy: repository::SessionPolicy,
+    web_dist_dir: Option<String>,
+) -> Router {
     let auth_state = AuthState::new(pool.clone(), password_policy, session_policy);
-    Router::new()
+    let mut router = Router::new()
         .route("/health", get(health))
         .route("/api/setup/status", get(setup_status))
         .route("/api/setup/admin", post(setup_admin))
@@ -171,7 +181,20 @@ pub fn app_with_auth_policies(
             auth_state,
             control_plane_auth,
         ))
-        .with_state(pool)
+        .route("/api/{*rest}", get(api_not_found).post(api_not_found).put(api_not_found).delete(api_not_found).patch(api_not_found))
+        .with_state(pool);
+    if let Some(dist_dir) = &web_dist_dir {
+        // ServeDir handles static assets.  SPA deep routes that don't match a file
+        // would return 404, so we use not_found_service to fall back to index.html.
+        // Wrap with a status-correcting service that maps 404 -> 200 for SPA.
+        let index_path = format!("{dist_dir}/index.html");
+        let serve_dir = ServeDir::new(dist_dir).fallback(
+            SpaFallback::new(index_path),
+        );
+        router = router.fallback_service(serve_dir);
+        tracing::info!(dist_dir, "serving web static files with SPA fallback");
+    }
+    router
 }
 
 #[derive(Clone)]
@@ -591,6 +614,16 @@ async fn health() -> Json<HealthResponse> {
         status: "ok",
         service: "server",
     })
+}
+
+async fn api_not_found() -> (StatusCode, Json<ErrorResponse>) {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ErrorResponse {
+            error: "not_found",
+            message: Some("API endpoint not found".to_string()),
+        }),
+    )
 }
 
 async fn register_agent(
@@ -1740,4 +1773,37 @@ struct ErrorResponse {
     error: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+}
+
+/// Fallback service for SPA: serves index.html with status 200 for any request.
+#[derive(Clone)]
+struct SpaFallback {
+    index_bytes: Vec<u8>,
+}
+
+impl SpaFallback {
+    fn new(index_path: String) -> Self {
+        Self {
+            index_bytes: std::fs::read(&index_path).unwrap_or_default(),
+        }
+    }
+}
+
+impl tower::Service<axum::http::Request<Body>> for SpaFallback {
+    type Response = Response;
+    type Error = std::convert::Infallible;
+    type Future = std::future::Ready<Result<Response, Self::Error>>;
+
+    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, _req: axum::http::Request<Body>) -> Self::Future {
+        let response = Response::builder()
+            .status(StatusCode::OK)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::from(self.index_bytes.clone()))
+            .unwrap();
+        std::future::ready(Ok(response))
+    }
 }

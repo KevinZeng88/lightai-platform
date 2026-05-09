@@ -4,6 +4,7 @@ use serde::Deserialize;
 pub struct Config {
     pub listen_addr: String,
     pub database_url: String,
+    pub web_dist_dir: Option<String>,
     pub metrics_retention_days: u32,
     pub history_cleanup_interval_hours: u32,
     pub password_policy: crate::repository::PasswordPolicy,
@@ -16,6 +17,7 @@ impl Default for Config {
         Self {
             listen_addr: "0.0.0.0:10080".to_string(),
             database_url: "sqlite://./data/lightai.db".to_string(),
+            web_dist_dir: None,
             metrics_retention_days: 7,
             history_cleanup_interval_hours: 6,
             password_policy: crate::repository::PasswordPolicy::default(),
@@ -60,6 +62,13 @@ impl Config {
             }
         }
 
+        if let Some(web) = file_config.web {
+            if let Some(value) = web.dist_dir {
+                if !value.trim().is_empty() {
+                    config.web_dist_dir = Some(value);
+                }
+            }
+        }
         if let Some(metrics) = file_config.metrics {
             if let Some(value) = metrics.retention_days {
                 if value < 1 {
@@ -141,6 +150,7 @@ impl Config {
 struct FileConfig {
     server: Option<ServerSection>,
     database: Option<DatabaseSection>,
+    web: Option<WebSection>,
     metrics: Option<MetricsSection>,
     auth: Option<AuthSection>,
     logs: Option<LogsSection>,
@@ -156,6 +166,12 @@ struct ServerSection {
 #[serde(deny_unknown_fields)]
 struct DatabaseSection {
     url: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WebSection {
+    dist_dir: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

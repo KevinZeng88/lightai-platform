@@ -11,6 +11,12 @@ const SERVER_CONFIG_TEMPLATE: &str = r#"# LightAI Server configuration.
 # Listen address.  Use 0.0.0.0:10080 to accept external connections.
 listen_addr = "0.0.0.0:10080"
 
+[web]
+# Optional: directory containing web frontend static files (web/dist).
+# When set, the server serves the Web console at the root path.
+# When omitted or commented out, static file serving is disabled.
+# dist_dir = "web/dist"
+
 [database]
 # SQLite database path.
 # Relative paths are resolved against the process CWD.\n# With systemd WorkingDirectory=/opt/lightai, this becomes /opt/lightai/data/lightai.db.
@@ -113,6 +119,10 @@ CONFIGURATION:
 async fn main() -> anyhow::Result<()> {
     // ── CLI argument handling ──
     let args: Vec<String> = std::env::args().collect();
+
+    // Extract --config <PATH> early so subcommands (reset-password, collector) can use it.
+    let cli_config_path = extract_config_path(&args);
+
     if args.len() >= 2 {
         match args[1].as_str() {
             "--help" | "-h" => {
@@ -128,7 +138,7 @@ async fn main() -> anyhow::Result<()> {
                     eprintln!("usage: lightai-server --reset-password <USERNAME> <PASSWORD>");
                     std::process::exit(1);
                 }
-                let config = Config::load()?;
+                let config = load_server_config(cli_config_path.as_deref())?;
                 config.validate_auth()?;
                 let pool = db::connect(&config.database_url).await?;
                 repository::reset_user_password(
@@ -145,7 +155,14 @@ async fn main() -> anyhow::Result<()> {
                 return handle_config_cmd(&args);
             }
             "collector" => {
-                return handle_collector_cmd(&args).await;
+                return handle_collector_cmd(&args, cli_config_path.as_deref()).await;
+            }
+            "--config" => {
+                // --config without a preceding subcommand: continue to server startup below.
+                if args.len() < 3 {
+                    eprintln!("error: --config requires a path");
+                    std::process::exit(1);
+                }
             }
             other => {
                 eprintln!("unknown option: {other}");
@@ -159,7 +176,7 @@ async fn main() -> anyhow::Result<()> {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
-    let config = Config::load()?;
+    let config = load_server_config(cli_config_path.as_deref())?;
     config.validate_auth()?;
     platform_log::set_global(config.log_policy.clone());
     platform_log::append(&config.log_policy, "server.log", "info", "Server starting").await?;
@@ -183,7 +200,12 @@ async fn main() -> anyhow::Result<()> {
 
     axum::serve(
         listener,
-        routes::app_with_auth_policies(pool, config.password_policy, config.session_policy),
+        routes::app_with_web(
+            pool,
+            config.password_policy,
+            config.session_policy,
+            config.web_dist_dir,
+        ),
     )
     .await?;
     Ok(())
@@ -269,7 +291,7 @@ NOTES:
     - Does NOT require a running Server process.
 "#;
 
-async fn handle_collector_cmd(args: &[String]) -> anyhow::Result<()> {
+async fn handle_collector_cmd(args: &[String], cli_config_path: Option<&str>) -> anyhow::Result<()> {
     if args.len() < 3 {
         eprintln!("missing collector subcommand (inspect | sync | register)");
         eprintln!("try: lightai-server collector --help  (not yet supported)");
@@ -283,7 +305,7 @@ async fn handle_collector_cmd(args: &[String]) -> anyhow::Result<()> {
                 eprintln!("usage: lightai-server collector sync --root <PATH>");
                 std::process::exit(1);
             };
-            let config = Config::load()?;
+            let config = load_server_config(cli_config_path)?;
             let pool = db::connect(&config.database_url).await?;
             match lightai_server::collector_cli::sync_root(&pool, std::path::Path::new(&root)).await
             {
@@ -369,7 +391,7 @@ async fn handle_collector_cmd(args: &[String]) -> anyhow::Result<()> {
                 eprintln!("usage: lightai-server collector register --dir <PATH>");
                 std::process::exit(1);
             };
-            let config = Config::load()?;
+            let config = load_server_config(cli_config_path)?;
             let pool = db::connect(&config.database_url).await?;
             match lightai_server::collector_cli::register_one(&pool, std::path::Path::new(&dir))
                 .await
@@ -423,4 +445,25 @@ fn extract_flag_value(args: &[String], flag: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// Extract `--config <PATH>` from args. Returns None if not present.
+fn extract_config_path(args: &[String]) -> Option<String> {
+    for i in 0..args.len() {
+        if args[i] == "--config" {
+            return args.get(i + 1).cloned();
+        }
+    }
+    None
+}
+
+/// Load server config: explicit --config path → `LIGHTAI_SERVER_CONFIG` env → default path → built-in defaults.
+fn load_server_config(explicit_path: Option<&str>) -> anyhow::Result<Config> {
+    if let Some(path) = explicit_path {
+        if path.is_empty() {
+            anyhow::bail!("--config requires a non-empty path");
+        }
+        return Config::from_file(path);
+    }
+    Config::load()
 }

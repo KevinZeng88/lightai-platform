@@ -45,6 +45,17 @@ coverage/
 *.db-wal
 data/
 
+# Runtime directories
+logs/
+run/
+
+# Release artifacts
+release/
+*.tar.gz
+
+# PID files
+*.pid
+
 # Generated files
 tmp/
 temp/
