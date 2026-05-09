@@ -69,6 +69,19 @@ npm install
 npm run dev
 ```
 
+### 本机快速验证
+
+```bash
+# 日常开发：首次自动初始化，后续自动增量更新 + 重启（默认保持运行）
+bash scripts/verify-local-deployment.sh
+
+# 强制重建（保留首次 setup 页面，不自动创建管理员）
+bash scripts/verify-local-deployment.sh --fresh --yes
+
+# CI / 自动化完整测试（创建管理员 + 登录验证 + 完成后停止）
+bash scripts/verify-local-deployment.sh --fresh --yes --auto --stop
+```
+
 ### 跨服务器测试
 
 推荐使用 glibc2.28 兼容 release 包（适用于 RHEL 8 / Rocky 8 / AlmaLinux 8 / Ubuntu 20.04+）：

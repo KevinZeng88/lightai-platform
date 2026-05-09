@@ -2,9 +2,11 @@ use serde::Deserialize;
 
 #[derive(Debug, Clone)]
 pub struct Config {
-    pub listen_addr: String,
+    pub https: Option<HttpsConfig>,
+    pub http: HttpConfig,
     pub database_url: String,
     pub web_dist_dir: Option<String>,
+    pub setup_token: Option<String>,
     pub metrics_retention_days: u32,
     pub history_cleanup_interval_hours: u32,
     pub password_policy: crate::repository::PasswordPolicy,
@@ -12,12 +14,30 @@ pub struct Config {
     pub log_policy: crate::platform_log::LogPolicy,
 }
 
+#[derive(Debug, Clone)]
+pub struct HttpsConfig {
+    pub listen_addr: String,
+    pub cert_path: String,
+    pub key_path: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct HttpConfig {
+    pub enabled: bool,
+    pub listen_addr: String,
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
-            listen_addr: "0.0.0.0:18080".to_string(),
+            https: None,
+            http: HttpConfig {
+                enabled: false,
+                listen_addr: "127.0.0.1:18080".to_string(),
+            },
             database_url: "sqlite://./data/lightai.db".to_string(),
             web_dist_dir: None,
+            setup_token: None,
             metrics_retention_days: 7,
             history_cleanup_interval_hours: 6,
             password_policy: crate::repository::PasswordPolicy::default(),
@@ -50,9 +70,27 @@ impl Config {
         let file_config: FileConfig = toml::from_str(&content)?;
         let mut config = Self::default();
 
+        if let Some(https) = file_config.https {
+            config.https = Some(HttpsConfig {
+                listen_addr: https.listen_addr,
+                cert_path: https.cert_path,
+                key_path: https.key_path,
+            });
+        }
+        if let Some(http) = file_config.http {
+            config.http = HttpConfig {
+                enabled: http.enabled,
+                listen_addr: http.listen_addr,
+            };
+        }
         if let Some(server) = file_config.server {
             if let Some(value) = server.listen_addr {
-                config.listen_addr = value;
+                eprintln!("warning: [server].listen_addr is deprecated; use [https] and [http] instead");
+                // Legacy: treat as HTTP if no [https] is configured.
+                if config.https.is_none() {
+                    config.http.enabled = true;
+                    config.http.listen_addr = value;
+                }
             }
         }
 
@@ -69,6 +107,9 @@ impl Config {
                 }
             }
         }
+
+        config.setup_token = file_config.setup_token;
+
         if let Some(metrics) = file_config.metrics {
             if let Some(value) = metrics.retention_days {
                 if value < 1 {
@@ -143,6 +184,11 @@ impl Config {
         }
         Ok(())
     }
+
+    /// Returns true if at least one listener (HTTPS or HTTP) is configured.
+    pub fn has_listener(&self) -> bool {
+        self.https.is_some() || self.http.enabled
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -154,12 +200,31 @@ struct FileConfig {
     metrics: Option<MetricsSection>,
     auth: Option<AuthSection>,
     logs: Option<LogsSection>,
+    https: Option<HttpsSection>,
+    http: Option<HttpSection>,
+    setup_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ServerSection {
     listen_addr: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpsSection {
+    listen_addr: String,
+    cert_path: String,
+    key_path: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HttpSection {
+    #[serde(default)]
+    enabled: bool,
+    listen_addr: String,
 }
 
 #[derive(Debug, Deserialize)]

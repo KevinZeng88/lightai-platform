@@ -4,7 +4,7 @@
       <h2>平台配置</h2>
       <p>全局 Agent 策略、节点覆盖、采集器登记、历史指标清理等配置。</p>
     </div>
-    <el-button :loading="loading" type="primary" @click="loadData">刷新</el-button>
+    <el-button :loading="loading" @click="loadData">全部刷新</el-button>
   </section>
 
   <el-alert v-if="error" :title="error" type="error" show-icon class="alert" />
@@ -18,7 +18,12 @@
 
   <el-collapse v-model="activeCollapse" class="config-collapse">
     <!-- 全局默认策略 -->
-    <el-collapse-item title="全局默认策略" name="global">
+    <el-collapse-item name="global">
+      <template #title>
+        <span class="collapse-title">全局默认策略</span>
+        <el-button size="small" :loading="policyLoading" @click.stop="loadPolicy">刷新</el-button>
+      </template>
+      <el-alert v-if="policyError" :title="policyError" type="error" show-icon class="alert" />
       <el-form label-width="170px" class="config-form">
         <PolicyFields v-model="globalForm" :allow-inherit="false" />
         <el-form-item>
@@ -29,9 +34,14 @@
     </el-collapse-item>
 
     <!-- 节点覆盖策略 -->
-    <el-collapse-item title="节点覆盖策略" name="node">
+    <el-collapse-item name="node">
+      <template #title>
+        <span class="collapse-title">节点覆盖策略</span>
+        <el-button size="small" :loading="nodeLoading" @click.stop="loadNodePolicy">刷新</el-button>
+      </template>
+      <el-alert v-if="nodeError" :title="nodeError" type="error" show-icon class="alert" />
       <el-form-item label="选择节点" label-width="100px">
-        <el-select v-model="selectedNodeId" filterable placeholder="选择节点" class="node-config-select">
+        <el-select v-model="selectedNodeId" filterable placeholder="选择节点" class="node-config-select" @change="syncNodeForm">
           <el-option v-for="node in nodes" :key="node.id" :label="node.name" :value="node.id" />
         </el-select>
       </el-form-item>
@@ -61,8 +71,80 @@
     </el-collapse-item>
 
     <!-- 采集器登记 -->
-    <el-collapse-item title="采集器登记" name="collectors">
-      <CollectorRegistryPanel :role="role" />
+    <el-collapse-item name="collectors">
+      <template #title>
+        <span class="collapse-title">采集器登记</span>
+        <el-button size="small" :loading="collectorLoading" @click.stop="refreshCollector">刷新</el-button>
+      </template>
+      <CollectorRegistryPanel ref="collectorPanel" :role="role" />
+    </el-collapse-item>
+
+    <!-- 安全设置 -->
+    <el-collapse-item name="security">
+      <template #title>
+        <span class="collapse-title">安全设置</span>
+        <el-button size="small" :loading="securityLoading" @click.stop="loadSecurity">刷新</el-button>
+      </template>
+      <el-alert v-if="securityError" :title="securityError" type="error" show-icon class="alert" />
+
+      <!-- 基础访问信息 -->
+      <el-card shadow="never" class="security-card">
+        <template #header>基础访问信息</template>
+        <el-descriptions :column="2" border size="small">
+          <el-descriptions-item label="HTTPS 服务" :span="2">已启用，监听端口 18443</el-descriptions-item>
+          <el-descriptions-item label="推荐访问地址" :span="2">
+            <code>https://&lt;服务器地址&gt;:18443/</code>
+          </el-descriptions-item>
+          <el-descriptions-item label="HTTP 服务" :span="2">默认关闭（仅用于本机排障，不建议对外启用）</el-descriptions-item>
+        </el-descriptions>
+      </el-card>
+
+      <!-- CA 证书 -->
+      <el-card shadow="never" class="security-card">
+        <template #header>CA 证书</template>
+        <template v-if="securityStatus?.ca_fingerprint">
+          <p class="security-fp-label">CA SHA256 指纹</p>
+          <div class="security-fp-row">
+            <code class="security-fp-short">{{ securityStatus!.ca_fingerprint!.slice(0, 16) }}...{{ securityStatus!.ca_fingerprint!.slice(-16) }}</code>
+            <el-button size="small" @click="copyFingerprint">复制完整指纹</el-button>
+          </div>
+          <div style="margin-top:8px">
+            <el-button size="small" type="primary" @click="downloadCa">
+              下载 CA 证书
+            </el-button>
+          </div>
+          <el-alert type="info" show-icon :closable="false" class="security-note">
+            ca.crt 可分发给 Agent 机器；ca.key 和 server.key 不可分发。
+          </el-alert>
+        </template>
+        <template v-else>
+          <el-alert title="CA 证书未安装" type="warning" show-icon :closable="false" />
+        </template>
+      </el-card>
+
+      <!-- 初始化状态 -->
+      <el-card shadow="never" class="security-card">
+        <template #header>系统初始化</template>
+        <el-alert
+          v-if="securityStatus"
+          :title="securityStatus.setup_required ? '系统尚未初始化' : '系统已完成管理员初始化'"
+          :type="securityStatus.setup_required ? 'warning' : 'success'"
+          show-icon
+          :closable="false"
+          :description="securityStatus.setup_required ? '请使用初始化口令创建第一个管理员账号' : '管理员已存在，可通过登录页面访问控制台'"
+        />
+      </el-card>
+
+      <!-- Agent 安全说明 -->
+      <el-card shadow="never" class="security-card">
+        <template #header>Agent 安全说明</template>
+        <ul class="security-notes">
+          <li>Agent 首次安装时会下载 ca.crt，安装时需要核对 CA 指纹。</li>
+          <li>Agent 注册成功后使用 per-agent Bearer token 进行后续通信。</li>
+          <li>当前版本不使用 Agent 安装码，适合可信内网或客户测试网段。</li>
+          <li>不建议将 18443 端口暴露到公网。</li>
+        </ul>
+      </el-card>
     </el-collapse-item>
 
     <!-- 角色与权限说明 -->
@@ -90,15 +172,20 @@ import { ElMessage } from 'element-plus/es/components/message/index'
 import {
   fetchAgentConfigPolicies,
   fetchNodes,
+  fetchSecurityStatus,
   updateGlobalAgentConfigPolicy,
   updateNodeAgentConfigPolicy
 } from '../api'
+import type { SecurityStatus } from '../api'
 import type { AgentConfigPoliciesResponse, AgentConfigPolicy, NodeStatus } from '../types'
 import CollectorRegistryPanel from './CollectorRegistryPanel.vue'
 
 const props = defineProps<{ role: string }>()
 
-const activeCollapse = ref(['global'])
+const activeCollapse = ref(['collectors', 'security'])
+
+// Load security status on mount
+onMounted(() => { loadSecurity() })
 
 const roleDescriptions = [
   { role: '管理员 admin', desc: '拥有系统管理权限，可管理用户、用户组、Agent 配置、collector registry、Trash 物理清理、模型、Runtime、实例、审计等全部能力。' },
@@ -186,17 +273,106 @@ const PolicyFields = defineComponent({
   }
 })
 
+// ── State ──
+
 const nodes = ref<NodeStatus[]>([])
 const policies = ref<AgentConfigPoliciesResponse>()
 const selectedNodeId = ref('')
 const globalForm = ref<AgentConfigPolicy>(emptyPolicy())
 const nodeForm = ref<AgentConfigPolicy>(emptyPolicy())
+
+// Per-section loading/error
 const loading = ref(false)
+const error = ref('')
+const policyLoading = ref(false)
+const policyError = ref('')
+const nodeLoading = ref(false)
+const nodeError = ref('')
+const collectorLoading = ref(false)
+const securityLoading = ref(false)
+const securityError = ref('')
+const securityStatus = ref<SecurityStatus | null>(null)
 const savingGlobal = ref(false)
 const savingNode = ref(false)
-const error = ref('')
+
+const collectorPanel = ref<InstanceType<typeof CollectorRegistryPanel> | null>(null)
 
 const selectedNode = computed(() => nodes.value.find((node) => node.id === selectedNodeId.value))
+
+// ── Section loaders ──
+
+async function loadPolicy() {
+  policyLoading.value = true
+  policyError.value = ''
+  try {
+    const nextPolicies = await fetchAgentConfigPolicies()
+    policies.value = nextPolicies
+    globalForm.value = policyFromConfig(nextPolicies.global.effective_config)
+    ElMessage.success('策略已刷新')
+  } catch (err) {
+    policyError.value = err instanceof Error ? err.message : '加载策略失败'
+  } finally {
+    policyLoading.value = false
+  }
+}
+
+async function loadNodePolicy() {
+  nodeLoading.value = true
+  nodeError.value = ''
+  try {
+    const [nextNodes, nextPolicies] = await Promise.all([fetchNodes(), fetchAgentConfigPolicies()])
+    nodes.value = nextNodes
+    policies.value = nextPolicies
+    if (!selectedNodeId.value) selectedNodeId.value = nextNodes[0]?.id ?? ''
+    syncNodeForm()
+    ElMessage.success('节点策略已刷新')
+  } catch (err) {
+    nodeError.value = err instanceof Error ? err.message : '加载节点策略失败'
+  } finally {
+    nodeLoading.value = false
+  }
+}
+
+function refreshCollector() {
+  collectorLoading.value = true
+  try {
+    collectorPanel.value?.refresh?.()
+  } finally {
+    setTimeout(() => { collectorLoading.value = false }, 300)
+  }
+}
+
+async function loadSecurity() {
+  securityLoading.value = true
+  securityError.value = ''
+  try {
+    securityStatus.value = await fetchSecurityStatus()
+  } catch (err) {
+    securityError.value = err instanceof Error ? err.message : '加载安全设置失败'
+  } finally {
+    securityLoading.value = false
+  }
+}
+
+async function copyFingerprint() {
+  if (!securityStatus.value?.ca_fingerprint) return
+  try {
+    await navigator.clipboard.writeText(securityStatus.value.ca_fingerprint)
+    ElMessage.success('CA 指纹已复制到剪贴板')
+  } catch {
+    ElMessage.error('复制失败，请手动选择并复制')
+  }
+}
+
+function downloadCa() {
+  if (!securityStatus.value?.ca_download_url) return
+  const link = document.createElement('a')
+  link.href = securityStatus.value.ca_download_url
+  link.download = 'ca.crt'
+  link.click()
+}
+
+// ── Global loader (used by "全部刷新" button) ──
 
 async function loadData() {
   loading.value = true
@@ -220,18 +396,36 @@ function syncNodeForm() {
   nodeForm.value = { ...emptyPolicy(), ...(policy ?? {}) }
 }
 
+// ── Save functions ──
+
 async function saveGlobal() {
   savingGlobal.value = true
   try {
     await updateGlobalAgentConfigPolicy(normalizePolicy(globalForm.value))
     ElMessage.success('全局策略已保存')
-    await loadData()
+    await loadPolicy()
   } catch (err) {
     ElMessage.error(err instanceof Error ? err.message : '保存失败')
   } finally {
     savingGlobal.value = false
   }
 }
+
+async function saveNode() {
+  if (!selectedNodeId.value) return
+  savingNode.value = true
+  try {
+    await updateNodeAgentConfigPolicy(selectedNodeId.value, normalizePolicy(nodeForm.value))
+    ElMessage.success('节点覆盖策略已保存')
+    await loadNodePolicy()
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '保存失败')
+  } finally {
+    savingNode.value = false
+  }
+}
+
+// ── Helpers ──
 
 function policyFromConfig(config: NodeStatus['effective_agent_config']): AgentConfigPolicy {
   return {
@@ -247,20 +441,6 @@ function policyFromConfig(config: NodeStatus['effective_agent_config']): AgentCo
     log_max_file_bytes: config.log_max_file_bytes,
     log_retention_files: config.log_retention_files,
     log_retention_days: config.log_retention_days
-  }
-}
-
-async function saveNode() {
-  if (!selectedNodeId.value) return
-  savingNode.value = true
-  try {
-    await updateNodeAgentConfigPolicy(selectedNodeId.value, normalizePolicy(nodeForm.value))
-    ElMessage.success('节点覆盖策略已保存')
-    await loadData()
-  } catch (err) {
-    ElMessage.error(err instanceof Error ? err.message : '保存失败')
-  } finally {
-    savingNode.value = false
   }
 }
 
@@ -288,6 +468,9 @@ defineExpose({ refresh: loadData })
 .config-collapse {
   margin-top: 12px;
 }
+.collapse-title {
+  flex: 1;
+}
 .detail-grid {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
@@ -304,5 +487,43 @@ defineExpose({ refresh: loadData })
 h4 {
   margin-top: 16px;
   margin-bottom: 8px;
+}
+
+.security-card {
+  margin-bottom: 12px;
+}
+
+.security-fp-label {
+  font-size: 13px;
+  color: #606266;
+  margin-bottom: 4px;
+}
+
+.security-fp-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.security-fp-short {
+  font-size: 12px;
+  background: #f5f7fa;
+  padding: 4px 8px;
+  border-radius: 4px;
+  word-break: break-all;
+}
+
+.security-note {
+  margin-top: 8px;
+}
+
+.security-notes {
+  margin: 0;
+  padding-left: 16px;
+  font-size: 13px;
+  color: #606266;
+}
+.security-notes li {
+  margin-bottom: 4px;
 }
 </style>

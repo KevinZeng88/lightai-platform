@@ -55,21 +55,26 @@ function jsonHeaders(extra?: HeadersInit): HeadersInit {
 async function readJson<T>(response: Response, fallback: string): Promise<T> {
   if (!response.ok) {
     let message = fallback
-    if (response.status === 401) {
-      message = '登录已过期或未登录，请重新登录'
+    const isAuthCheck = response.status === 401
+    if (isAuthCheck) {
+      // /api/auth/login 401 = wrong credentials; other 401 = session expired.
+      message = response.url.includes('/api/auth/login')
+        ? '用户名或密码错误'
+        : '登录已过期或未登录，请重新登录'
     } else if (response.status === 403) {
       message = '当前用户没有权限执行该操作'
     }
     try {
       const payload = await response.json()
-      if (response.status !== 401) {
+      if (!isAuthCheck) {
         message = payload.message ?? payload.error ?? message
       }
     } catch {
       message = `${fallback}: ${response.status}`
     }
     const apiError = new Error(message)
-    if (!isFrontendErrorUrl(response.url)) {
+    // Only report non-401 errors to frontend-errors (401 is normal for unauthenticated state).
+    if (!isAuthCheck && !isFrontendErrorUrl(response.url)) {
       fetch('/api/frontend-errors', {
         method: 'POST',
         credentials: 'include',
@@ -100,21 +105,24 @@ async function sendEmpty(url: string, method: string): Promise<void> {
   const response = await fetch(url, { method, credentials: 'include', headers: jsonHeaders() })
   if (!response.ok) {
     let message = `${method} ${url} failed: ${response.status}`
-    if (response.status === 401) {
-      message = '登录已过期或未登录，请重新登录'
+    const isAuthCheck = response.status === 401
+    if (isAuthCheck) {
+      message = response.url.includes('/api/auth/login')
+        ? '用户名或密码错误'
+        : '登录已过期或未登录，请重新登录'
     } else if (response.status === 403) {
       message = '当前用户没有权限执行该操作'
     }
     try {
       const payload = await response.json()
-      if (response.status !== 401) {
+      if (!isAuthCheck) {
         message = payload.message ?? payload.error ?? message
       }
     } catch {
       // Keep status-only message.
     }
     const apiError = new Error(message)
-    if (!isFrontendErrorUrl(response.url)) {
+    if (!isAuthCheck && !isFrontendErrorUrl(response.url)) {
       fetch('/api/frontend-errors', {
         method: 'POST',
         credentials: 'include',
@@ -152,10 +160,22 @@ export async function fetchSetupStatus(): Promise<boolean> {
   return payload.setup_required
 }
 
-export async function setupAdmin(username: string, password: string): Promise<AuthUser> {
+export interface SecurityStatus {
+  ca_fingerprint: string | null
+  ca_download_url: string
+  setup_required: boolean
+  note: string
+}
+
+export async function fetchSecurityStatus(): Promise<SecurityStatus> {
+  return sendJson<SecurityStatus>('/api/security/status', 'GET')
+}
+
+export async function setupAdmin(username: string, password: string, setupToken: string): Promise<AuthUser> {
   const payload = await sendJson<{ user: AuthUser }>('/api/setup/admin', 'POST', {
     username,
-    password
+    password,
+    setup_token: setupToken
   })
   return payload.user
 }

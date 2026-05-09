@@ -337,7 +337,7 @@ pub async fn check_model_instance(
         if !node_online(pool, node_id).await? {
             let _ = crate::platform_log::append(
                 &crate::platform_log::global(),
-                "server.log",
+                "lightai-server.log",
                 "warn",
                 &format!(
                     "check_instance: instance={id} node={node_id} agent offline, cannot check status"

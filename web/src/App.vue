@@ -34,10 +34,19 @@
               @keyup.enter="submitSetup"
             />
           </el-form-item>
+          <el-form-item label="初始化口令">
+            <el-input
+              v-model="setupForm.setupToken"
+              type="password"
+              show-password
+              placeholder="请输入初始化口令"
+              @keyup.enter="submitSetup"
+            />
+          </el-form-item>
           <el-button
             type="primary"
             :loading="authLoading"
-            :disabled="!setupForm.username.trim() || !setupForm.password || !setupForm.confirmPassword"
+            :disabled="!setupForm.username.trim() || !setupForm.password || !setupForm.confirmPassword || !setupForm.setupToken.trim()"
             @click="submitSetup"
           >
             创建管理员
@@ -200,7 +209,8 @@ const loginForm = ref({
 const setupForm = ref({
   username: 'admin',
   password: '',
-  confirmPassword: ''
+  confirmPassword: '',
+  setupToken: ''
 })
 const passwordForm = ref({
   currentPassword: '',
@@ -260,13 +270,25 @@ async function submitSetup() {
       authMessage.value = '两次输入的密码不一致'
       return
     }
-    currentUser.value = await setupAdmin(setupForm.value.username, setupForm.value.password)
+    if (!setupForm.value.setupToken.trim()) {
+      authMessage.value = '请输入初始化口令'
+      return
+    }
+    currentUser.value = await setupAdmin(setupForm.value.username, setupForm.value.password, setupForm.value.setupToken)
     setupForm.value.password = ''
     setupForm.value.confirmPassword = ''
+    setupForm.value.setupToken = ''
     setupRequired.value = false
+    ElMessage.success('管理员已创建，欢迎使用')
     refreshActiveTab(activeTab.value)
   } catch (error) {
-    authMessage.value = error instanceof Error ? error.message : '初始化失败'
+    const msg = error instanceof Error ? error.message : '初始化失败'
+    if (msg.includes('already completed') || msg.includes('setup already')) {
+      setupRequired.value = false
+      authMessage.value = '系统已初始化，请登录'
+    } else {
+      authMessage.value = msg
+    }
   } finally {
     authLoading.value = false
   }
@@ -315,7 +337,8 @@ onMounted(async () => {
       refreshActiveTab(activeTab.value)
     }
   } catch {
-    authMessage.value = '请登录后继续'
+    // Silently show login form; the 401 from fetchCurrentUser is normal for unauthenticated visitors.
+    // Do not show error toast here — the login form is the expected UI.
   }
 })
 </script>

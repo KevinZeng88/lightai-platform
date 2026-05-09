@@ -78,6 +78,8 @@ cd lightai-platform-v0.1.0-linux-x86_64-native
 
 解压后目录包含预置的 `lightai-server.toml`，已启用 Web 静态文件服务。
 
+> **首次安装请先运行初始化脚本**：`scripts/init-server.sh`（Server 端）和 `scripts/init-agent.sh`（Agent 端），脚本会生成证书、setup token 和配置文件，不需要手动处理证书。
+
 ### 3.2 准备目录
 
 ```bash
@@ -177,10 +179,34 @@ bin/lightai-server --reset-password <USERNAME> <PASSWORD>
 
 如需 GPU 指标：
 
-1. 将 collector 脚本放到 Agent 机器上
-2. 用 `bin/lightai-agent collector inspect <目录>` 生成注册 JSON
-3. 在 Web「采集器登记」页面粘贴登记
-4. Agent 配置中设置 `[gpu_collectors]` 并重启 Agent
+1. 将 collector 脚本放到 Agent 机器上（release 包已包含 `collectors/gpu/nvidia-wsl/` 示例）。
+2. 在 Server 端登记 collector：
+
+```bash
+# 推荐：--config 在 collector 子命令前面
+bin/lightai-server --config lightai-server.toml collector sync --root collectors/gpu
+
+# 或使用环境变量
+LIGHTAI_SERVER_CONFIG=lightai-server.toml bin/lightai-server collector sync --root collectors/gpu
+
+# 单个 collector 登记
+bin/lightai-server --config lightai-server.toml collector register --dir collectors/gpu/nvidia-wsl
+
+# 预览
+bin/lightai-server --config lightai-server.toml collector inspect --root collectors/gpu
+```
+
+3. 在 Web「配置页面 → 采集器登记」块点击「刷新」查看登记结果。
+4. Agent 配置中设置 `[gpu_collectors]` 并重启 Agent。
+
+**collector 登记说明：**
+
+- release 包已包含 `collectors/` 目录。
+- collector 子命令只读取 `collector.toml` 并计算脚本 hash，不执行采集脚本。
+- 可以在 Server 运行时另开终端执行登记，不需要停止 Server。
+- 必须使用与正在运行 Server 相同的配置文件/数据库。
+- 如登记成功但 Web 看不到，优先检查是否写入了不同数据库。
+- 不要手工修改 collector hash，不要绕过 collector registry 安全机制。
 
 详见 Agent 配置模板中的注释。
 
@@ -306,10 +332,20 @@ Server 默认监听 18080。修改 `lightai-server.toml` 中 `[server].listen_ad
 - 后端已实现最后一个 admin 保护：不能禁用或降级最后一个启用的管理员。
 - 后续如需扩展权限模型，将结合 API Key、租户和计费统一设计。
 
-## 12. 依赖说明
+## 12. 安全说明
+
+- **默认 HTTPS 18443**：Server 使用自签证书提供 HTTPS（`[https]` 配置）。HTTP 18080 默认关闭，仅可选本机排障（127.0.0.1）。
+- **证书生成**：`lightai-server cert init` 纯 Rust 生成自签 CA + Server 证书，不需要 openssl。
+- **setup token**：首次创建管理员必须提供初始化口令；由 `lightai-server cert setup-token` 生成。
+- **Agent TLS**：Agent 使用 ca.crt 校验 Server 证书。`lightai-agent ca fetch` 下载 CA 并显示指纹确认。
+- **ca.crt 可分发**，ca.key / server.key 不可分发。
+- **当前版本无 Agent 安装码**，适合可信内网/客户测试网段；不建议公网暴露 18443。
+- **per-agent token 不自动轮换**；如怀疑泄露应禁用/重新注册 Agent。后续可扩展 token revoke/rotate。
+
+## 13. 依赖说明
 
 - **SQLite**：已 bundled 编译到二进制中，不依赖系统 `libsqlite3.so`。
 - **Web**：由 Server 自托管（`[web].dist_dir = "web/dist"`），不需要 nginx。
 - **系统库**：仅依赖 Linux 标准基础库（`libgcc_s`、`libpthread`、`libm`、`libdl`、`libc`、`ld-linux`）。
-- **不需要**：libsqlite3-dev、nginx、python3、Node.js。
+- **不需要**：libsqlite3-dev、nginx、python3、Node.js、openssl、curl。
 - **GPU/Docker**：Docker、NVIDIA Driver、nvidia-container-toolkit 只在 Docker/vLLM/GPU 实例测试时需要，不在 release 包内。

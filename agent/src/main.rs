@@ -1,5 +1,8 @@
+use std::io::Write;
 use std::net::SocketAddr;
 use std::sync::Arc;
+
+use sha2::{Digest, Sha256};
 
 use lightai_agent::{
     collector, config::Config, heartbeat, managed_process, platform_log, routes, tasks,
@@ -95,6 +98,7 @@ async fn main() -> anyhow::Result<()> {
             }
             "config" => return handle_config_cmd(&args),
             "collector" => return handle_collector_cmd(&args),
+            "ca" => return handle_ca_cmd(&args).await,
             "--config" => {
                 // --config <PATH> — continue to normal startup below.
             }
@@ -115,8 +119,10 @@ async fn main() -> anyhow::Result<()> {
 
     // ── Normal Agent startup ──
 
+    let env_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(env_filter)
         .init();
 
     let (config, source) = Config::load_with_priority(cli_config_path.as_deref())?;
@@ -124,7 +130,7 @@ async fn main() -> anyhow::Result<()> {
 
     platform_log::append(
         &default_log_policy,
-        "agent.log",
+        "lightai-agent.log",
         "info",
         &format!(
             "Agent starting, config source: {}",
@@ -166,7 +172,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or(0);
     let _ = lightai_agent::platform_log::append(
         &lightai_agent::platform_log::LogPolicy::default(),
-        "agent.log",
+        "lightai-agent.log",
         "info",
         &format!(
             "Agent exiting without terminating managed instances. managed store retained {record_count} record(s).",
@@ -322,7 +328,7 @@ async fn log_gpu_collector_diagnostics(
     if config.collector_root.is_none() {
         lightai_agent::platform_log::append(
             log_policy,
-            "agent.log",
+            "lightai-agent.log",
             "warn",
             "GPU collector: [gpu_collectors].root is not configured; no GPU scripts will execute. \
              Configure collector_root and register via the Web collector registry page.",
@@ -334,7 +340,7 @@ async fn log_gpu_collector_diagnostics(
     let root = config.collector_root.as_deref().unwrap_or("");
     lightai_agent::platform_log::append(
         log_policy,
-        "agent.log",
+        "lightai-agent.log",
         "info",
         &format!(
             "GPU collector: root={root}, mode={}, enabled={:?}, disabled={:?}",
@@ -348,7 +354,7 @@ async fn log_gpu_collector_diagnostics(
     if dirs.is_empty() {
         lightai_agent::platform_log::append(
             log_policy,
-            "agent.log",
+            "lightai-agent.log",
             "warn",
             &format!(
                 "GPU collector: no valid collector directories found under root={root}.\
@@ -362,7 +368,7 @@ async fn log_gpu_collector_diagnostics(
     for dir in &dirs {
         lightai_agent::platform_log::append(
             log_policy,
-            "agent.log",
+            "lightai-agent.log",
             "info",
             &format!(
                 "GPU collector found: id={}, vendor={}, name={}, version={}, \
@@ -380,7 +386,7 @@ async fn log_gpu_collector_diagnostics(
 
     lightai_agent::platform_log::append(
         log_policy,
-        "agent.log",
+        "lightai-agent.log",
         "info",
         &format!(
             "GPU collector: found {} collector dir(s) (mode={}）。\
@@ -391,4 +397,86 @@ async fn log_gpu_collector_diagnostics(
     )
     .await?;
     Ok(())
+}
+
+const CA_HELP: &str = r#"lightai-agent ca — CA certificate management
+
+USAGE:
+    lightai-agent ca fetch --server <URL> --out <PATH>
+
+EXAMPLES:
+    lightai-agent ca fetch --server https://172.19.168.153:18443 --out ./certs/ca.crt
+
+DESCRIPTION:
+    Downloads the public CA certificate from the Server's well-known endpoint
+    (/.well-known/lightai/ca.crt), computes and displays the SHA256 fingerprint,
+    and prompts for confirmation before saving.  TLS verification is temporarily
+    disabled only for this single download request — never for normal Agent operation.
+"#;
+
+async fn handle_ca_cmd(args: &[String]) -> anyhow::Result<()> {
+    if args.len() < 3 || args[2] == "--help" || args[2] == "-h" {
+        println!("{CA_HELP}");
+        return Ok(());
+    }
+    match args[2].as_str() {
+        "fetch" => {
+            let server = extract_flag(args, "--server").unwrap_or_else(|| {
+                eprintln!("usage: lightai-agent ca fetch --server <URL> --out <PATH> [--yes]");
+                std::process::exit(1);
+            });
+            let out = extract_flag(args, "--out").unwrap_or_else(|| "./certs/ca.crt".to_string());
+            let auto_yes = args.iter().any(|a| a == "--yes");
+            let out_path = std::path::Path::new(&out);
+            if let Some(parent) = out_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+
+            // Download CA cert, temporarily skipping TLS verification.
+            let client = reqwest::Client::builder()
+                .danger_accept_invalid_certs(true)
+                .build()?;
+            let url = format!("{}/.well-known/lightai/ca.crt", server.trim_end_matches('/'));
+            eprintln!("Downloading CA certificate from {url} ...");
+            let response = client.get(&url).send().await?.error_for_status()?;
+            let cert_bytes = response.bytes().await?;
+
+            // Compute SHA256 fingerprint.
+            let mut hasher = Sha256::new();
+            hasher.update(&cert_bytes);
+            let fp = format!("{:x}", hasher.finalize());
+
+            eprintln!("CA SHA256 fingerprint: {fp}");
+
+            if !auto_yes {
+                eprintln!("Please verify this fingerprint matches the one displayed by init-server.sh.");
+                eprint!("Save CA certificate to {}? [y/N] ", out_path.display());
+                let _ = std::io::stdout().flush();
+                let mut input = String::new();
+                std::io::stdin().read_line(&mut input)?;
+                if input.trim().to_lowercase() != "y" && input.trim().to_lowercase() != "yes" {
+                    eprintln!("Aborted.");
+                    return Ok(());
+                }
+            }
+
+            std::fs::write(out_path, &cert_bytes)?;
+            eprintln!("CA certificate saved to {}", out_path.display());
+            Ok(())
+        }
+        other => {
+            eprintln!("unknown ca subcommand: {other}");
+            eprintln!("{CA_HELP}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn extract_flag(args: &[String], flag: &str) -> Option<String> {
+    for i in 0..args.len() {
+        if args[i] == flag {
+            return args.get(i + 1).cloned();
+        }
+    }
+    None
 }

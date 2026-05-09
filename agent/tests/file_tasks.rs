@@ -201,30 +201,30 @@ async fn platform_log_rotates_and_sanitizes_sensitive_lines() {
         log_retention_days: 7,
     };
 
-    platform_log::append(&policy, "agent.log", "info", "first line")
+    platform_log::append(&policy, "lightai-agent.log", "info", "first line")
         .await
         .unwrap();
-    platform_log::append(&policy, "agent.log", "info", "password=secret")
+    platform_log::append(&policy, "lightai-agent.log", "info", "password=secret")
         .await
         .unwrap();
     platform_log::append(
         &policy,
-        "agent.log",
+        "lightai-agent.log",
         "info",
         "third line that forces rotation",
     )
     .await
     .unwrap();
 
-    let content = platform_log::read_tail(&policy, "agent.log", 4096)
+    let content = platform_log::read_tail(&policy, "lightai-agent.log", 4096)
         .await
         .unwrap();
     assert!(!content.contains("password=secret"));
     assert!(content.contains("third line"));
-    assert!(log_dir.join("agent.log.1").exists());
+    assert!(log_dir.join("lightai-agent.log.1").exists());
 
-    let _ = fs::remove_file(log_dir.join("agent.log"));
-    let _ = fs::remove_file(log_dir.join("agent.log.1"));
+    let _ = fs::remove_file(log_dir.join("lightai-agent.log"));
+    let _ = fs::remove_file(log_dir.join("lightai-agent.log.1"));
     let _ = fs::remove_dir(log_dir);
 }
 

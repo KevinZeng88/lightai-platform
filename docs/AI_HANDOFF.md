@@ -101,6 +101,26 @@ web/src/
 2. 缩短受管进程异常退出到 Server/Web 的同步延迟，例如心跳携带更明确的退出事件或任务结果。
 3. 在本地运行层稳定后，再推进统一模型调用入口、API Key 和用量统计。
 
+## 本地部署验证
+
+`scripts/verify-local-deployment.sh` 用于在本机快速验证 Server/Agent 双包部署主链路，不依赖 glibc2.28 release 打包。
+
+- **工作目录**：`/tmp/lightai-local-deployment/`（可通过 `--workdir` 自定义）。
+- **默认行为**：自动判断 fresh（首次初始化）或 update（增量同步 + 重启），不在源码目录中删除 certs/data/logs/run。
+- **fresh 模式**：完整初始化 certs → 配置 → collector sync → Agent CA 下载 → 启动 → 全链路验证。
+- **update 模式**：只同步 bin/web/dist/collectors/scripts，不覆盖 certs/data/logs/run/toml。
+- **`--keep-running`**：验证完成后不停止服务，方便继续访问 Web 页面。
+
+```bash
+# 日常开发：首次自动 fresh，后续自动 update + restart
+bash scripts/verify-local-deployment.sh --keep-running
+
+# 强制重建
+bash scripts/verify-local-deployment.sh --fresh --keep-running
+```
+
+不要在源码目录中执行 `rm -rf certs data logs run` 等操作。
+
 ## 常用验证
 
 ```bash
@@ -117,12 +137,20 @@ cd web && npm run build
 bash scripts/dev_check_nvidia.sh
 ```
 
+## 安全
+
+- **默认 HTTPS 18443**：HTTP 18080 默认关闭，仅可选本机排障（127.0.0.1 only）。
+- **证书**：`lightai-server cert init`（纯 Rust rcgen）生成自签 CA + Server 证书，不需要 openssl。ca.crt 可分发 Agent，ca.key/server.key 不可分发。
+- **setup token**：`lightai-server cert setup-token` 生成。空库首次创建管理员必须提供；fail-closed 不允许无 token 创建 admin。
+- **Agent TLS**：Agent 使用 ca.crt 校验 Server 证书（`[server].ca_cert_path`）；`lightai-agent ca fetch` 下载 CA 并显示指纹确认。`insecure_skip_tls_verify` 默认 false。
+- **per-agent token**：Agent 注册后使用 Bearer token；Server 只存 hash/prefix；不写日志。当前不自动轮换；如怀疑泄露应禁用/重新注册。
+- **适用场景**：当前版本无 Agent 安装码，适合可信内网/客户测试网段；不建议公网暴露 18443。
+- **后续可扩展**：Agent 安装码、注册审批、一次性 enrollment token、mTLS、token revoke/rotate。
+
 ## Release 打包
 
-- **glibc2.28 包**（推荐）：`bash scripts/package-release-docker.sh v0.1.0` — 在 Rocky Linux 8 容器内编译，生成企业兼容包。
-- **native 包**：`bash scripts/package-release.sh v0.1.0 native` — 宿主机直接编译，仅限本机测试。
-- 不建议直接分发 native 包给老系统。跨服务器测试优先使用 glibc2.28 包。
-- 如果目标服务器仍报 `GLIBC_x.xx not found`，先记录 `getconf GNU_LIBC_VERSION` 和 `ldd --version`，不要建议升级 glibc。
+- **glibc2.28 包**（推荐）：`bash scripts/package-release-docker.sh v0.1.0`。
+- **native 包**：`bash scripts/package-release.sh v0.1.0 native` — 仅限本机测试。
 - 详见 [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md) 的 "Release 包类型" 章节。
 
 实现细节见 [IMPLEMENTATION_NOTES.md](IMPLEMENTATION_NOTES.md)；真实环境步骤见 [LOCAL_TEST_ENV.md](LOCAL_TEST_ENV.md)。

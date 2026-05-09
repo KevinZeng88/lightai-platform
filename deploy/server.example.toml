@@ -31,4 +31,4 @@ force_change_after_reset = true
 ttl_secs = 43200
 idle_timeout_secs = 7200
 # Set true when serving Web/API over HTTPS.
-secure_cookie = false
+secure_cookie = true

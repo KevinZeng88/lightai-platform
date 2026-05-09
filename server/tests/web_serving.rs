@@ -11,7 +11,8 @@ async fn health_returns_json() {
         pool,
         Default::default(),
         Default::default(),
-        None, // web disabled
+        None,
+        None,
     );
 
     let response = app
@@ -41,6 +42,7 @@ async fn api_routes_work_when_web_is_enabled() {
         Default::default(),
         Default::default(),
         Some(web_dir.to_string_lossy().to_string()),
+        None,
     );
 
     // /api/setup/status should return JSON even with web enabled.
@@ -106,12 +108,12 @@ async fn web_disabled_returns_404_on_root() {
         Default::default(),
         Default::default(),
         None,
+        None,
     );
 
     let response = app
         .oneshot(Request::get("/").body(axum::body::Body::empty()).unwrap())
         .await
         .unwrap();
-    // Without web, root returns 404 from axum's default fallback.
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }

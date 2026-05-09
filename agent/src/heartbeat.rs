@@ -56,7 +56,7 @@ async fn run_once(
     Option<Vec<crate::collector::registry::RegistryEntry>>,
     Option<Vec<crate::collector::registry::RegistryEntry>>,
 )> {
-    let client = ServerClient::new(config.server_url.clone());
+    let client = ServerClient::new(config.server_url.clone(), config.ca_cert_path.as_deref(), config.insecure_skip_tls_verify)?;
     let mut next_config = None;
     // Recover only persisted managed process records from the managed store.
     // Do not scan externally started processes or recover non-persisted registrations.
@@ -70,7 +70,7 @@ async fn run_once(
                     if !records.is_empty() {
                         let _ = platform_log::append(
                             &runtime_config.log_policy,
-                            "agent.log",
+                            "lightai-agent.log",
                             "info",
                             &format!(
                                 "Agent recovered {} managed instance record(s) after startup",
@@ -108,7 +108,7 @@ async fn run_once(
             Err(e) => {
                 let _ = platform_log::append(
                     &runtime_config.log_policy,
-                    "agent.log",
+                    "lightai-agent.log",
                     "error",
                     &format!("GPU collector registry fetch failed: {e}"),
                 )
@@ -155,7 +155,7 @@ async fn run_once(
     if running_count > 0 || failed_count > 0 {
         let _ = platform_log::append(
             &runtime_config.log_policy,
-            "agent.log",
+            "lightai-agent.log",
             "debug",
             &format!("Agent heartbeat reporting managed instance status: running={running_count}, failed={failed_count}"),
         )
@@ -169,7 +169,7 @@ async fn run_once(
                 .join("，");
             let _ = platform_log::append(
                 &runtime_config.log_policy,
-                "agent.log",
+                "lightai-agent.log",
                 "warn",
                 &format!("Managed instance process exited: {failed_ids}"),
             )
@@ -201,7 +201,7 @@ async fn run_once(
                 {
                     let _ = platform_log::append(
                         &runtime_config.log_policy,
-                        "agent.log",
+                        "lightai-agent.log",
                         "info",
                         &format!(
                             "Agent config updated config_version={}",
@@ -220,7 +220,7 @@ async fn run_once(
         Err(error) if is_unauthorized(&error) => {
             let _ = platform_log::append(
                 &runtime_config.log_policy,
-                "agent.log",
+                "lightai-agent.log",
                 "warn",
                 "Agent token expired, re-registering",
             )
@@ -247,7 +247,7 @@ async fn run_once(
         Err(error) => {
             let _ = platform_log::append(
                 &runtime_config.log_policy,
-                "agent.log",
+                "lightai-agent.log",
                 "error",
                 &format!("Heartbeat failed: {error}"),
             )
@@ -280,7 +280,7 @@ async fn register(client: &ServerClient, config: &Config) -> anyhow::Result<Regi
     state::save(&config.state_path, &state).await?;
     let _ = platform_log::append(
         &LogPolicy::default(),
-        "agent.log",
+        "lightai-agent.log",
         "info",
         &format!("Agent registered successfully node_id={}", response.node_id),
     )
@@ -430,7 +430,7 @@ async fn log_first_gpu_probe(
         gpu::CollectorStatus::NoCollectorConfigured => {
             let _ = platform_log::append(
                 log_policy,
-                "agent.log",
+                "lightai-agent.log",
                 "warn",
                 "GPU probe: collector_root not configured. GPU collection will not run. Configure [gpu_collectors] and register via Web, then restart Agent.",
             )
@@ -440,7 +440,7 @@ async fn log_first_gpu_probe(
             let summary = errors.join("; ");
             let _ = platform_log::append(
                 log_policy,
-                "agent.log",
+                "lightai-agent.log",
                 "error",
                 &format!(
                     "GPU probe: collector execution failed ({} error(s)). Summary: {summary}",
@@ -452,7 +452,7 @@ async fn log_first_gpu_probe(
         gpu::CollectorStatus::CollectorOkNoDevices => {
             let _ = platform_log::append(
                 log_policy,
-                "agent.log",
+                "lightai-agent.log",
                 "warn",
                 "GPU probe: collector ran successfully but no GPU devices found (GPUs discovered: 0).",
             )
@@ -474,7 +474,7 @@ async fn log_first_gpu_probe(
             }
             let _ = platform_log::append(
                 log_policy,
-                "agent.log",
+                "lightai-agent.log",
                 "info",
                 &format!("GPU probe: {} GPU(s) discovered{}", gpus.len(), summary,),
             )
@@ -497,7 +497,7 @@ async fn log_registry_fetch_details(
     if entries.is_empty() {
         let _ = platform_log::append(
             log_policy,
-            "agent.log",
+            "lightai-agent.log",
             "warn",
             "GPU collector registry fetch: entries=0. No collectors registered on Server.\
              Register collectors via the Web collector registry page; Agent will auto-fetch.",
@@ -508,7 +508,7 @@ async fn log_registry_fetch_details(
 
     let _ = platform_log::append(
         log_policy,
-        "agent.log",
+        "lightai-agent.log",
         "info",
         &format!(
             "GPU collector registry fetch: entries={}, endpoint=/api/agent/collector-registry",
@@ -520,7 +520,7 @@ async fn log_registry_fetch_details(
     for entry in entries {
         let _ = platform_log::append(
             log_policy,
-            "agent.log",
+            "lightai-agent.log",
             "debug",
             &format!(
                 "  registry entry: id={}, version={}, enabled={}, \

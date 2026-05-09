@@ -33,6 +33,8 @@ pub struct SetupStatusResponse {
 pub struct SetupAdminRequest {
     pub username: String,
     pub password: String,
+    #[serde(default)]
+    pub setup_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]

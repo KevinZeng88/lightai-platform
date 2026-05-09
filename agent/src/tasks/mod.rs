@@ -40,7 +40,7 @@ pub(crate) use runtime_check::verify_controlled_entrypoint;
 pub use verify_model::{verify_model_file, verify_model_file_with_hint};
 
 pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
-    let client = ServerClient::new(config.server_url.clone());
+    let client = ServerClient::new(config.server_url.clone(), config.ca_cert_path.as_deref(), config.insecure_skip_tls_verify).expect("TLS client init failed");
     loop {
         let sleep_secs = match state::load(&config.state_path).await {
             Ok(Some(agent_state)) => {

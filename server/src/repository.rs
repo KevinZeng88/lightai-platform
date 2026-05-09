@@ -52,7 +52,7 @@ impl Default for SessionPolicy {
         Self {
             ttl_secs: SESSION_TTL_SECS,
             idle_timeout_secs: Some(2 * 60 * 60),
-            secure_cookie: false,
+            secure_cookie: true,
         }
     }
 }
@@ -1278,7 +1278,7 @@ async fn reconcile_managed_instances(
         if status == "failed" {
             let _ = platform_log::append(
                 &platform_log::global(),
-                "server.log",
+                "lightai-server.log",
                 "warn",
                 &format!(
                     "heartbeat reconcile: instance={instance_id} node={node_id} running→failed: {reason}",
@@ -1324,7 +1324,7 @@ async fn reconcile_managed_instances(
 
         let _ = platform_log::append(
             &platform_log::global(),
-            "server.log",
+            "lightai-server.log",
             "warn",
             &format!(
                 "heartbeat reconcile: instance={id} node={node_id} running→failed: Agent did not report managed process status",

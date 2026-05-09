@@ -31,7 +31,9 @@ ttl_secs = 43200
 
     let config = Config::from_file(&path).unwrap();
 
-    assert_eq!(config.listen_addr, "127.0.0.1:18080");
+    // Legacy [server].listen_addr maps to http.listen_addr
+    assert!(config.http.enabled);
+    assert_eq!(config.http.listen_addr, "127.0.0.1:18080");
     assert_eq!(config.database_url, "sqlite://data/test.db");
     assert_eq!(config.metrics_retention_days, 14);
 
@@ -84,13 +86,13 @@ async fn server_platform_log_uses_controlled_files_and_filters_sensitive_lines()
         log_retention_days: 7,
     };
 
-    platform_log::append(&policy, "server.log", "info", "normal log")
+    platform_log::append(&policy, "lightai-server.log", "info", "normal log")
         .await
         .unwrap();
-    platform_log::append(&policy, "server.log", "info", "authorization: bearer token")
+    platform_log::append(&policy, "lightai-server.log", "info", "authorization: bearer token")
         .await
         .unwrap();
-    let content = platform_log::read_tail(&policy, "server.log", 4096)
+    let content = platform_log::read_tail(&policy, "lightai-server.log", 4096)
         .await
         .unwrap();
 
@@ -100,7 +102,7 @@ async fn server_platform_log_uses_controlled_files_and_filters_sensitive_lines()
         .await
         .is_err());
 
-    let _ = fs::remove_file(dir.join("server.log"));
+    let _ = fs::remove_file(dir.join("lightai-server.log"));
     let _ = fs::remove_dir(dir);
 }
 

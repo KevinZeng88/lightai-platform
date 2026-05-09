@@ -1,5 +1,6 @@
 pub mod agent_tasks;
 pub mod auth;
+pub mod cert;
 pub mod collector_cli;
 pub mod config;
 pub mod db;

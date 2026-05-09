@@ -35,11 +35,27 @@ pub struct ServerClient {
 }
 
 impl ServerClient {
-    pub fn new(base_url: String) -> Self {
-        Self {
-            base_url: base_url.trim_end_matches('/').to_string(),
-            client: reqwest::Client::new(),
+    pub fn new(base_url: String, ca_cert_path: Option<&str>, insecure_skip_tls_verify: bool) -> anyhow::Result<Self> {
+        let mut client = reqwest::Client::builder();
+
+        if insecure_skip_tls_verify {
+            client = client.danger_accept_invalid_certs(true);
+        } else if let Some(path) = ca_cert_path {
+            if std::path::Path::new(path).exists() {
+                let cert = std::fs::read(path)?;
+                let cert = reqwest::tls::Certificate::from_pem(&cert)?;
+                client = client.add_root_certificate(cert);
+            } else {
+                anyhow::bail!("CA certificate not found at '{}'. Run 'lightai-agent ca fetch' to download it, or set insecure_skip_tls_verify=true for diagnostics.", path);
+            }
+        } else {
+            anyhow::bail!("TLS verification requires ca_cert_path or insecure_skip_tls_verify. Configure [server].ca_cert_path in agent.toml.");
         }
+
+        Ok(Self {
+            base_url: base_url.trim_end_matches('/').to_string(),
+            client: client.build()?,
+        })
     }
 
     pub async fn register(&self, request: &RegisterRequest) -> anyhow::Result<RegisterResponse> {

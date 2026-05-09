@@ -15,6 +15,8 @@ pub struct Config {
     pub server_url: String,
     pub node_name: String,
     pub state_path: String,
+    pub ca_cert_path: Option<String>,
+    pub insecure_skip_tls_verify: bool,
     pub collector_root: Option<String>,
     pub collector_mode: String,
     pub collector_enabled: Vec<String>,
@@ -25,9 +27,11 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             listen_addr: "127.0.0.1:18081".to_string(),
-            server_url: "http://127.0.0.1:18080".to_string(),
+            server_url: "https://127.0.0.1:18443".to_string(),
             node_name: hostname(),
             state_path: "data/agent-state.toml".to_string(),
+            ca_cert_path: Some("./certs/ca.crt".to_string()),
+            insecure_skip_tls_verify: false,
             collector_root: Some("./collectors/gpu".to_string()),
             collector_mode: "explicit".to_string(),
             collector_enabled: vec!["nvidia-wsl".to_string()],
@@ -101,6 +105,17 @@ impl Config {
                 config.state_path = value;
             }
         }
+        if let Some(server) = file_config.server {
+            if let Some(value) = server.url {
+                config.server_url = value;
+            }
+            if let Some(value) = server.ca_cert_path {
+                config.ca_cert_path = if value.is_empty() { None } else { Some(value) };
+            }
+            if let Some(value) = server.insecure_skip_tls_verify {
+                config.insecure_skip_tls_verify = value;
+            }
+        }
 
         if let Some(gc) = file_config.gpu_collectors {
             if let Some(root) = gc.root {
@@ -141,6 +156,7 @@ impl Config {
 #[serde(deny_unknown_fields)]
 struct FileConfig {
     agent: Option<AgentSection>,
+    server: Option<ServerSection>,
     gpu_collectors: Option<GpuCollectorsSection>,
 }
 
@@ -151,6 +167,14 @@ struct AgentSection {
     server_url: Option<String>,
     node_name: Option<String>,
     state_path: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ServerSection {
+    url: Option<String>,
+    ca_cert_path: Option<String>,
+    insecure_skip_tls_verify: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -174,14 +198,18 @@ pub const CONFIG_TEMPLATE: &str = r#"# LightAI Agent configuration.
 # Agent local listen address.
 listen_addr = "127.0.0.1:18081"
 
-# LightAI Server URL.
-server_url = "http://127.0.0.1:18080"
-
-# Node name.  Defaults to hostname if omitted or empty.
-# node_name = "gpu-node-01"
-
 # Agent state file path.
 state_path = "data/agent-state.toml"
+
+[server]
+# LightAI Server URL (HTTPS required for production).
+url = "https://127.0.0.1:18443"
+
+# Path to CA certificate for Server TLS verification.
+ca_cert_path = "./certs/ca.crt"
+
+# WARNING: Only for temporary diagnostics.  Never use in production.
+# insecure_skip_tls_verify = false
 
 # ── GPU / accelerator collector configuration ──
 # Paths are relative to the process CWD.
