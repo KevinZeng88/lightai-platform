@@ -49,10 +49,10 @@ async fn docker_or_script_runtime_environment_requires_online_agent() {
         "POST",
         &format!("/api/nodes/{node_id}/runtime-environments"),
         Some(json!({
-            "name": "Node Ollama",
-            "backend": "ollama",
+            "name": "Node Script",
+            "backend": "custom",
             "deploy_type": "script",
-            "binary_path": "/usr/local/bin/ollama",
+            "binary_path": "/usr/local/bin/run-model",
             "enabled": true
         })),
     )
@@ -64,6 +64,42 @@ async fn docker_or_script_runtime_environment_requires_online_agent() {
         .as_str()
         .unwrap()
         .contains("Agent is offline"));
+}
+
+#[tokio::test]
+async fn ollama_runtime_environment_saves_without_agent_check_or_binary_path() {
+    let app = test_app().await;
+    let registered = register_node_json(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+
+    let (status, json) = request(
+        app,
+        "POST",
+        &format!("/api/nodes/{node_id}/runtime-environments"),
+        Some(json!({
+            "name": "Node Ollama",
+            "backend": "ollama",
+            "deploy_type": "binary",
+            "params_json": json!({
+                "defaults": {
+                    "host": "127.0.0.1",
+                    "port": 11434
+                }
+            }).to_string(),
+            "enabled": true
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["backend"], "ollama");
+    assert_eq!(json["deploy_type"], "binary");
+    assert_eq!(json["binary_path"], Value::Null);
+    assert_eq!(json["check_status"], "available");
+    assert!(json["check_message"]
+        .as_str()
+        .unwrap()
+        .contains("Ollama runtime config saved"));
 }
 
 #[tokio::test]

@@ -103,6 +103,8 @@ pub async fn refresh_instance_logs(pool: &SqlitePool, id: &str) -> Result<String
     let now = now_unix_secs();
     let payload = serde_json::json!({
         "instance_id": id,
+        "backend": env.backend,
+        "runtime_environment_id": runtime_environment_id,
         "log_dir": env.log_dir,
         "max_bytes": 64 * 1024_u64,
     });

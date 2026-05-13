@@ -116,7 +116,10 @@ pub(super) fn validate_runtime_entrypoints(
                 "Docker runtime must specify an image".to_string(),
             ));
         }
-        "script" | "binary" if request.binary_path.as_deref().is_none_or(str::is_empty) => {
+        "script" | "binary"
+            if request.backend != "ollama"
+                && request.binary_path.as_deref().is_none_or(str::is_empty) =>
+        {
             return Err(DomainError::BadRequest(
                 "Runtime must specify a controlled entry path".to_string(),
             ));

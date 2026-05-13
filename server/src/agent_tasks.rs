@@ -268,7 +268,10 @@ pub async fn record_agent_task_result(
         // handled by refresh_instance_logs polling; no extra state update needed
     } else if matches!(
         task.get::<String, _>("kind").as_str(),
-        "start_model_instance" | "stop_model_instance" | "test_model_instance"
+        "start_model_instance"
+            | "stop_model_instance"
+            | "check_model_instance"
+            | "test_model_instance"
     ) {
         let payload: serde_json::Value =
             serde_json::from_str(&task.get::<String, _>("payload_json"))
@@ -328,6 +331,13 @@ pub async fn record_agent_task_result(
             } else {
                 format!("{message}：{summary}")
             });
+        }
+        if kind == "check_model_instance" && request.status == "succeeded" {
+            last_error = request
+                .result
+                .get("message")
+                .and_then(|value| value.as_str())
+                .map(str::to_string);
         }
         let base_url = request
             .result
@@ -442,7 +452,10 @@ pub(crate) async fn mark_timed_out_tasks(pool: &SqlitePool) -> Result<(), Domain
             }
         } else if matches!(
             row.get::<String, _>("kind").as_str(),
-            "start_model_instance" | "stop_model_instance" | "test_model_instance"
+            "start_model_instance"
+                | "stop_model_instance"
+                | "check_model_instance"
+                | "test_model_instance"
         ) {
             if let Ok(payload) =
                 serde_json::from_str::<serde_json::Value>(&row.get::<String, _>("payload_json"))

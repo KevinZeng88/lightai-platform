@@ -52,10 +52,10 @@
     <el-table-column v-if="role !== 'viewer'" label="操作" width="360" fixed="right">
       <template #default="{ row }">
         <el-button v-if="row.deploy_type === 'external'" size="small" @click="check(row)">检查状态</el-button>
-        <el-button v-else size="small" :disabled="row.status !== 'running'" @click="check(row)">检查状态</el-button>
+        <el-button v-else size="small" :disabled="!canCheckLocal(row)" @click="check(row)">检查状态</el-button>
         <el-button v-if="row.deploy_type === 'local'" size="small" type="success" :disabled="!['stopped', 'failed', 'created', 'unknown'].includes(row.status) || isAgentOffline(row)" @click="start(row)">启动</el-button>
         <el-button v-if="row.deploy_type === 'local'" size="small" :disabled="row.status !== 'running' || isAgentOffline(row)" @click="stop(row)">停止</el-button>
-        <el-button v-if="row.deploy_type === 'local'" size="small" :disabled="row.status !== 'running' || isAgentOffline(row)" @click="testLocal(row)">测试</el-button>
+        <el-button v-if="row.deploy_type === 'local'" size="small" :disabled="!canTestLocal(row)" @click="testLocal(row)">测试</el-button>
         <el-button size="small" @click="openLogs(row)">日志</el-button>
         <el-button size="small" @click="openEdit(row)">编辑</el-button>
         <el-button size="small" type="danger" @click="remove(row)">删除</el-button>
@@ -441,6 +441,16 @@ const isInstanceRunning = computed(() => {
   const inst = instances.value.find(i => i.id === editingId.value)
   return inst ? ['running', 'starting', 'stopping'].includes(inst.status) : false
 })
+
+function canCheckLocal(row: ModelInstance) {
+  if (isAgentOffline(row)) return false
+  return row.backend === 'ollama' || row.status === 'running'
+}
+
+function canTestLocal(row: ModelInstance) {
+  if (isAgentOffline(row)) return false
+  return row.backend === 'ollama' || row.status === 'running'
+}
 
 function onRuntimeChange() {
   const runtime = runtimeEnvironments.value.find(e => e.id === form.value.runtime_environment_id)

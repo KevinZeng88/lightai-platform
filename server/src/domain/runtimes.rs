@@ -26,8 +26,12 @@ pub async fn create_runtime_environment(
         request.allowed_model_dirs_json.as_deref(),
     )?;
     validate_json_field("params_json", request.params_json.as_deref())?;
-    ensure_node_online(pool, node_id).await?;
-    let checked = check_runtime_environment_before_save(pool, node_id, &request).await?;
+    let checked = if request.backend == "ollama" {
+        ollama_runtime_config_check()
+    } else {
+        ensure_node_online(pool, node_id).await?;
+        check_runtime_environment_before_save(pool, node_id, &request).await?
+    };
 
     let now = now_unix_secs();
     let id = Uuid::new_v4().to_string();
@@ -137,6 +141,7 @@ pub async fn update_runtime_environment(
         )));
     }
 
+    let is_ollama = request.backend == "ollama";
     let now = now_unix_secs();
     let result = sqlx::query(
         r#"
@@ -173,6 +178,11 @@ pub async fn update_runtime_environment(
         ));
     }
 
+    if is_ollama {
+        let checked = ollama_runtime_config_check();
+        update_runtime_environment_check(pool, id, &checked.check_status, &checked.message).await?;
+    }
+
     runtime_environment(pool, id).await
 }
 
@@ -205,6 +215,11 @@ pub async fn check_runtime_environment(
     id: &str,
 ) -> Result<RuntimeEnvironmentView, DomainError> {
     let environment = runtime_environment(pool, id).await?;
+    if environment.backend == "ollama" {
+        let checked = ollama_runtime_config_check();
+        update_runtime_environment_check(pool, id, &checked.check_status, &checked.message).await?;
+        return runtime_environment(pool, id).await;
+    }
     let node_id = environment
         .node_id
         .as_deref()
@@ -282,6 +297,15 @@ struct CheckedRuntimeEnvironment {
     version: Option<String>,
     message: String,
     checked_at: i64,
+}
+
+fn ollama_runtime_config_check() -> CheckedRuntimeEnvironment {
+    CheckedRuntimeEnvironment {
+        check_status: "available".to_string(),
+        version: None,
+        message: "Ollama runtime config saved; daemon availability is checked when listing models or starting instances".to_string(),
+        checked_at: now_unix_secs(),
+    }
 }
 
 async fn check_runtime_environment_before_save(

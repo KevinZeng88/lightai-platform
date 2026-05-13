@@ -349,7 +349,7 @@ pub async fn check_model_instance(
 ) -> Result<ModelInstanceView, DomainError> {
     let instance = model_instance(pool, id).await?;
     if instance.deploy_type != "external" {
-        if instance.status != "running" {
+        if instance.status != "running" && instance.backend != "ollama" {
             return Ok(instance);
         }
         let node_id = instance

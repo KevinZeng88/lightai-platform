@@ -511,3 +511,171 @@ async fn local_instance_test_uses_agent_task_and_preserves_external_check() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(external["deploy_type"], "external");
 }
+
+#[tokio::test]
+async fn stopped_ollama_instance_check_uses_agent_task() {
+    let (app, pool) = test_app_with_pool().await;
+    let registered = register_node_json(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+    let token = registered["agent_token"].as_str().unwrap();
+    heartbeat_node(app.clone(), node_id, token).await;
+
+    sqlx::query(
+        r#"
+        INSERT INTO runtime_environments (
+            id, node_id, name, backend, deploy_type, params_json, enabled,
+            check_status, check_message, created_at, updated_at
+        )
+        VALUES (
+            'ollama-runtime', ?, 'Node Ollama', 'ollama', 'binary',
+            '{"defaults":{"host":"127.0.0.1","port":11434}}', 1,
+            'available', 'Ollama runtime config saved', 1, 1
+        )
+        "#,
+    )
+    .bind(node_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, instance) = request(
+        app.clone(),
+        "POST",
+        "/api/model-instances",
+        Some(json!({
+            "deploy_type": "local",
+            "name": "qwen ollama",
+            "node_id": node_id,
+            "runtime_environment_id": "ollama-runtime",
+            "params_json": "{\"ollama_model\":\"qwen2.5:7b\"}"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(instance["status"], "stopped");
+    assert_eq!(instance["model_file_id"], Value::Null);
+
+    let instance_id = instance["id"].as_str().unwrap();
+    let check_uri = format!("/api/model-instances/{instance_id}/check");
+    let check_request = request(app.clone(), "POST", &check_uri, None);
+    let agent = async {
+        let task = tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            poll_agent_task(app.clone(), node_id, token),
+        )
+        .await
+        .expect("check should enqueue an Ollama Agent task");
+        assert_eq!(task["task"]["kind"], "check_model_instance");
+        assert_eq!(task["task"]["payload"]["backend"], "ollama");
+        assert_eq!(
+            task["task"]["payload"]["runtime_environment_id"],
+            "ollama-runtime"
+        );
+        let task_id = task["task"]["id"].as_str().unwrap();
+        report_instance_task_result_with_details(
+            app.clone(),
+            node_id,
+            token,
+            task_id,
+            json!({
+                "instance_status": "running",
+                "message": "ollama model available: qwen2.5:7b",
+                "base_url": "http://127.0.0.1:11434",
+                "endpoint_url": "http://127.0.0.1:11434/api/generate"
+            }),
+        )
+        .await;
+    };
+    let ((status, checked), _) = tokio::join!(check_request, agent);
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(checked["status"], "running");
+    assert_eq!(checked["base_url"], "http://127.0.0.1:11434");
+}
+
+#[tokio::test]
+async fn ollama_instance_log_refresh_payload_targets_daemon_log() {
+    let (app, pool) = test_app_with_pool().await;
+    let registered = register_node_json(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+    let token = registered["agent_token"].as_str().unwrap();
+    heartbeat_node(app.clone(), node_id, token).await;
+
+    sqlx::query(
+        r#"
+        INSERT INTO runtime_environments (
+            id, node_id, name, backend, deploy_type, log_dir, params_json, enabled,
+            check_status, check_message, created_at, updated_at
+        )
+        VALUES (
+            'ollama-runtime', ?, 'Node Ollama', 'ollama', 'binary', 'logs',
+            '{"defaults":{"host":"127.0.0.1","port":11434}}', 1,
+            'available', 'Ollama runtime config saved', 1, 1
+        )
+        "#,
+    )
+    .bind(node_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    let (status, instance) = request(
+        app.clone(),
+        "POST",
+        "/api/model-instances",
+        Some(json!({
+            "deploy_type": "local",
+            "name": "qwen ollama logs",
+            "node_id": node_id,
+            "runtime_environment_id": "ollama-runtime",
+            "params_json": "{\"ollama_model\":\"qwen2.5:7b\"}"
+        })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let instance_id = instance["id"].as_str().unwrap();
+    let logs_uri = format!("/api/model-instances/{instance_id}/logs");
+    let logs_request = request(app.clone(), "POST", &logs_uri, None);
+    let agent = async {
+        let task = poll_agent_task(app.clone(), node_id, token).await;
+        assert_eq!(task["task"]["kind"], "read_instance_log");
+        assert_eq!(task["task"]["payload"]["backend"], "ollama");
+        assert_eq!(
+            task["task"]["payload"]["runtime_environment_id"],
+            "ollama-runtime"
+        );
+        assert_eq!(task["task"]["payload"]["log_dir"], "logs");
+        let task_id = task["task"]["id"].as_str().unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/agent/tasks/{task_id}/result"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(
+                        json!({
+                            "node_id": node_id,
+                            "status": "succeeded",
+                            "result": {
+                                "log_status": "available",
+                                "content": "ollama daemon log tail",
+                                "message": "read from ollama daemon log"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    };
+    let ((status, logs), _) = tokio::join!(logs_request, agent);
+    assert_eq!(status, StatusCode::OK);
+    assert!(logs["content"]
+        .as_str()
+        .unwrap()
+        .contains("ollama daemon log tail"));
+}
