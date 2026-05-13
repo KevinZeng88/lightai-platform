@@ -81,7 +81,7 @@ pub async fn refresh_instance_logs(pool: &SqlitePool, id: &str) -> Result<String
     let instance = model_instance(pool, id).await?;
     if instance.deploy_type != "local" {
         return Err(DomainError::BadRequest(
-            "Only local instances support log refresh".to_string(),
+            "External instances are not managed by the platform Agent and do not support log refresh. (外部实例不由平台 Agent 管理，不支持读取日志)".to_string(),
         ));
     }
     let node_id = instance
@@ -173,6 +173,83 @@ pub async fn refresh_instance_logs(pool: &SqlitePool, id: &str) -> Result<String
             agent_tasks::mark_task_timed_out(pool, &task_id).await?;
             return Err(DomainError::Conflict(
                 "Instance log read timed out".to_string(),
+            ));
+        }
+        sleep(Duration::from_millis(100)).await;
+    }
+}
+
+pub async fn ollama_model_list(
+    pool: &SqlitePool,
+    node_id: &str,
+    runtime_env_id: &str,
+) -> Result<Vec<serde_json::Value>, DomainError> {
+    if !node_online(pool, node_id).await? {
+        return Err(DomainError::Conflict(
+            "Node Agent offline, cannot query Ollama models".to_string(),
+        ));
+    }
+    let env = runtime_environment(pool, runtime_env_id).await?;
+    let task_id = Uuid::new_v4().to_string();
+    let now = now_unix_secs();
+    let payload = serde_json::json!({
+        "runtime_environment_id": runtime_env_id,
+        "runtime_params": env.params_json
+            .as_deref()
+            .and_then(|v| serde_json::from_str::<serde_json::Value>(v).ok())
+            .unwrap_or_default(),
+    });
+    sqlx::query(
+        r#"
+        INSERT INTO agent_tasks (
+            id, node_id, kind, status, payload_json, attempt_count, created_at, updated_at
+        )
+        VALUES (?, ?, 'list_ollama_models', 'queued', ?, 0, ?, ?)
+        "#,
+    )
+    .bind(&task_id)
+    .bind(node_id)
+    .bind(payload.to_string())
+    .bind(now)
+    .bind(now)
+    .execute(pool)
+    .await?;
+    crate::agent_tasks::notify_agent_tasks();
+
+    let deadline = Instant::now() + Duration::from_secs(LOG_READ_TIMEOUT_SECS);
+    loop {
+        let row =
+            sqlx::query("SELECT status, result_json, error_message FROM agent_tasks WHERE id = ?")
+                .bind(&task_id)
+                .fetch_one(pool)
+                .await?;
+        let status: String = row.get("status");
+        match status.as_str() {
+            "succeeded" => {
+                let result_json: Option<String> = row.get("result_json");
+                let result = result_json
+                    .as_deref()
+                    .and_then(|value| serde_json::from_str::<serde_json::Value>(value).ok())
+                    .unwrap_or_default();
+                let models = result
+                    .get("models")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                return Ok(models);
+            }
+            "failed" => {
+                return Err(DomainError::Conflict(
+                    row.get::<Option<String>, _>("error_message")
+                        .unwrap_or_else(|| "Ollama model list query failed".to_string()),
+                ));
+            }
+            _ => {}
+        }
+        if Instant::now() >= deadline {
+            crate::agent_tasks::mark_task_timed_out(pool, &task_id).await?;
+            return Err(DomainError::Conflict(
+                "Ollama model list query timed out".to_string(),
             ));
         }
         sleep(Duration::from_millis(100)).await;

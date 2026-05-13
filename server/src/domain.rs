@@ -9,7 +9,8 @@ mod runtimes;
 mod support;
 
 pub use instance_logs::{
-    frontend_error_summary, read_agent_log, recent_error_summary, refresh_instance_logs,
+    frontend_error_summary, ollama_model_list, read_agent_log, recent_error_summary,
+    refresh_instance_logs,
 };
 pub use instances::{
     check_model_instance, create_model_instance, delete_model_instance, list_model_instances,

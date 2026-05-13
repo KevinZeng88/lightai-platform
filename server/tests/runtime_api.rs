@@ -19,7 +19,7 @@ async fn runtime_environments_can_be_listed_by_node_and_globally() {
     let created = create_runtime_environment(app.clone(), node_id, token).await;
 
     assert_eq!(created["node_id"], node_id);
-    assert_eq!(created["backend"], "ollama");
+    assert_eq!(created["backend"], "llama_cpp");
     assert_eq!(created["deploy_type"], "binary");
     assert_eq!(created["version"], "0.5.0");
     assert_eq!(created["check_status"], "available");

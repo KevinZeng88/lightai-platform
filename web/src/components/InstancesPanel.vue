@@ -128,7 +128,7 @@
             />
           </el-select>
         </el-form-item>
-        <el-form-item label="模型文件">
+        <el-form-item v-if="!isOllamaRuntime" label="模型文件">
           <el-select v-model="form.model_file_id" filterable @change="onModelChange">
             <el-option
               v-for="file in localFileOptions"
@@ -138,6 +138,30 @@
             />
           </el-select>
         </el-form-item>
+        <template v-if="isOllamaRuntime">
+          <el-form-item label="Ollama 模型">
+            <div>
+              <el-select v-model="form.ollama_model" filterable allow-create style="width:100%" placeholder="选择或输入模型名">
+                <el-option v-for="m in ollamaModelList" :key="m.name" :label="m.name" :value="m.name" />
+              </el-select>
+              <div style="margin-top:6px">
+                <el-button :loading="ollamaModelsLoading" size="small" @click="refreshOllamaModels">刷新模型</el-button>
+                <span v-if="ollamaModelsLoading" style="margin-left:8px" class="muted">正在查询...</span>
+                <span v-else-if="ollamaModelList.length > 0" class="muted" style="margin-left:8px">{{ ollamaModelList.length }} 个模型</span>
+                <span v-else class="muted" style="margin-left:8px">暂无模型</span>
+              </div>
+            </div>
+            <div class="muted tiny-text" style="margin-top:4px">选择已有模型或手工输入。如模型列表为空，请在节点执行 <code>ollama pull &lt;model&gt;</code>。</div>
+          </el-form-item>
+          <el-form-item label="keep_alive 覆盖">
+            <el-input v-model="form.ollama_keep_alive" placeholder="留空则使用 Runtime 默认" style="width:160px" />
+            <div class="muted tiny-text" style="margin-top:4px">控制模型加载后的保留时间（如 10m、1h）。留空则使用 Runtime 默认值。</div>
+          </el-form-item>
+          <el-alert
+            title="Ollama 实例共享同一 daemon。start = 加载/预热模型，stop = 卸载模型（不停止 daemon）。日志为共享 Ollama daemon 日志，不是单模型独立日志。"
+            type="info" show-icon class="alert"
+          />
+        </template>
         <el-alert v-if="compatWarning" :title="compatWarning" type="warning" show-icon class="alert" />
 
         <!-- Docker instance form -->
@@ -279,7 +303,7 @@
         </template>
 
         <!-- Local (non-Docker) instance form -->
-        <template v-else>
+        <template v-if="!isOllamaRuntime">
           <el-divider content-position="left">运行参数</el-divider>
           <el-form-item label="监听地址">
             <el-input v-model="form.host" placeholder="127.0.0.1" />
@@ -367,8 +391,9 @@ import {
   updateModelInstance
 } from '../api'
 import type { ModelDefinition, ModelFile, ModelInstance, NodeStatus, RuntimeEnvironment } from '../types'
+import { fetchOllamaModels, type OllamaModelItem } from '../api'
 import { backendLabel, checkFailedReason, deployTypeLabel, emptyToNull, formatTime, instanceStatusLabel, isAgentOffline, runtimeDeployTypeLabel, statusLabel, statusType } from '../utils/instance'
-import { buildDockerInstanceParams, detectOverrides, emptyForm, localParams, parseParams, parseRuntimeDefaults } from './instances/instanceParams'
+import { buildDockerInstanceParams, buildOllamaParams, detectOverrides, emptyForm, localParams, parseParams, parseRuntimeDefaults } from './instances/instanceParams'
 import type { DockerRuntimeDefaults, InstanceForm } from './instances/instanceParams'
 import { useInstanceRefresh } from './instances/useInstanceRefresh'
 import { checkModelRuntimeCompat } from '../utils/templates'
@@ -404,6 +429,12 @@ const isDockerRuntime = computed(() => {
   const rt = runtimeEnvironments.value.find(e => e.id === form.value.runtime_environment_id)
   return rt?.deploy_type === 'docker'
 })
+const isOllamaRuntime = computed(() => {
+  const rt = runtimeEnvironments.value.find(e => e.id === form.value.runtime_environment_id)
+  return rt?.backend === 'ollama'
+})
+const ollamaModelList = ref<OllamaModelItem[]>([])
+const ollamaModelsLoading = ref(false)
 
 const isInstanceRunning = computed(() => {
   if (!editingId.value) return false
@@ -412,8 +443,12 @@ const isInstanceRunning = computed(() => {
 })
 
 function onRuntimeChange() {
-  if (!isDockerRuntime.value) return
   const runtime = runtimeEnvironments.value.find(e => e.id === form.value.runtime_environment_id)
+  if (!runtime) return
+  if (runtime.backend) {
+    form.value.backend = runtime.backend
+  }
+  if (!isDockerRuntime.value) return
   if (!runtime?.params_json) return
 
   const defaults = parseRuntimeDefaults(runtime.params_json)
@@ -430,6 +465,21 @@ function onRuntimeChange() {
   }
   if (defaults.extra_backend_args.length > 0) {
     form.value.extra_backend_args_text = defaults.extra_backend_args.join('\n')
+  }
+}
+
+async function refreshOllamaModels() {
+  const rtId = form.value.runtime_environment_id
+  const nId = form.value.node_id
+  if (!rtId || !nId) return
+  ollamaModelsLoading.value = true
+  try {
+    ollamaModelList.value = await fetchOllamaModels(nId, rtId)
+  } catch (err) {
+    ElMessage.warning(err instanceof Error ? err.message : 'Ollama 模型列表查询失败')
+    ollamaModelList.value = []
+  } finally {
+    ollamaModelsLoading.value = false
   }
 }
 
@@ -554,6 +604,7 @@ function openCreate() {
     extra_docker_args: [],
     extra_backend_args: [],
   })
+  ollamaModelList.value = []
   dialogVisible.value = true
 }
 
@@ -609,6 +660,12 @@ function openEdit(row: ModelInstance) {
     probe_interval_ms: params.probe_interval_ms,
     probe_timeout_ms: params.probe_timeout_ms,
     params_json: row.params_json ?? '',
+    ollama_model: params.ollama_model,
+    ollama_keep_alive: params.ollama_keep_alive,
+  }
+  if (row.backend === 'ollama') {
+    const rt = runtimeEnvironments.value.find(e => e.id === row.runtime_environment_id)
+    if (rt) refreshOllamaModels()
   }
   dialogVisible.value = true
 }
@@ -649,9 +706,20 @@ async function submit() {
     error.value = '请填写实例名称、服务模型名和基础地址'
     return
   }
-  if (form.value.deploy_type === 'local' && (!form.value.name || !form.value.node_id || !form.value.runtime_environment_id || !form.value.model_file_id)) {
-    error.value = '请填写本地实例名称、节点、运行环境和模型文件'
-    return
+  if (form.value.deploy_type === 'local') {
+    if (!form.value.name || !form.value.node_id || !form.value.runtime_environment_id) {
+      error.value = '请填写本地实例名称、节点和运行环境'
+      return
+    }
+    if (isOllamaRuntime.value) {
+      if (!form.value.ollama_model.trim()) {
+        error.value = '请选择或输入 Ollama 模型名称'
+        return
+      }
+    } else if (!form.value.model_file_id) {
+      error.value = '请选择模型文件'
+      return
+    }
   }
   const payload = {
     model_id: emptyToNull(form.value.model_id),
@@ -670,17 +738,23 @@ async function submit() {
     params_json: form.value.deploy_type === 'local'
       ? (isDockerRuntime.value
           ? JSON.stringify(buildDockerInstanceParams(form.value, instOverrides))
-          : JSON.stringify(localParams(form.value)))
+          : isOllamaRuntime.value
+            ? JSON.stringify(buildOllamaParams(form.value))
+            : JSON.stringify(localParams(form.value)))
       : null,
     status: 'unknown'
   }
-  if (editingId.value) {
-    await updateModelInstance(editingId.value, payload)
-  } else {
-    await createModelInstance(payload)
+  try {
+    if (editingId.value) {
+      await updateModelInstance(editingId.value, payload)
+    } else {
+      await createModelInstance(payload)
+    }
+    dialogVisible.value = false
+    await loadData()
+  } catch (err) {
+    ElMessage.error(err instanceof Error ? err.message : '保存实例失败')
   }
-  dialogVisible.value = false
-  await loadData()
 }
 
 async function pollInstanceUntilStable(id: string, initialStatus: string) {

@@ -321,10 +321,10 @@ pub async fn create_runtime_environment(app: axum::Router, node_id: &str, token:
         "POST",
         &uri,
         Some(json!({
-            "name": "Ollama Local",
-            "backend": "ollama",
+            "name": "llama.cpp Local",
+            "backend": "llama_cpp",
             "deploy_type": "binary",
-            "binary_path": "/usr/local/bin/ollama",
+            "binary_path": "/usr/local/bin/llama-server",
             "enabled": true
         })),
     );
@@ -505,7 +505,7 @@ pub async fn create_model_for_node_with_agent_result(
             "display_name": "Qwen2 7B",
             "model_type": "llm",
             "description": "test model",
-            "default_backend": "ollama",
+            "default_backend": "llama_cpp",
             "initial_file": {
                 "node_id": node_id,
                 "path": path

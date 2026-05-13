@@ -184,6 +184,7 @@ pub fn app_with_web(
             post(refresh_instance_logs),
         )
         .route("/api/model-file-trash", get(list_model_file_trash))
+        .route("/api/ollama/models", get(list_ollama_models))
         .route("/api/logs", get(read_logs))
         .route("/api/frontend-errors", post(report_frontend_error))
         .route("/api/audit-events", get(list_audit_events))
@@ -1523,6 +1524,22 @@ async fn report_frontend_error(
     )
     .await;
     Ok(StatusCode::OK)
+}
+
+async fn list_ollama_models(
+    State(pool): State<SqlitePool>,
+    Query(query): Query<serde_json::Value>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let node_id = query
+        .get("node_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::BadRequest("node_id is required".to_string()))?;
+    let runtime_env_id = query
+        .get("runtime_env_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| ApiError::BadRequest("runtime_env_id is required".to_string()))?;
+    let models = domain::ollama_model_list(&pool, node_id, runtime_env_id).await?;
+    Ok(Json(serde_json::json!({ "models": models })))
 }
 
 async fn list_model_file_trash(

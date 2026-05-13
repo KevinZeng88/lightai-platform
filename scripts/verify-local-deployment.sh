@@ -275,6 +275,72 @@ SCRIPT
 }
 
 # ═══════════════════════════════════════════════════════════════════════
+# Helper: sync agent CA from server CA
+# ═══════════════════════════════════════════════════════════════════════
+
+sync_agent_ca() {
+    local server_ca="${SERVER_DIR}/certs/ca.crt"
+    local agent_ca="${AGENT_DIR}/certs/ca.crt"
+
+    if [ ! -f "$server_ca" ]; then
+        echo "  WARNING: server CA not found at ${server_ca}; skip agent CA sync"
+        return 0
+    fi
+
+    if [ ! -f "$agent_ca" ]; then
+        echo "  Syncing agent CA from server CA (agent CA missing)..."
+        mkdir -p "$(dirname "$agent_ca")"
+        cp "$server_ca" "$agent_ca"
+        return 0
+    fi
+
+    if ! cmp -s "$server_ca" "$agent_ca"; then
+        echo "  Syncing agent CA from server CA (fingerprint mismatch)..."
+        cp "$server_ca" "$agent_ca"
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════
+# Helper: preflight TLS check — verify server cert against agent CA
+# ═══════════════════════════════════════════════════════════════════════
+
+preflight_tls_check() {
+    local server_cert="${SERVER_DIR}/certs/server.crt"
+    local agent_ca="${AGENT_DIR}/certs/ca.crt"
+
+    if [ ! -f "$server_cert" ] || [ ! -f "$agent_ca" ]; then
+        return 0
+    fi
+
+    if command -v openssl >/dev/null 2>&1; then
+        if openssl verify -CAfile "$agent_ca" "$server_cert" >/dev/null 2>&1; then
+            echo "  TLS preflight OK: agent CA validates server certificate"
+        else
+            echo "  TLS preflight FAILED: agent CA does NOT validate server certificate"
+            echo "  Server CA fingerprint:"
+            openssl x509 -in "${SERVER_DIR}/certs/ca.crt" -noout -fingerprint -sha256 2>/dev/null || true
+            echo "  Agent CA fingerprint:"
+            openssl x509 -in "${AGENT_DIR}/certs/ca.crt" -noout -fingerprint -sha256 2>/dev/null || true
+            echo "  Agent CA will be re-synced from server CA."
+            cp "${SERVER_DIR}/certs/ca.crt" "${AGENT_DIR}/certs/ca.crt"
+        fi
+    else
+        # Fallback: compare SHA256 fingerprints.
+        if command -v sha256sum >/dev/null 2>&1; then
+            local s_fp a_fp
+            s_fp=$(sha256sum "$server_ca" | awk '{print $1}')
+            a_fp=$(sha256sum "$agent_ca" | awk '{print $1}')
+            if [ "$s_fp" != "$a_fp" ]; then
+                echo "  Agent CA fingerprint differs from server CA; syncing..."
+                echo "    server CA sha256: ${s_fp}"
+                echo "    agent  CA sha256: ${a_fp}"
+                cp "$server_ca" "$agent_ca"
+            fi
+        fi
+    fi
+}
+
+# ═══════════════════════════════════════════════════════════════════════
 # Early-exit paths: --clean, --stop
 # ═══════════════════════════════════════════════════════════════════════
 
@@ -408,6 +474,11 @@ if [ "$MODE" = "fresh" ]; then
 fi
 
 # ═══════════════════════════════════════════════════════════════════════
+# Sync agent CA from server CA (both fresh and update)
+# ═══════════════════════════════════════════════════════════════════════
+sync_agent_ca
+
+# ═══════════════════════════════════════════════════════════════════════
 # Start services (skip if --no-restart)
 # ═══════════════════════════════════════════════════════════════════════
 if ! $NO_RESTART; then
@@ -494,6 +565,9 @@ if ! $NO_RESTART; then
 
     # ── Start Agent ──
     echo ""
+    echo "=== Agent preflight ==="
+    preflight_tls_check
+    echo ""
     echo "=== Starting Agent ==="
     ( cd "$AGENT_DIR" && bash scripts/start-agent.sh )
     sleep 4
@@ -541,12 +615,21 @@ if ! $NO_RESTART; then
         echo "  PASS  Agent connected"
     else
         echo "  FAIL  Agent not connected (waited 30s)"
+        echo "  -- TLS diagnostic --"
+        if [ -f "${AGENT_DIR}/certs/ca.crt" ] && [ -f "${SERVER_DIR}/certs/server.crt" ]; then
+            if command -v openssl >/dev/null 2>&1; then
+                echo "  openssl verify result:"
+                openssl verify -CAfile "${AGENT_DIR}/certs/ca.crt" "${SERVER_DIR}/certs/server.crt" 2>&1 || true
+            fi
+            echo "  Server CA sha256: $(sha256sum "${SERVER_DIR}/certs/ca.crt" 2>/dev/null | awk '{print $1}')"
+            echo "  Agent  CA sha256: $(sha256sum "${AGENT_DIR}/certs/ca.crt" 2>/dev/null | awk '{print $1}')"
+        fi
         echo "  Agent log dir:"
         ls -la "${AGENT_DIR}/logs/" 2>/dev/null || echo "  (no logs dir)"
-        echo "  --- lightai-agent.log (last 100 lines) ---"
-        tail -100 "$AGENT_LOG1" 2>/dev/null || echo "  (not found)"
-        echo "  --- lightai-server.log (last 100 lines) ---"
-        tail -100 "${SERVER_DIR}/logs/lightai-server.log" 2>/dev/null || echo "  (not found)"
+        echo "  --- lightai-agent.log (last 50 lines) ---"
+        tail -50 "$AGENT_LOG1" 2>/dev/null || echo "  (not found)"
+        echo "  --- lightai-server.log (last 20 lines) ---"
+        tail -20 "${SERVER_DIR}/logs/lightai-server.log" 2>/dev/null || echo "  (not found)"
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
 

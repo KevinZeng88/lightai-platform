@@ -131,6 +131,39 @@
         </el-form-item>
       </template>
 
+      <!-- Ollama daemon config -->
+      <template v-if="form.backend === 'ollama' && form.deploy_type !== 'docker'">
+        <el-divider content-position="left">Ollama Daemon 配置</el-divider>
+        <el-alert
+          title="多个 Ollama Instance 共享同一个 Ollama daemon。max_loaded_models 控制最多同时加载模型数；num_parallel 控制单模型并行请求数；keep_alive 控制模型加载后的保留时间。当前版本不控制 CUDA_VISIBLE_DEVICES / ROCR_VISIBLE_DEVICES。"
+          type="info" show-icon class="alert"
+        />
+        <el-form-item label="监听地址 (host)">
+          <el-input v-model="ollamaRt.host" placeholder="127.0.0.1" />
+        </el-form-item>
+        <el-form-item label="端口 (port)">
+          <el-input-number v-model="ollamaRt.port" :min="1" :max="65535" />
+        </el-form-item>
+        <el-form-item label="模型目录 (models_dir)">
+          <el-input v-model="ollamaRt.models_dir" placeholder="留空使用 Ollama 默认目录" />
+        </el-form-item>
+        <el-form-item label="最大加载模型数 (max_loaded_models)">
+          <el-input-number v-model="ollamaRt.max_loaded_models" :min="1" :max="64" />
+        </el-form-item>
+        <el-form-item label="并行请求数 (num_parallel)">
+          <el-input-number v-model="ollamaRt.num_parallel" :min="1" :max="64" />
+        </el-form-item>
+        <el-form-item label="最大队列 (max_queue)">
+          <el-input-number v-model="ollamaRt.max_queue" :min="1" :max="4096" />
+        </el-form-item>
+        <el-form-item label="保留时间 (keep_alive)">
+          <el-input v-model="ollamaRt.keep_alive" placeholder="30m / 1h / -1" />
+        </el-form-item>
+        <el-form-item label="上下文长度 (context_length)">
+          <el-input-number v-model="ollamaRt.context_length" :min="512" :step="512" />
+        </el-form-item>
+      </template>
+
       <!-- Local entrypoint fields -->
       <template v-if="form.deploy_type !== 'docker'">
         <el-form-item label="入口路径" :required="form.backend !== 'ollama'">
@@ -211,6 +244,17 @@ const form = ref({
 
 const dockerRt = reactive<DockerRuntimeFields>(defaultDockerRuntimeFields())
 
+const ollamaRt = reactive({
+  host: '127.0.0.1',
+  port: 11434,
+  models_dir: '',
+  max_loaded_models: 2,
+  num_parallel: 1,
+  max_queue: 512,
+  keep_alive: '30m',
+  context_length: 4096,
+})
+
 const rtToggles = reactive({
   showCache: false,
   showGpuMem: false,
@@ -224,7 +268,21 @@ const currentRuntimeParamsJson = computed(() => {
   if (form.value.deploy_type === 'docker') {
     return assembleDockerRuntimeParams(dockerRt, form.value.backend, rtToggles, form.value.extra_backend_args, form.value.extra_docker_args)
   }
-  // For local runtimes, assemble basic params
+  if (form.value.backend === 'ollama') {
+    const defaults: Record<string, unknown> = {
+      host: ollamaRt.host || '127.0.0.1',
+      port: ollamaRt.port || 11434,
+      max_loaded_models: ollamaRt.max_loaded_models || 2,
+      num_parallel: ollamaRt.num_parallel || 1,
+      max_queue: ollamaRt.max_queue || 512,
+      keep_alive: ollamaRt.keep_alive || '30m',
+      context_length: ollamaRt.context_length || 4096,
+    }
+    if (ollamaRt.models_dir.trim()) {
+      defaults.models_dir = ollamaRt.models_dir.trim()
+    }
+    return JSON.stringify({ defaults })
+  }
   if (form.value.extra_backend_args.trim()) {
     return JSON.stringify({ extra_backend_args: form.value.extra_backend_args.split('\n').map(s => s.trim()).filter(Boolean) })
   }
@@ -273,6 +331,7 @@ function openCreate() {
   }
   Object.assign(dockerRt, defaultDockerRuntimeFields())
   Object.assign(rtToggles, { showCache: false, showGpuMem: false, showMaxModelLen: false, showMaxNumSeqs: false, showExtraBackend: false, showExtraDocker: false })
+  Object.assign(ollamaRt, { host: '127.0.0.1', port: 11434, models_dir: '', max_loaded_models: 2, num_parallel: 1, max_queue: 512, keep_alive: '30m', context_length: 4096 })
   dialogVisible.value = true
 }
 
@@ -307,6 +366,20 @@ function openEdit(row: RuntimeEnvironment) {
       } catch { /* ignore */ }
     }
   }
+  if (row.backend === 'ollama' && row.params_json) {
+    try {
+      const p = JSON.parse(row.params_json)
+      const d = p.defaults || {}
+      if (typeof d.host === 'string') ollamaRt.host = d.host
+      if (typeof d.port === 'number') ollamaRt.port = d.port
+      if (typeof d.models_dir === 'string') ollamaRt.models_dir = d.models_dir
+      if (typeof d.max_loaded_models === 'number') ollamaRt.max_loaded_models = d.max_loaded_models
+      if (typeof d.num_parallel === 'number') ollamaRt.num_parallel = d.num_parallel
+      if (typeof d.max_queue === 'number') ollamaRt.max_queue = d.max_queue
+      if (typeof d.keep_alive === 'string') ollamaRt.keep_alive = d.keep_alive
+      if (typeof d.context_length === 'number') ollamaRt.context_length = d.context_length
+    } catch { /* ignore */ }
+  }
   dialogVisible.value = true
 }
 
@@ -322,6 +395,14 @@ function validateForm(): string | null {
   }
   if (form.value.deploy_type !== 'docker' && form.value.backend !== 'ollama') {
     if (!form.value.binary_path.trim()) return '请填写入口路径'
+  }
+  if (form.value.backend === 'ollama') {
+    const p = ollamaRt.port
+    if (!p || p < 1 || p > 65535) return 'Ollama 端口需在 1-65535'
+    if (!ollamaRt.max_loaded_models || ollamaRt.max_loaded_models < 1) return 'max_loaded_models 需为正整数'
+    if (!ollamaRt.num_parallel || ollamaRt.num_parallel < 1) return 'num_parallel 需为正整数'
+    if (!ollamaRt.max_queue || ollamaRt.max_queue < 1) return 'max_queue 需为正整数'
+    if (!ollamaRt.context_length || ollamaRt.context_length < 1) return 'context_length 需为正整数'
   }
   return null
 }

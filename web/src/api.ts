@@ -595,3 +595,18 @@ export async function registerCollector(
 export async function deleteCollector(id: string, version: string): Promise<void> {
   await sendEmpty(`/api/collector-registry/${encodeURIComponent(id)}/${encodeURIComponent(version)}`, 'DELETE')
 }
+
+// ── Ollama ──
+
+export interface OllamaModelItem {
+  name: string
+  size?: number | null
+  digest?: string | null
+  modified_at?: string | null
+}
+
+export async function fetchOllamaModels(nodeId: string, runtimeEnvId: string): Promise<OllamaModelItem[]> {
+  const search = new URLSearchParams({ node_id: nodeId, runtime_env_id: runtimeEnvId })
+  const payload = await sendJson<{ models: OllamaModelItem[] }>(`/api/ollama/models?${search.toString()}`, 'GET')
+  return payload.models
+}

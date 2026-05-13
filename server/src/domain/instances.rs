@@ -100,16 +100,13 @@ async fn create_local_model_instance(
 ) -> Result<ModelInstanceView, DomainError> {
     validate_json_field("params_json", request.params_json.as_deref())?;
     let params_json = request.params_json;
-    parse_instance_params(params_json.as_deref())?;
+    let params = parse_instance_params(params_json.as_deref())?;
     let node_id = request
         .node_id
         .as_deref()
         .ok_or_else(|| DomainError::BadRequest("Local instance requires a node".to_string()))?;
     let runtime_environment_id = request.runtime_environment_id.as_deref().ok_or_else(|| {
         DomainError::BadRequest("Local instance requires a runtime environment".to_string())
-    })?;
-    let model_file_id = request.model_file_id.as_deref().ok_or_else(|| {
-        DomainError::BadRequest("Local instance requires a verified model file".to_string())
     })?;
     let env = runtime_environment(pool, runtime_environment_id).await?;
     if env.node_id.as_deref() != Some(node_id) {
@@ -122,12 +119,37 @@ async fn create_local_model_instance(
             "Runtime environment has not passed Agent check".to_string(),
         ));
     }
-    let file = verified_model_file_for_instance(pool, model_file_id).await?;
-    if file.node_id != node_id {
-        return Err(DomainError::BadRequest(
-            "Model file does not belong to the selected node".to_string(),
-        ));
-    }
+
+    // Ollama: model is identified by name, not a model file on disk.
+    let is_ollama = env.backend == "ollama";
+    let (model_id_val, model_file_id_val) = if is_ollama {
+        let name = params
+            .get("ollama_model")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.trim().is_empty())
+            .ok_or_else(|| {
+                DomainError::BadRequest(
+                    "ollama_model is required for Ollama backend instances".to_string(),
+                )
+            })?;
+        if name.len() > 256 || name.chars().any(|c| c.is_control()) {
+            return Err(DomainError::BadRequest(
+                "ollama_model contains invalid characters".to_string(),
+            ));
+        }
+        (None::<String>, None::<String>)
+    } else {
+        let model_file_id = request.model_file_id.as_deref().ok_or_else(|| {
+            DomainError::BadRequest("Local instance requires a verified model file".to_string())
+        })?;
+        let file = verified_model_file_for_instance(pool, model_file_id).await?;
+        if file.node_id != node_id {
+            return Err(DomainError::BadRequest(
+                "Model file does not belong to the selected node".to_string(),
+            ));
+        }
+        (Some(file.model_id), Some(model_file_id.to_string()))
+    };
 
     let now = now_unix_secs();
     let id = Uuid::new_v4().to_string();
@@ -142,8 +164,8 @@ async fn create_local_model_instance(
         "#,
     )
     .bind(&id)
-    .bind(file.model_id)
-    .bind(model_file_id)
+    .bind(model_id_val)
+    .bind(model_file_id_val)
     .bind(node_id)
     .bind(runtime_environment_id)
     .bind(request.name)
@@ -352,7 +374,7 @@ pub async fn check_model_instance(
             )
             .await;
         }
-        return run_local_instance_task(pool, id, "test_model_instance", "running").await;
+        return run_local_instance_task(pool, id, "check_model_instance", "running").await;
     }
     let Some(url) = instance
         .health_url
@@ -393,7 +415,7 @@ pub async fn test_model_instance(
     if instance.deploy_type == "external" {
         return check_model_instance(pool, id).await;
     }
-    if instance.status != "running" {
+    if instance.status != "running" && instance.backend != "ollama" {
         return Err(DomainError::BadRequest(
             "Local instance is not running, cannot test".to_string(),
         ));
@@ -422,11 +444,6 @@ async fn run_local_instance_task(
             "Node Agent offline, cannot execute local instance task".to_string(),
         ));
     }
-    let model_file_id = instance
-        .model_file_id
-        .as_deref()
-        .ok_or_else(|| DomainError::BadRequest("Local instance missing model file".to_string()))?;
-    let file = verified_model_file_for_instance(pool, model_file_id).await?;
     let runtime_environment_id = instance.runtime_environment_id.as_deref().ok_or_else(|| {
         DomainError::BadRequest("Local instance missing runtime environment".to_string())
     })?;
@@ -443,24 +460,45 @@ async fn run_local_instance_task(
         .as_deref()
         .and_then(|v| serde_json::from_str(v).ok());
 
+    let is_ollama = env.backend == "ollama";
     let task_id = Uuid::new_v4().to_string();
     let now = now_unix_secs();
-    let mut payload = serde_json::json!({
-        "instance_id": id,
-        "runtime_environment_id": runtime_environment_id,
-        "backend": env.backend,
-        "deploy_type": env.deploy_type,
-        "binary_path": env.binary_path,
-        "docker_image": env.docker_image,
-        "working_dir": env.working_dir,
-        "log_dir": env.log_dir,
-        "model_file_id": model_file_id,
-        "model_path": file.path,
-        "model_path_type": file.path_type,
-        "base_url": instance.base_url,
-        "endpoint_url": instance.endpoint_url,
-        "params_json": serde_json::to_string(&params).unwrap_or_default(),
-    });
+
+    let mut payload = if is_ollama {
+        serde_json::json!({
+            "instance_id": id,
+            "runtime_environment_id": runtime_environment_id,
+            "backend": env.backend,
+            "deploy_type": env.deploy_type,
+            "binary_path": env.binary_path,
+            "working_dir": env.working_dir,
+            "log_dir": env.log_dir,
+            "base_url": instance.base_url,
+            "endpoint_url": instance.endpoint_url,
+            "params_json": serde_json::to_string(&params).unwrap_or_default(),
+        })
+    } else {
+        let model_file_id = instance.model_file_id.as_deref().ok_or_else(|| {
+            DomainError::BadRequest("Local instance missing model file".to_string())
+        })?;
+        let file = verified_model_file_for_instance(pool, model_file_id).await?;
+        serde_json::json!({
+            "instance_id": id,
+            "runtime_environment_id": runtime_environment_id,
+            "backend": env.backend,
+            "deploy_type": env.deploy_type,
+            "binary_path": env.binary_path,
+            "docker_image": env.docker_image,
+            "working_dir": env.working_dir,
+            "log_dir": env.log_dir,
+            "model_file_id": model_file_id,
+            "model_path": file.path,
+            "model_path_type": file.path_type,
+            "base_url": instance.base_url,
+            "endpoint_url": instance.endpoint_url,
+            "params_json": serde_json::to_string(&params).unwrap_or_default(),
+        })
+    };
     if let Some(rp) = runtime_params {
         payload["runtime_params"] = rp;
     }

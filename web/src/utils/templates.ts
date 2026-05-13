@@ -38,13 +38,23 @@ export const RUNTIME_TEMPLATES = {
     }
   },
   'ollama-local': {
-    label: 'Ollama + Local',
+    label: 'Ollama + Local（共享 Daemon）',
     template: {
       backend: 'ollama',
       deploy_type: 'local',
+      binary_path: 'ollama',
       host: '127.0.0.1',
       port: 11434,
-      defaults: {},
+      defaults: {
+        host: '127.0.0.1',
+        port: 11434,
+        models_dir: '',
+        max_loaded_models: 2,
+        num_parallel: 1,
+        max_queue: 512,
+        keep_alive: '30m',
+        context_length: 4096
+      },
       extra_backend_args: []
     }
   },

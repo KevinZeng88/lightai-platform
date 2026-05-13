@@ -31,6 +31,8 @@ interface InstanceForm {
   tensor_parallel_size: number
   extra_docker_args_text: string
   extra_backend_args_text: string
+  ollama_model: string
+  ollama_keep_alive: string
   probe_paths_text: string
   probe_max_attempts: number
   probe_interval_ms: number
@@ -86,6 +88,8 @@ export function detectOverrides(instanceParamsJson?: string | null): Set<string>
     if (p.max_model_len !== undefined) overrides.add('max_model_len')
     if (p.max_num_seqs !== undefined) overrides.add('max_num_seqs')
     if (p.tensor_parallel_size !== undefined) overrides.add('tensor_parallel_size')
+    if (typeof p.ollama_model === 'string' && p.ollama_model.length > 0) overrides.add('ollama_model')
+    if (typeof p.keep_alive === 'string' && p.keep_alive.length > 0) overrides.add('ollama_keep_alive')
     if (Array.isArray(p.extra_docker_args) && p.extra_docker_args.length > 0) overrides.add('extra_docker_args')
     if (Array.isArray(p.extra_backend_args) && p.extra_backend_args.length > 0) overrides.add('extra_backend_args')
     if (typeof p.container_port === 'number') overrides.add('container_port')
@@ -130,11 +134,26 @@ export function emptyForm(): InstanceForm {
     probe_paths_text: '',
     probe_max_attempts: 5,
     probe_interval_ms: 5000,
-    probe_timeout_ms: 400
+    probe_timeout_ms: 400,
+    ollama_model: '',
+    ollama_keep_alive: ''
   }
 }
 
+export function buildOllamaParams(form: InstanceForm): Record<string, unknown> {
+  const result: Record<string, unknown> = {
+    ollama_model: form.ollama_model.trim(),
+  }
+  if (form.ollama_keep_alive.trim()) {
+    result.keep_alive = form.ollama_keep_alive.trim()
+  }
+  return result
+}
+
 export function localParams(form: InstanceForm) {
+  if (form.backend === 'ollama') {
+    return buildOllamaParams(form)
+  }
   const probePaths = form.probe_paths_text
     .split('\n')
     .map((line) => line.trim())
@@ -231,7 +250,9 @@ export function parseParams(value?: string | null) {
       probe_paths_text: Array.isArray(parsed.probe_paths) ? parsed.probe_paths.filter((p: unknown) => typeof p === 'string').join('\n') : '',
       probe_max_attempts: typeof parsed.probe_max_attempts === 'number' ? parsed.probe_max_attempts : 5,
       probe_interval_ms: typeof parsed.probe_interval_ms === 'number' ? parsed.probe_interval_ms : 5000,
-      probe_timeout_ms: typeof parsed.probe_timeout_ms === 'number' ? parsed.probe_timeout_ms : 400
+      probe_timeout_ms: typeof parsed.probe_timeout_ms === 'number' ? parsed.probe_timeout_ms : 400,
+      ollama_model: typeof parsed.ollama_model === 'string' ? parsed.ollama_model : '',
+      ollama_keep_alive: typeof parsed.keep_alive === 'string' ? parsed.keep_alive : ''
     }
   } catch {
     return {
@@ -257,7 +278,9 @@ export function parseParams(value?: string | null) {
       probe_paths_text: '',
       probe_max_attempts: 5,
       probe_interval_ms: 5000,
-      probe_timeout_ms: 400
+      probe_timeout_ms: 400,
+      ollama_model: '',
+      ollama_keep_alive: ''
     }
   }
 }

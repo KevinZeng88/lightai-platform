@@ -1293,10 +1293,12 @@ async fn reconcile_managed_instances(
 
     let rows = sqlx::query(
         r#"
-        SELECT id
-        FROM model_instances
-        WHERE node_id = ? AND deploy_type = 'local'
-          AND status IN ('starting', 'running', 'stopping')
+        SELECT mi.id
+        FROM model_instances mi
+        LEFT JOIN runtime_environments re ON re.id = mi.runtime_environment_id
+        WHERE mi.node_id = ? AND mi.deploy_type = 'local'
+          AND mi.status IN ('starting', 'running', 'stopping')
+          AND (re.backend IS NULL OR re.backend != 'ollama')
         "#,
     )
     .bind(node_id)

@@ -170,6 +170,10 @@ pub async fn start_model_instance_with_store(
         .get("backend")
         .and_then(|value| value.as_str())
         .unwrap_or_default();
+
+    if backend == "ollama" {
+        return super::ollama::start_ollama_instance(payload).await;
+    }
     let model_path = payload
         .get("model_path")
         .and_then(|value| value.as_str())

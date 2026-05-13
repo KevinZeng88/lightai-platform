@@ -7,6 +7,7 @@ use tokio::time::{sleep, Duration};
 mod cleanup;
 pub(crate) mod docker_backend;
 mod logs;
+pub(crate) mod ollama;
 mod probe;
 mod process;
 mod process_command;
@@ -23,7 +24,7 @@ use crate::models::{AgentConfig, AgentTaskPollRequest, AgentTaskResultRequest};
 use crate::platform_log::{self, LogPolicy};
 use crate::state::{self, AgentState};
 pub use cleanup::cleanup_model_file;
-use logs::read_instance_log;
+use logs::{read_instance_log, ReadInstanceLogResult};
 pub use probe::{build_test_urls, summarize_test_failures};
 pub use process::{
     collect_managed_instance_reports, start_model_instance, start_model_instance_with_store,
@@ -206,7 +207,16 @@ pub async fn run_once(
             (status.to_string(), serde_json::to_value(result)?)
         }
         "stop_model_instance" => {
-            let result = stop_model_instance_with_store(&task.payload, managed_store_path).await;
+            let backend = task
+                .payload
+                .get("backend")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let result = if backend == "ollama" {
+                ollama::stop_ollama_instance(&task.payload).await
+            } else {
+                stop_model_instance_with_store(&task.payload, managed_store_path).await
+            };
             let status = if result.instance_status == "stopped" {
                 "succeeded"
             } else {
@@ -214,8 +224,35 @@ pub async fn run_once(
             };
             (status.to_string(), serde_json::to_value(result)?)
         }
+        "check_model_instance" => {
+            let backend = task
+                .payload
+                .get("backend")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let result = if backend == "ollama" {
+                ollama::check_ollama_instance(&task.payload).await
+            } else {
+                test_model_instance(&task.payload).await
+            };
+            let status = if result.instance_status == "running" {
+                "succeeded"
+            } else {
+                "failed"
+            };
+            (status.to_string(), serde_json::to_value(result)?)
+        }
         "test_model_instance" => {
-            let result = test_model_instance(&task.payload).await;
+            let backend = task
+                .payload
+                .get("backend")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let result = if backend == "ollama" {
+                ollama::test_ollama_instance(&task.payload).await
+            } else {
+                test_model_instance(&task.payload).await
+            };
             let status = if result.instance_status == "running" {
                 "succeeded"
             } else {
@@ -224,13 +261,58 @@ pub async fn run_once(
             (status.to_string(), serde_json::to_value(result)?)
         }
         "read_instance_log" => {
-            let result = read_instance_log(&task.payload, managed_store_path).await;
+            let backend = task
+                .payload
+                .get("backend")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let result = if backend == "ollama" {
+                let rt_env_id = task
+                    .payload
+                    .get("runtime_environment_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let log_dir = task
+                    .payload
+                    .get("log_dir")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("logs");
+                let max_bytes = 65536usize;
+                match ollama::read_daemon_log(rt_env_id, log_dir, max_bytes).await {
+                    Ok(content) => ReadInstanceLogResult {
+                        log_status: "available".to_string(),
+                        content: format!(
+                            "【Ollama 使用共享 daemon，日志为 Ollama 服务日志，不是单模型独立日志】\n\n{content}"
+                        ),
+                        message: "read from ollama daemon log".to_string(),
+                    },
+                    Err(e) => ReadInstanceLogResult {
+                        log_status: "failed".to_string(),
+                        content: String::new(),
+                        message: e,
+                    },
+                }
+            } else {
+                read_instance_log(&task.payload, managed_store_path).await
+            };
             let status = if result.log_status == "available" {
                 "succeeded"
             } else {
                 "failed"
             };
             (status.to_string(), serde_json::to_value(result)?)
+        }
+        "list_ollama_models" => {
+            let result = ollama::query_model_list(&task.payload).await;
+            match result {
+                Ok(models) => (
+                    "succeeded".to_string(),
+                    serde_json::to_value(serde_json::json!({
+                        "models": models,
+                    }))?,
+                ),
+                Err(e) => ("failed".to_string(), serde_json::json!({"message": e})),
+            }
         }
         _ => (
             "failed".to_string(),
