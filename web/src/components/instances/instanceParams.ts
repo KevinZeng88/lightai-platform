@@ -28,6 +28,7 @@ interface InstanceForm {
   max_model_len: number
   max_num_seqs: number
   docker_gpu: string
+  tensor_parallel_size: number
   extra_docker_args_text: string
   extra_backend_args_text: string
   probe_paths_text: string
@@ -44,6 +45,7 @@ export interface DockerRuntimeDefaults {
   gpu_memory_utilization: number
   max_model_len: number
   max_num_seqs: number
+  tensor_parallel_size: number
   extra_docker_args: string[]
   extra_backend_args: string[]
 }
@@ -55,6 +57,7 @@ export function parseRuntimeDefaults(runtimeParamsJson?: string | null): DockerR
     gpu_memory_utilization: 0.5,
     max_model_len: 4096,
     max_num_seqs: 8,
+    tensor_parallel_size: 1,
     extra_docker_args: [] as string[],
     extra_backend_args: [] as string[],
   }
@@ -66,6 +69,7 @@ export function parseRuntimeDefaults(runtimeParamsJson?: string | null): DockerR
     if (p.defaults?.gpu_memory_utilization != null) d.gpu_memory_utilization = p.defaults.gpu_memory_utilization
     if (p.defaults?.max_model_len != null) d.max_model_len = p.defaults.max_model_len
     if (p.defaults?.max_num_seqs != null) d.max_num_seqs = p.defaults.max_num_seqs
+    if (p.defaults?.tensor_parallel_size != null) d.tensor_parallel_size = p.defaults.tensor_parallel_size
     if (Array.isArray(p.extra_docker_args)) d.extra_docker_args = p.extra_docker_args
     if (Array.isArray(p.extra_backend_args)) d.extra_backend_args = p.extra_backend_args
   } catch { /* use defaults */ }
@@ -81,6 +85,7 @@ export function detectOverrides(instanceParamsJson?: string | null): Set<string>
     if (p.gpu_memory_utilization !== undefined) overrides.add('gpu_memory_utilization')
     if (p.max_model_len !== undefined) overrides.add('max_model_len')
     if (p.max_num_seqs !== undefined) overrides.add('max_num_seqs')
+    if (p.tensor_parallel_size !== undefined) overrides.add('tensor_parallel_size')
     if (Array.isArray(p.extra_docker_args) && p.extra_docker_args.length > 0) overrides.add('extra_docker_args')
     if (Array.isArray(p.extra_backend_args) && p.extra_backend_args.length > 0) overrides.add('extra_backend_args')
     if (typeof p.container_port === 'number') overrides.add('container_port')
@@ -119,6 +124,7 @@ export function emptyForm(): InstanceForm {
     max_model_len: 4096,
     max_num_seqs: 8,
     docker_gpu: 'all',
+    tensor_parallel_size: 1,
     extra_docker_args_text: '',
     extra_backend_args_text: '',
     probe_paths_text: '',
@@ -168,6 +174,7 @@ export function buildDockerInstanceParams(
   if (overrides.has('gpu_memory_utilization')) result.gpu_memory_utilization = form.gpu_memory_utilization
   if (overrides.has('max_model_len')) result.max_model_len = form.max_model_len
   if (overrides.has('max_num_seqs')) result.max_num_seqs = form.max_num_seqs
+  if (overrides.has('tensor_parallel_size')) result.tensor_parallel_size = form.tensor_parallel_size
   if (overrides.has('container_port')) result.container_port = form.container_port
 
   if (overrides.has('extra_docker_args')) {
@@ -217,6 +224,7 @@ export function parseParams(value?: string | null) {
       max_model_len: typeof parsed.max_model_len === 'number' ? parsed.max_model_len : 4096,
       max_num_seqs: typeof parsed.max_num_seqs === 'number' ? parsed.max_num_seqs : 8,
       docker_gpu: typeof parsed.gpu === 'string' ? parsed.gpu : 'all',
+      tensor_parallel_size: typeof parsed.tensor_parallel_size === 'number' ? parsed.tensor_parallel_size : 1,
       extra_docker_args: Array.isArray(parsed.extra_docker_args) ? parsed.extra_docker_args.filter((item: unknown) => typeof item === 'string') : [],
       extra_backend_args_text: Array.isArray(parsed.extra_backend_args) ? parsed.extra_backend_args.filter((p: unknown) => typeof p === 'string').join('\n') : '',
       extra_docker_args_text: Array.isArray(parsed.extra_docker_args) ? parsed.extra_docker_args.filter((p: unknown) => typeof p === 'string').join('\n') : '',
@@ -242,6 +250,7 @@ export function parseParams(value?: string | null) {
       max_model_len: 4096,
       max_num_seqs: 8,
       docker_gpu: 'all',
+      tensor_parallel_size: 1,
       extra_docker_args: [] as string[],
       extra_backend_args_text: '',
       extra_docker_args_text: '',

@@ -180,6 +180,13 @@
               <el-tag size="small" type="info" style="margin-left:8px">来自运行环境</el-tag>
             </template>
           </el-form-item>
+          <el-alert
+            title="GPU=all 仅表示容器可见所有 GPU。vLLM 默认 tensor_parallel_size=1（单卡），如要多卡张量并行，请在下方设置 tensor_parallel_size > 1。"
+            type="info"
+            show-icon
+            :closable="false"
+            class="alert"
+          />
 
           <!-- gpu_memory_utilization -->
           <el-form-item label="GPU 显存使用比例">
@@ -193,6 +200,7 @@
               <code>{{ runtimeDefaults.gpu_memory_utilization }}</code>
               <el-tag size="small" type="info" style="margin-left:8px">来自运行环境</el-tag>
             </template>
+            <div class="muted tiny-text" style="margin-top:4px">vLLM 可使用的 GPU 显存比例。过高可能导致 OOM，建议从小值（如 0.5）开始。</div>
           </el-form-item>
 
           <!-- max_model_len -->
@@ -207,6 +215,7 @@
               <code>{{ runtimeDefaults.max_model_len }}</code>
               <el-tag size="small" type="info" style="margin-left:8px">来自运行环境</el-tag>
             </template>
+            <div class="muted tiny-text" style="margin-top:4px">最大上下文长度。设置过大会增加显存占用，可能导致启动失败。建议根据模型实际支持长度设置。</div>
           </el-form-item>
 
           <!-- max_num_seqs -->
@@ -219,6 +228,20 @@
             </template>
             <template v-else>
               <code>{{ runtimeDefaults.max_num_seqs }}</code>
+              <el-tag size="small" type="info" style="margin-left:8px">来自运行环境</el-tag>
+            </template>
+          </el-form-item>
+
+          <!-- tensor_parallel_size -->
+          <el-form-item label="张量并行数 (TP)">
+            <el-switch :model-value="instOverrides.has('tensor_parallel_size')" size="small" style="margin-right:8px" @change="(val: boolean) => toggleOverride('tensor_parallel_size', val)" />
+            <template v-if="instOverrides.has('tensor_parallel_size')">
+              <el-input-number v-model="form.tensor_parallel_size" :min="1" :max="8" />
+              <el-tag size="small" type="warning" style="margin-left:8px">实例覆盖</el-tag>
+              <el-button size="small" text type="primary" @click="resetOverride('tensor_parallel_size')">恢复默认</el-button>
+            </template>
+            <template v-else>
+              <code>{{ runtimeDefaults.tensor_parallel_size }}</code>
               <el-tag size="small" type="info" style="margin-left:8px">来自运行环境</el-tag>
             </template>
           </el-form-item>
@@ -373,6 +396,7 @@ const runtimeDefaults: DockerRuntimeDefaults = reactive({
   gpu_memory_utilization: 0.5,
   max_model_len: 4096,
   max_num_seqs: 8,
+  tensor_parallel_size: 1,
   extra_docker_args: [],
   extra_backend_args: [],
 })
@@ -400,6 +424,7 @@ function onRuntimeChange() {
   form.value.gpu_memory_utilization = defaults.gpu_memory_utilization
   form.value.max_model_len = defaults.max_model_len
   form.value.max_num_seqs = defaults.max_num_seqs
+  form.value.tensor_parallel_size = defaults.tensor_parallel_size
   if (defaults.extra_docker_args.length > 0) {
     form.value.extra_docker_args_text = defaults.extra_docker_args.join('\n')
   }
@@ -525,6 +550,7 @@ function openCreate() {
     gpu_memory_utilization: 0.5,
     max_model_len: 4096,
     max_num_seqs: 8,
+    tensor_parallel_size: 1,
     extra_docker_args: [],
     extra_backend_args: [],
   })
@@ -574,6 +600,7 @@ function openEdit(row: ModelInstance) {
     gpu_memory_utilization: instOverrides.has('gpu_memory_utilization') ? params.gpu_memory_utilization : rtDefaults.gpu_memory_utilization,
     max_model_len: instOverrides.has('max_model_len') ? params.max_model_len : rtDefaults.max_model_len,
     max_num_seqs: instOverrides.has('max_num_seqs') ? params.max_num_seqs : rtDefaults.max_num_seqs,
+    tensor_parallel_size: instOverrides.has('tensor_parallel_size') ? params.tensor_parallel_size : rtDefaults.tensor_parallel_size,
     docker_gpu: instOverrides.has('gpu') ? params.docker_gpu : rtDefaults.gpu,
     extra_docker_args_text: instOverrides.has('extra_docker_args') ? params.extra_docker_args_text : rtDefaults.extra_docker_args.join('\n'),
     extra_backend_args_text: instOverrides.has('extra_backend_args') ? params.extra_backend_args_text : rtDefaults.extra_backend_args.join('\n'),

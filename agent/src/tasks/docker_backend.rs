@@ -53,6 +53,7 @@ pub(crate) struct VllmParams {
     pub gpu_memory_utilization: Option<f64>,
     pub max_model_len: Option<u32>,
     pub max_num_seqs: Option<u32>,
+    pub tensor_parallel_size: Option<u32>,
     pub extra_vllm_args: Vec<String>,
 }
 
@@ -66,6 +67,7 @@ impl Default for VllmParams {
             gpu_memory_utilization: None,
             max_model_len: None,
             max_num_seqs: None,
+            tensor_parallel_size: None,
             extra_vllm_args: Vec::new(),
         }
     }
@@ -137,6 +139,7 @@ pub(crate) struct BackendDefaults {
     pub max_num_seqs: Option<u32>,
     pub ctx_size: Option<u32>,
     pub n_gpu_layers: Option<i64>,
+    pub tensor_parallel_size: Option<u32>,
 }
 
 impl Default for BackendDefaults {
@@ -149,6 +152,7 @@ impl Default for BackendDefaults {
             max_num_seqs: Some(8),
             ctx_size: Some(4096),
             n_gpu_layers: Some(-1),
+            tensor_parallel_size: Some(1),
         }
     }
 }
@@ -163,6 +167,7 @@ pub(crate) struct DockerInstanceOverrides {
     pub gpu_memory_utilization: Option<f64>,
     pub max_model_len: Option<u32>,
     pub max_num_seqs: Option<u32>,
+    pub tensor_parallel_size: Option<u32>,
     pub gpu: Option<String>,
     pub container_port: Option<u16>,
     pub extra_docker_args: Vec<String>,
@@ -253,6 +258,7 @@ pub(crate) fn merge_docker_config(
             .or(rt.defaults.gpu_memory_utilization),
         max_model_len: ov.max_model_len.or(rt.defaults.max_model_len),
         max_num_seqs: ov.max_num_seqs.or(rt.defaults.max_num_seqs),
+        tensor_parallel_size: ov.tensor_parallel_size.or(rt.defaults.tensor_parallel_size),
         extra_vllm_args: {
             let mut args = rt.extra_backend_args.clone();
             args.extend(ov.extra_backend_args.clone());
@@ -368,6 +374,12 @@ pub(crate) fn build_vllm_args(payload: &DockerPayload) -> Vec<String> {
     if let Some(ns) = vllm.max_num_seqs {
         args.push("--max-num-seqs".to_string());
         args.push(ns.to_string());
+    }
+    if let Some(tp) = vllm.tensor_parallel_size {
+        if tp > 0 {
+            args.push("--tensor-parallel-size".to_string());
+            args.push(tp.to_string());
+        }
     }
     for extra in &vllm.extra_vllm_args {
         args.push(extra.to_string());
@@ -954,6 +966,7 @@ mod tests {
                 gpu_memory_utilization: Some(0.5),
                 max_model_len: Some(4096),
                 max_num_seqs: Some(8),
+                tensor_parallel_size: Some(2),
                 ..Default::default()
             },
             ..Default::default()
@@ -965,6 +978,7 @@ mod tests {
         assert!(joined.contains("--gpu-memory-utilization 0.5"));
         assert!(joined.contains("--max-model-len 4096"));
         assert!(joined.contains("--max-num-seqs 8"));
+        assert!(joined.contains("--tensor-parallel-size 2"));
     }
 
     #[test]
@@ -1235,5 +1249,78 @@ mod tests {
         assert_eq!(rt.image, original_image);
         assert_eq!(rt.gpu, original_gpu);
         assert_eq!(rt.defaults.gpu_memory_utilization, original_defaults_gmu);
+    }
+
+    // ── tensor_parallel_size ──
+
+    #[test]
+    fn tensor_parallel_size_defaults_to_1_from_backend_defaults() {
+        let merged = merge_docker_config(
+            "/data/models/test",
+            "test-model",
+            Some(&make_runtime()),
+            Some(&DockerInstanceOverrides::default()),
+        )
+        .unwrap();
+        assert_eq!(merged.vllm.tensor_parallel_size, Some(1));
+    }
+
+    #[test]
+    fn tensor_parallel_size_instance_override() {
+        let mut ov = make_overrides();
+        ov.tensor_parallel_size = Some(2);
+        let merged = merge_docker_config(
+            "/data/models/test",
+            "test-model",
+            Some(&make_runtime()),
+            Some(&ov),
+        )
+        .unwrap();
+        assert_eq!(merged.vllm.tensor_parallel_size, Some(2));
+    }
+
+    #[test]
+    fn tensor_parallel_size_in_build_vllm_args() {
+        let payload = DockerPayload {
+            vllm: VllmParams {
+                model: "/models/test".to_string(),
+                tensor_parallel_size: Some(2),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let args = build_vllm_args(&payload);
+        let joined = args.join(" ");
+        assert!(joined.contains("--tensor-parallel-size 2"));
+    }
+
+    #[test]
+    fn tensor_parallel_size_not_in_args_when_none() {
+        let payload = DockerPayload {
+            vllm: VllmParams {
+                model: "/models/test".to_string(),
+                tensor_parallel_size: None,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let args = build_vllm_args(&payload);
+        let joined = args.join(" ");
+        assert!(!joined.contains("--tensor-parallel-size"));
+    }
+
+    #[test]
+    fn tensor_parallel_size_zero_not_in_args() {
+        let payload = DockerPayload {
+            vllm: VllmParams {
+                model: "/models/test".to_string(),
+                tensor_parallel_size: Some(0),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let args = build_vllm_args(&payload);
+        let joined = args.join(" ");
+        assert!(!joined.contains("--tensor-parallel-size"));
     }
 }

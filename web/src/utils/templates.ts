@@ -15,7 +15,8 @@ export const RUNTIME_TEMPLATES = {
         port: 8000,
         gpu_memory_utilization: 0.5,
         max_model_len: 4096,
-        max_num_seqs: 8
+        max_num_seqs: 8,
+        tensor_parallel_size: 1
       },
       extra_docker_args: [],
       extra_backend_args: []
@@ -149,6 +150,7 @@ export interface DockerRuntimeFields {
   gpu_memory_utilization: number
   max_model_len: number
   max_num_seqs: number
+  tensor_parallel_size: number
   extra_docker_args: string
   extra_backend_args: string
 }
@@ -166,6 +168,7 @@ export function defaultDockerRuntimeFields(): DockerRuntimeFields {
     gpu_memory_utilization: 0.5,
     max_model_len: 4096,
     max_num_seqs: 8,
+    tensor_parallel_size: 1,
     extra_docker_args: '',
     extra_backend_args: ''
   }
@@ -178,6 +181,7 @@ export interface RuntimeToggles {
   showGpuMem: boolean
   showMaxModelLen: boolean
   showMaxNumSeqs: boolean
+  showTensorParallelSize: boolean
   showExtraBackend: boolean
   showExtraDocker: boolean
 }
@@ -211,6 +215,7 @@ export function assembleDockerRuntimeParams(
   if (t.showGpuMem) (result.defaults as any).gpu_memory_utilization = fields.gpu_memory_utilization || 0.5
   if (t.showMaxModelLen) (result.defaults as any).max_model_len = fields.max_model_len || 4096
   if (t.showMaxNumSeqs) (result.defaults as any).max_num_seqs = fields.max_num_seqs || 8
+  if (t.showTensorParallelSize) (result.defaults as any).tensor_parallel_size = fields.tensor_parallel_size || 1
   if (t.showExtraBackend)
     (result as any).extra_backend_args = linesToArgs(extraBackendText || '')
   if (t.showExtraDocker)
@@ -238,6 +243,7 @@ export function parseDockerRuntimeParams(paramsJson: string | null | undefined):
       gpu_memory_utilization: d.gpu_memory_utilization ?? defaults.gpu_memory_utilization,
       max_model_len: d.max_model_len ?? defaults.max_model_len,
       max_num_seqs: d.max_num_seqs ?? defaults.max_num_seqs,
+      tensor_parallel_size: d.tensor_parallel_size ?? defaults.tensor_parallel_size,
       extra_docker_args: argsToLines(p.extra_docker_args || []),
       extra_backend_args: argsToLines(p.extra_backend_args || [])
     }
