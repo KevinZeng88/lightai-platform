@@ -76,9 +76,9 @@ tar xzf lightai-platform-v0.1.0-linux-x86_64-native.tar.gz
 cd lightai-platform-v0.1.0-linux-x86_64-native
 ```
 
-解压后目录包含预置的 `lightai-server.toml`，已启用 Web 静态文件服务。
+解压后目录包含一个 HTTP 本地试用配置。v0.1 推荐首次安装直接运行初始化脚本生成 HTTPS 配置、证书和 setup token。
 
-> **首次安装请先运行初始化脚本**：`scripts/init-server.sh`（Server 端）和 `scripts/init-agent.sh`（Agent 端），脚本会生成证书、setup token 和配置文件，不需要手动处理证书。
+> **首次安装请先运行初始化脚本**：`scripts/init-server.sh`（Server 端）和 `scripts/init-agent.sh`（Agent 端），不需要手动处理证书。
 
 ### 3.2 准备目录
 
@@ -86,32 +86,34 @@ cd lightai-platform-v0.1.0-linux-x86_64-native
 mkdir -p run logs data
 ```
 
-### 3.3 配置
+### 3.3 初始化 Server 配置
 
-直接使用预置的 `lightai-server.toml`（已启用 Web），或复制 example 自行定制：
-
-```bash
-# 预置配置已可用；如需定制：
-cp config/server.example.toml lightai-server.toml
-```
-
-编辑 `lightai-server.toml`，至少检查：
-
-- `[server].listen_addr` — 监听地址（默认 0.0.0.0:18080）
-- `[web].dist_dir` — Web 静态文件目录（默认 `web/dist`，注释掉则禁用）
-- `[database].url` — 数据库路径（默认 `sqlite://./data/lightai.db`）
-- `[metrics].retention_days` — 历史指标保留天数（默认 7）
-- `[logs].dir` — 日志目录（默认 `logs`）
-
-复制并修改 Agent 配置：
+在 Server 机器上执行：
 
 ```bash
-cp config/agent.example.toml lightai-agent.toml
+bash scripts/init-server.sh --host <服务器IP或域名>
 ```
 
-编辑 `lightai-agent.toml`，至少检查：
+脚本会生成：
 
-- `[agent].server_url` — Server 地址（默认 `http://127.0.0.1:18080`）
+- `lightai-server.toml`：默认启用 HTTPS `0.0.0.0:18443`，HTTP 仅绑定 `127.0.0.1:18080` 且默认关闭。
+- `certs/`：自签 CA 和 Server 证书。
+- `deployment-info.txt`：包含 setup token 和 CA 指纹，属于敏感文件。
+
+如需高级定制，可参考 `config/server.example.toml`，但不要把旧的 `[server].listen_addr` 当作主配置字段。
+
+### 3.4 初始化 Agent 配置
+
+在 Agent 机器上执行：
+
+```bash
+bash scripts/init-agent.sh --server https://<服务器IP或域名>:18443 --name <节点名称>
+```
+
+脚本会下载并确认 Server CA，生成 `lightai-agent.toml`。至少检查：
+
+- `[server].url` — Server HTTPS 地址
+- `[server].ca_cert_path` — CA 证书路径
 - `[agent].node_name` — 节点名称（可选，默认主机名）
 - `[agent].state_path` — Agent 状态文件路径
 - `[gpu_collectors]` — 如需 GPU 监控，配置 collector 目录和启用列表
@@ -127,7 +129,7 @@ bash scripts/start-server.sh
 验证 Server 正常：
 
 ```bash
-curl http://127.0.0.1:18080/health
+curl -k https://127.0.0.1:18443/health
 # 预期：{"status":"ok","service":"server"}
 ```
 
@@ -148,7 +150,7 @@ tail -f logs/agent.log
 
 Server 直接托管 Web 控制台静态文件（通过 `[web].dist_dir` 配置，默认已启用）。
 
-浏览器打开 `http://<服务器IP>:18080/` 即可访问。
+浏览器打开 `https://<服务器IP或域名>:18443/` 即可访问。
 
 如果 `dist_dir` 被注释或未配置，Server 退化为纯 API 模式，需单独托管 `web/dist/`。
 
@@ -220,33 +222,31 @@ ldd bin/lightai-server
 ldd bin/lightai-agent
 # 不应出现 libsqlite3.so 或 "not found" 的库。
 
-# 2. 复制并编辑配置
-cp config/server.example.toml lightai-server.toml
-cp config/agent.example.toml lightai-agent.toml
-# 编辑 lightai-server.toml（至少确认 listen_addr、database.url）
-# 编辑 lightai-agent.toml（至少确认 server_url）
+# 2. 初始化配置和证书
+bash scripts/init-server.sh --host <服务器IP或域名>
 
 # 3. 启动 Server
 bash scripts/start-server.sh
-curl http://127.0.0.1:18080/health
+curl -k https://127.0.0.1:18443/health
 # 预期：{"status":"ok","service":"server"}
 
 # 4. 验证 Web 自托管和 API 路由
-curl -s http://127.0.0.1:18080/ | head -c 50
+curl -sk https://127.0.0.1:18443/ | head -c 50
 # 预期：<!doctype html>...
 
-curl -s http://127.0.0.1:18080/api/setup/status
+curl -sk https://127.0.0.1:18443/api/setup/status
 # 预期：{"setup_required":true}
 
-curl -s http://127.0.0.1:18080/api/nonexistent-endpoint
+curl -sk https://127.0.0.1:18443/api/nonexistent-endpoint
 # 预期：{"error":"not_found",...}（JSON 404，不是 HTML）
 
-# 5. 启动 Agent
+# 5. 初始化并启动 Agent
+bash scripts/init-agent.sh --server https://<服务器IP或域名>:18443 --name <节点名称>
 bash scripts/start-agent.sh
 # 检查日志: tail logs/agent.log
 
 # 6. Web 控制台
-# 浏览器打开 http://<服务器IP>:18080/
+# 浏览器打开 https://<服务器IP或域名>:18443/
 # 初始化管理员 → 登录 → 检查节点列表（应看到 Agent 在线）
 
 # 7. 停止
@@ -297,16 +297,16 @@ sudo systemctl enable --now lightai-server lightai-agent
 
 ### 端口被占用
 
-Server 默认监听 18080。修改 `lightai-server.toml` 中 `[server].listen_addr` 为其他端口。
+Server 初始化后默认监听 HTTPS 18443。修改 `lightai-server.toml` 中 `[https].listen_addr` 为其他端口。
 
 ### Web 页面打不开
 
 确认 `lightai-server.toml` 中 `[web].dist_dir` 指向正确的 `web/dist` 路径（默认已配置）。  
-确认 Server 已启动且 `curl http://127.0.0.1:18080/` 能返回 HTML。
+确认 Server 已启动且 `curl -k https://127.0.0.1:18443/` 能返回 HTML。
 
 ### Agent 连不上 Server
 
-检查 `lightai-agent.toml` 中 `[agent].server_url` 是否正确。  
+检查 `lightai-agent.toml` 中 `[server].url` 和 `[server].ca_cert_path` 是否正确。
 检查 Agent 日志：`tail logs/agent.log`。
 
 ### 无 GPU 时的预期表现
@@ -347,5 +347,5 @@ Server 默认监听 18080。修改 `lightai-server.toml` 中 `[server].listen_ad
 - **SQLite**：已 bundled 编译到二进制中，不依赖系统 `libsqlite3.so`。
 - **Web**：由 Server 自托管（`[web].dist_dir = "web/dist"`），不需要 nginx。
 - **系统库**：仅依赖 Linux 标准基础库（`libgcc_s`、`libpthread`、`libm`、`libdl`、`libc`、`ld-linux`）。
-- **不需要**：libsqlite3-dev、nginx、python3、Node.js、openssl、curl。
+- **不需要**：libsqlite3-dev、nginx、python3、Node.js、openssl、cargo。
 - **GPU/Docker**：Docker、NVIDIA Driver、nvidia-container-toolkit 只在 Docker/vLLM/GPU 实例测试时需要，不在 release 包内。

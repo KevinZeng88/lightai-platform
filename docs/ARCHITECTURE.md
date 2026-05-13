@@ -116,6 +116,33 @@ Web start/stop/test/check
 - Server 重启后依赖下一次 Agent 心跳 reconcile 实例状态。
 - Agent 离线不等于实例失败；Server 保留原实例状态，Web 使用 `node_online=false` 展示 warning。
 
+## Backend 生命周期模型
+
+不同 backend 有根本不同的生命周期语义，不可混淆：
+
+### Binary / Script（llama.cpp 等本地进程）
+- 每个 Instance 对应一个独立进程。
+- start → Agent 启动二进制；stop → Agent kill 进程。
+- 通过 managed_process 跟踪存活，心跳上报 managed_instances。
+- heartbeat reconcile：未上报时可能标记 failed。
+
+### Docker（vLLM 等容器）
+- 每个 Instance 对应一个 `docker run --detach` 容器。
+- start → `docker run`；stop → `docker stop`。
+- Docker 参数由 Runtime `params_json` + Instance `params_json` 三层合并。
+- 支持 gpu_memory_utilization、max_model_len、tensor_parallel_size 等参数。
+
+### Ollama（共享 daemon）
+- Runtime = Ollama daemon 配置；Instance = 某个 model name 的逻辑实例。
+- 多个 Instance 共享同一个 daemon。
+- start = 加载/预热模型（POST /api/generate warmup），不启动新进程。
+- stop = 卸载模型（keep_alive=0），不停止 daemon。
+- **不依赖 managed process 心跳**；heartbeat reconcile 必须跳过。
+- check/test 通过 Ollama API 判断；test 不应因 DB status 非 running 被拦截。
+- 模型来源为节点本地 Ollama 模型列表（/api/tags），不强制绑定 model_file_id。
+- Runtime 保存只校验格式，不检查 daemon 是否在线。
+- 暂缓：自动 pull、GPU 可见性控制、多 daemon 调度。
+
 ## Docker 原则
 
 - Docker 容器由 Agent 通过 `docker run --detach` 启动，不默认加 `--rm`，保留异常退出后的 inspect/logs 诊断能力。
@@ -142,10 +169,14 @@ Agent 本地 TOML 主要是 bootstrap：Server 地址、节点名、监听地址
 - 外部服务接入和本地实例生命周期。
 - Runtime、Model、Model File、Trash、日志审计、用户/用户组和基础配置页面。
 - 系统/GPU 指标当前状态和历史趋势。
+- Ollama v0.1 最小可用（共享 daemon 模式）。
+- vLLM Docker 参数配置（含 tensor_parallel_size）。
+- llama.cpp gpu_layers 参数治理（默认不传参，CPU-only 可显式设置）。
 
 部分完成：
 
 - Docker/vLLM 后端已有实现和测试，但仍缺真实 GPU 环境端到端验证。
+- Ollama 暂不支持自动 pull、GPU 可见性控制、多 daemon 调度。
 
 当前阶段暂未实现，作为后续阶段目标保留：
 
