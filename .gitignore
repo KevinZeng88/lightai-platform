@@ -66,6 +66,9 @@ bin/
 # Docker / local deployment
 docker-compose.override.yml
 
+# Local deployment verification
+.local/
+
 # Codex / local scratch
 .codex/
 .codex
