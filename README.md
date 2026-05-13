@@ -79,7 +79,7 @@ bash scripts/verify-local-deployment.sh
 bash scripts/verify-local-deployment.sh --fresh --yes
 
 # CI / 自动化完整测试（创建管理员 + 登录验证 + 完成后停止）
-bash scripts/verify-local-deployment.sh --fresh --yes --auto --stop
+bash scripts/verify-local-deployment.sh --fresh --yes --auto --stop-after-verify
 ```
 
 ### 跨服务器测试

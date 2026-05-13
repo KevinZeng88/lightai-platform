@@ -1,6 +1,9 @@
-[server]
-# Listen address.  Use 0.0.0.0 to accept external connections.
-# This is the control-plane port — deploy behind firewall/VPN/HTTPS reverse proxy in production.
+# HTTP listener (default for initial setup).
+# Run scripts/init-server.sh to generate HTTPS certificates and config.
+[http]
+enabled = true
+# Use 0.0.0.0 to accept external connections.
+# This is the control-plane port — deploy behind firewall/VPN/HTTPS in production.
 listen_addr = "0.0.0.0:18080"
 
 [web]

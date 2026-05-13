@@ -42,6 +42,16 @@ cp "${PROJECT_ROOT}/deploy/agent.example.toml" "${RELEASE_DIR}/config/"
 cp "${PROJECT_ROOT}/deploy/lightai-server.service" "${RELEASE_DIR}/systemd/"
 cp "${PROJECT_ROOT}/deploy/lightai-agent.service" "${RELEASE_DIR}/systemd/"
 cp "${PROJECT_ROOT}/INSTALL.md" "${RELEASE_DIR}/"
+cp "${PROJECT_ROOT}/scripts/init-server.sh" "${RELEASE_DIR}/scripts/"
+cp "${PROJECT_ROOT}/scripts/init-agent.sh" "${RELEASE_DIR}/scripts/"
+
+# Ensure executables are marked +x (source perms may vary).
+chmod +x "${RELEASE_DIR}/bin/lightai-server"
+chmod +x "${RELEASE_DIR}/bin/lightai-agent"
+chmod +x "${RELEASE_DIR}/scripts/init-server.sh"
+chmod +x "${RELEASE_DIR}/scripts/init-agent.sh"
+chmod +x "${RELEASE_DIR}/collectors/gpu/nvidia-wsl/discover.sh"
+chmod +x "${RELEASE_DIR}/collectors/gpu/nvidia-wsl/metrics.sh"
 
 # ── 4. Generate start/stop scripts ──
 echo "[4/7] Generating start/stop scripts..."
@@ -146,7 +156,10 @@ chmod +x "${RELEASE_DIR}/scripts/stop.sh"
 
 # ── Generate default config with web serving enabled ──
 cat > "${RELEASE_DIR}/lightai-server.toml" << 'TOML'
-[server]
+# HTTP listener (default for initial setup).
+# Run scripts/init-server.sh to enable HTTPS with self-signed certificates.
+[http]
+enabled = true
 listen_addr = "0.0.0.0:18080"
 
 [web]
