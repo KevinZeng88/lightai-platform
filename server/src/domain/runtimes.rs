@@ -218,7 +218,7 @@ pub async fn check_runtime_environment(
         )
         .await?;
         return Err(DomainError::Conflict(
-            "Node Agent offline, cannot check runtime environment".to_string(),
+            "节点 Agent 离线，无法检查运行环境（Agent node offline, cannot check runtime environment）".to_string(),
         ));
     }
     let request = RuntimeEnvironmentRequest {

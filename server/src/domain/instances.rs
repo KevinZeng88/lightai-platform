@@ -348,7 +348,7 @@ pub async fn check_model_instance(
                 pool,
                 id,
                 instance.status.as_str(),
-                Some("Agent offline, cannot check instance status"),
+                Some("节点 Agent 离线，无法检查实例状态（Agent offline, cannot check instance status）"),
             )
             .await;
         }
@@ -419,7 +419,7 @@ async fn run_local_instance_task(
         .ok_or_else(|| DomainError::BadRequest("Local instance missing node".to_string()))?;
     if !node_online(pool, node_id).await? {
         return Err(DomainError::Conflict(
-            "Node Agent offline, cannot execute local instance task".to_string(),
+            "节点 Agent 离线，无法执行本地实例操作（Agent node offline, cannot execute local instance task）".to_string(),
         ));
     }
     let model_file_id = instance
@@ -459,7 +459,7 @@ async fn run_local_instance_task(
         "model_path_type": file.path_type,
         "base_url": instance.base_url,
         "endpoint_url": instance.endpoint_url,
-        "params": params,
+        "params_json": serde_json::to_string(&params).unwrap_or_default(),
     });
     if let Some(rp) = runtime_params {
         payload["runtime_params"] = rp;

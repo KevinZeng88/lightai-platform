@@ -87,6 +87,13 @@
           <el-button :loading="loadingLog" type="primary" @click="loadLogs">读取日志</el-button>
         </el-form-item>
       </el-form>
+      <el-alert
+        v-if="selectedNodeOffline"
+        title="所选节点 Agent 当前离线。日志内容可能无法获取，或显示的是离线前最后缓存的日志。请确认 Agent 已启动并在线后重试。"
+        type="warning"
+        show-icon
+        class="alert"
+      />
       <pre class="log-box">{{ logContent || '暂无日志' }}</pre>
     </el-tab-pane>
 
@@ -134,7 +141,7 @@
 <script setup lang="ts">
 defineProps<{ role: string }>()
 
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import {
   fetchAuditEvents,
   fetchLogs,
@@ -162,6 +169,18 @@ const serverLogPolicy = ref<LogPolicy>({
   log_retention_files: 5,
   log_retention_days: 7
 })
+const selectedNodeOffline = computed(() => {
+  if (logSource.value === 'agent' && selectedNodeId.value) {
+    const node = nodes.value.find(n => n.id === selectedNodeId.value)
+    return node ? node.status !== 'online' : false
+  }
+  if (logSource.value === 'instance' && selectedInstanceId.value) {
+    const inst = instances.value.find(i => i.id === selectedInstanceId.value)
+    return inst ? (inst.node_online === false) : false
+  }
+  return false
+})
+
 const loading = ref(false)
 const loadingLog = ref(false)
 const loadingAudit = ref(false)

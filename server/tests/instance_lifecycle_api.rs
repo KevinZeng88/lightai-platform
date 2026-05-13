@@ -393,11 +393,14 @@ async fn model_directory_can_be_registered_and_used_by_local_instance_params() {
         assert_eq!(task["task"]["kind"], "start_model_instance");
         assert_eq!(task["task"]["payload"]["model_path"], "/models/qwen2-7b");
         assert_eq!(task["task"]["payload"]["model_path_type"], "directory");
-        assert_eq!(task["task"]["payload"]["params"]["port"], 18081);
-        assert_eq!(
-            task["task"]["payload"]["params"]["extra_args"][0],
-            "--verbose"
-        );
+        let params_json: serde_json::Value = serde_json::from_str(
+            task["task"]["payload"]["params_json"]
+                .as_str()
+                .unwrap_or_default(),
+        )
+        .unwrap_or_default();
+        assert_eq!(params_json["port"], 18081);
+        assert_eq!(params_json["extra_args"][0], "--verbose");
         let task_id = task["task"]["id"].as_str().unwrap();
         report_instance_task_result_with_details(
             app.clone(),

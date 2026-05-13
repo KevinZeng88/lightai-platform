@@ -48,17 +48,36 @@ pub(super) struct InstanceLaunchParams {
 
 impl InstanceLaunchParams {
     fn from_payload(payload: &serde_json::Value) -> Result<Self, String> {
-        let params = payload
-            .get("params_json")
-            .unwrap_or(&serde_json::Value::Null);
-        let parsed = if let Some(value) = params.as_str() {
-            serde_json::from_str::<serde_json::Value>(value).unwrap_or(serde_json::Value::Null)
-        } else {
-            params.clone()
+        let params_value = payload.get("params_json").cloned();
+        let parsed = match params_value {
+            Some(serde_json::Value::String(s)) => {
+                serde_json::from_str::<serde_json::Value>(&s).unwrap_or_default()
+            }
+            Some(obj @ serde_json::Value::Object(_)) => obj,
+            Some(serde_json::Value::Null) | None => {
+                // backward compat: try "params" key (object form)
+                match payload.get("params").cloned() {
+                    Some(obj @ serde_json::Value::Object(_)) => obj,
+                    _ => serde_json::Value::Null,
+                }
+            }
+            _ => serde_json::Value::Null,
         };
+        // Runtime defaults (params_json on the Runtime record) provide fallbacks
+        // for fields not explicitly set in the instance params.
+        let rt_defaults = payload
+            .get("runtime_params")
+            .and_then(|v| v.get("defaults"))
+            .filter(|v| v.is_object());
+
         let host = parsed
             .get("host")
             .and_then(|value| value.as_str())
+            .or_else(|| {
+                rt_defaults
+                    .and_then(|d| d.get("host"))
+                    .and_then(|v| v.as_str())
+            })
             .unwrap_or("127.0.0.1")
             .trim()
             .to_string();
@@ -68,10 +87,39 @@ impl InstanceLaunchParams {
         let port = parsed
             .get("port")
             .and_then(|value| value.as_u64())
+            .or_else(|| {
+                rt_defaults
+                    .and_then(|d| d.get("port"))
+                    .and_then(|v| v.as_u64())
+            })
             .unwrap_or(8080);
         if port == 0 || port > u16::MAX as u64 {
             return Err("invalid listen port".to_string());
         }
+        let ctx_size = parsed
+            .get("ctx_size")
+            .and_then(|value| value.as_u64())
+            .or_else(|| {
+                rt_defaults
+                    .and_then(|d| d.get("ctx_size"))
+                    .and_then(|v| v.as_u64())
+            });
+        let gpu_layers = parsed
+            .get("gpu_layers")
+            .and_then(|value| value.as_i64())
+            .or_else(|| {
+                rt_defaults
+                    .and_then(|d| d.get("n_gpu_layers"))
+                    .and_then(|v| v.as_i64())
+            });
+        let threads = parsed
+            .get("threads")
+            .and_then(|value| value.as_u64())
+            .or_else(|| {
+                rt_defaults
+                    .and_then(|d| d.get("threads"))
+                    .and_then(|v| v.as_u64())
+            });
         let extra_args = parsed
             .get("extra_args")
             .and_then(|value| value.as_array())
@@ -89,9 +137,9 @@ impl InstanceLaunchParams {
         Ok(Self {
             host,
             port: port as u16,
-            ctx_size: parsed.get("ctx_size").and_then(|value| value.as_u64()),
-            gpu_layers: parsed.get("gpu_layers").and_then(|value| value.as_i64()),
-            threads: parsed.get("threads").and_then(|value| value.as_u64()),
+            ctx_size,
+            gpu_layers,
+            threads,
             extra_args,
         })
     }
@@ -803,4 +851,147 @@ fn spawn_process_monitor(instance_id: String, _managed_store_path: Option<PathBu
             drop(guard);
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    // ── params_json field name and parsing ──
+
+    #[test]
+    fn reads_params_json_string() {
+        let payload = json!({
+            "params_json": json!({
+                "host": "0.0.0.0",
+                "port": 9090,
+                "ctx_size": 8192,
+                "gpu_layers": 20,
+                "threads": 8,
+                "extra_args": ["--verbose"]
+            }).to_string()
+        });
+        let p = InstanceLaunchParams::from_payload(&payload).unwrap();
+        assert_eq!(p.host, "0.0.0.0");
+        assert_eq!(p.port, 9090);
+        assert_eq!(p.ctx_size, Some(8192));
+        assert_eq!(p.gpu_layers, Some(20));
+        assert_eq!(p.threads, Some(8));
+        assert_eq!(p.extra_args, vec!["--verbose"]);
+    }
+
+    #[test]
+    fn backward_compat_reads_params_object() {
+        let payload = json!({
+            "params": {
+                "host": "0.0.0.0",
+                "port": 8081,
+                "ctx_size": 2048,
+                "gpu_layers": 0,
+                "threads": 4
+            }
+        });
+        let p = InstanceLaunchParams::from_payload(&payload).unwrap();
+        assert_eq!(p.host, "0.0.0.0");
+        assert_eq!(p.port, 8081);
+        assert_eq!(p.ctx_size, Some(2048));
+        assert_eq!(p.gpu_layers, Some(0));
+        assert_eq!(p.threads, Some(4));
+    }
+
+    #[test]
+    fn params_json_takes_priority_over_params() {
+        let payload = json!({
+            "params_json": json!({"host": "10.0.0.1", "port": 7777}).to_string(),
+            "params": {"host": "192.168.1.1", "port": 8888}
+        });
+        let p = InstanceLaunchParams::from_payload(&payload).unwrap();
+        assert_eq!(p.host, "10.0.0.1");
+        assert_eq!(p.port, 7777);
+    }
+
+    #[test]
+    fn missing_params_uses_defaults() {
+        let payload = json!({});
+        let p = InstanceLaunchParams::from_payload(&payload).unwrap();
+        assert_eq!(p.host, "127.0.0.1");
+        assert_eq!(p.port, 8080);
+        assert_eq!(p.ctx_size, None);
+        assert_eq!(p.gpu_layers, None);
+        assert_eq!(p.threads, None);
+        assert!(p.extra_args.is_empty());
+    }
+
+    #[test]
+    fn gpu_layers_zero_from_params_json() {
+        let payload = json!({
+            "params_json": json!({"gpu_layers": 0}).to_string()
+        });
+        let p = InstanceLaunchParams::from_payload(&payload).unwrap();
+        assert_eq!(p.gpu_layers, Some(0));
+    }
+
+    #[test]
+    fn gpu_layers_negative_one_from_params_json() {
+        let payload = json!({
+            "params_json": json!({"gpu_layers": -1}).to_string()
+        });
+        let p = InstanceLaunchParams::from_payload(&payload).unwrap();
+        assert_eq!(p.gpu_layers, Some(-1));
+    }
+
+    #[test]
+    fn host_validation_rejects_empty() {
+        let payload = json!({"params_json": json!({"host": "   "}).to_string()});
+        assert!(InstanceLaunchParams::from_payload(&payload).is_err());
+    }
+
+    #[test]
+    fn port_zero_rejected() {
+        let payload = json!({"params_json": json!({"port": 0}).to_string()});
+        assert!(InstanceLaunchParams::from_payload(&payload).is_err());
+    }
+
+    #[test]
+    fn runtime_params_defaults_fallback() {
+        let payload = json!({
+            "runtime_params": {
+                "defaults": {
+                    "host": "0.0.0.0",
+                    "port": 9000,
+                    "ctx_size": 8192,
+                    "n_gpu_layers": -1,
+                    "threads": 8
+                }
+            }
+        });
+        let p = InstanceLaunchParams::from_payload(&payload).unwrap();
+        // All values come from runtime defaults since no instance params.
+        assert_eq!(p.host, "0.0.0.0");
+        assert_eq!(p.port, 9000);
+        assert_eq!(p.ctx_size, Some(8192));
+        assert_eq!(p.gpu_layers, Some(-1));
+        assert_eq!(p.threads, Some(8));
+    }
+
+    #[test]
+    fn instance_params_override_runtime_defaults() {
+        let payload = json!({
+            "params_json": json!({"port": 7777, "gpu_layers": 35}).to_string(),
+            "runtime_params": {
+                "defaults": {
+                    "host": "0.0.0.0",
+                    "port": 9000,
+                    "n_gpu_layers": -1
+                }
+            }
+        });
+        let p = InstanceLaunchParams::from_payload(&payload).unwrap();
+        // Instance values take priority over runtime defaults.
+        assert_eq!(p.port, 7777);
+        assert_eq!(p.gpu_layers, Some(35));
+        // host falls back to runtime default (not set in instance).
+        assert_eq!(p.host, "0.0.0.0");
+    }
 }
