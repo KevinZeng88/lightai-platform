@@ -15,8 +15,7 @@ pub async fn read_agent_log(
 ) -> Result<String, DomainError> {
     if !node_online(pool, node_id).await? {
         return Err(DomainError::Conflict(
-            "节点 Agent 离线，无法读取 Agent 日志（Agent node offline, cannot read Agent log）"
-                .to_string(),
+            "Node Agent offline, cannot read Agent log".to_string(),
         ));
     }
     let task_id = Uuid::new_v4().to_string();
@@ -91,8 +90,7 @@ pub async fn refresh_instance_logs(pool: &SqlitePool, id: &str) -> Result<String
         .ok_or_else(|| DomainError::BadRequest("Local instance missing node".to_string()))?;
     if !node_online(pool, node_id).await? {
         return Err(DomainError::Conflict(
-            "节点 Agent 离线，无法刷新实例日志（Agent node offline, cannot refresh instance log）"
-                .to_string(),
+            "Node Agent offline, cannot refresh instance log".to_string(),
         ));
     }
 

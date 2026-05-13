@@ -5,21 +5,14 @@
 # Agent local listen address.
 listen_addr = "127.0.0.1:18081"
 
+# LightAI Server URL.
+server_url = "http://127.0.0.1:18080"
+
 # Node name.  Defaults to hostname if omitted or empty.
 # node_name = "gpu-node-01"
 
 # Agent state file path.
 state_path = "data/agent-state.toml"
-
-[server]
-# LightAI Server URL (HTTPS required for production).
-url = "https://127.0.0.1:18443"
-
-# Path to CA certificate for Server TLS verification.
-ca_cert_path = "./certs/ca.crt"
-
-# WARNING: Only for temporary diagnostics.  Never use in production.
-# insecure_skip_tls_verify = false
 
 # ── GPU / accelerator collector configuration ──
 #

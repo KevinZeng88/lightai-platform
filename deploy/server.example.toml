@@ -1,18 +1,7 @@
-# HTTP listener (required if HTTPS is not configured).
-[http]
-# Set enabled = false to disable HTTP entirely when using HTTPS only.
-enabled = true
-# Use 0.0.0.0 to accept external connections.
-# This is the control-plane port — deploy behind firewall/VPN/HTTPS in production.
+[server]
+# Listen address.  Use 0.0.0.0 to accept external connections.
+# This is the control-plane port — deploy behind firewall/VPN/HTTPS reverse proxy in production.
 listen_addr = "0.0.0.0:18080"
-
-# HTTPS listener with self-signed certificate.
-# Generate certificates first:  lightai-server cert init
-# Then uncomment the section below.
-# [https]
-# listen_addr = "0.0.0.0:18443"
-# cert_path = "certs/server.crt"
-# key_path = "certs/server.key"
 
 [web]
 # Directory containing web frontend static files (web/dist).
@@ -22,6 +11,7 @@ dist_dir = "web/dist"
 
 [database]
 # SQLite database path.  Relative paths are resolved against the process CWD.
+# With systemd WorkingDirectory=/opt/lightai, this becomes /opt/lightai/data/lightai.db.
 url = "sqlite://./data/lightai.db"
 
 [metrics]
@@ -29,13 +19,6 @@ url = "sqlite://./data/lightai.db"
 retention_days = 7
 # How often to run the cleanup task, in hours (minimum 1).
 # cleanup_interval_hours = 6
-
-[logs]
-dir = "logs"
-level = "info"
-max_file_bytes = 10485760
-retention_files = 5
-retention_days = 7
 
 [auth.password]
 min_length = 12
@@ -47,5 +30,5 @@ force_change_after_reset = true
 [auth.session]
 ttl_secs = 43200
 idle_timeout_secs = 7200
-# Enable Secure cookie when serving over HTTPS (requires [https] section above).
-secure_cookie = false
+# Set true when serving Web/API over HTTPS.
+secure_cookie = true

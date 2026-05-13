@@ -348,7 +348,7 @@ pub async fn check_model_instance(
                 pool,
                 id,
                 instance.status.as_str(),
-                Some("节点 Agent 离线，无法检查实例状态（Agent offline, cannot check instance status）"),
+                Some("Agent offline, cannot check instance status"),
             )
             .await;
         }
@@ -419,7 +419,7 @@ async fn run_local_instance_task(
         .ok_or_else(|| DomainError::BadRequest("Local instance missing node".to_string()))?;
     if !node_online(pool, node_id).await? {
         return Err(DomainError::Conflict(
-            "节点 Agent 离线，无法执行本地实例操作（Agent node offline, cannot execute local instance task）".to_string(),
+            "Node Agent offline, cannot execute local instance task".to_string(),
         ));
     }
     let model_file_id = instance
