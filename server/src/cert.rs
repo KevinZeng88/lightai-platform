@@ -20,11 +20,15 @@ pub struct ServerCertOutput {
 pub fn generate_ca() -> anyhow::Result<CaOutput> {
     let key = KeyPair::generate()?;
     let mut params = CertificateParams::new(vec!["LightAI Internal CA".to_string()])?;
-    params.distinguished_name.push(DnType::CommonName, "LightAI Internal CA");
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "LightAI Internal CA");
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
     params.not_before =
         time::OffsetDateTime::now_utc().replace_offset(time::UtcOffset::from_hms(0, 0, 0)?);
-    params.not_after = params.not_before.replace_year(params.not_before.year() + 10)?;
+    params.not_after = params
+        .not_before
+        .replace_year(params.not_before.year() + 10)?;
 
     let cert = params.self_signed(&key)?;
     let cert_der = cert.der().to_vec();
@@ -58,7 +62,9 @@ pub fn generate_server_cert(
     );
 
     for host in hosts {
-        params.subject_alt_names.push(SanType::DnsName(host.clone().try_into()?));
+        params
+            .subject_alt_names
+            .push(SanType::DnsName(host.clone().try_into()?));
     }
     for ip in ips {
         if let Ok(addr) = ip.parse::<std::net::IpAddr>() {
@@ -66,17 +72,23 @@ pub fn generate_server_cert(
         }
     }
     if !hosts.iter().any(|h| h == "localhost") {
-        params.subject_alt_names.push(SanType::DnsName("localhost".try_into()?));
+        params
+            .subject_alt_names
+            .push(SanType::DnsName("localhost".try_into()?));
     }
     if !ips.iter().any(|i| i == "127.0.0.1") {
-        params.subject_alt_names.push(SanType::IpAddress(
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
-        ));
+        params
+            .subject_alt_names
+            .push(SanType::IpAddress(std::net::IpAddr::V4(
+                std::net::Ipv4Addr::new(127, 0, 0, 1),
+            )));
     }
 
     params.not_before =
         time::OffsetDateTime::now_utc().replace_offset(time::UtcOffset::from_hms(0, 0, 0)?);
-    params.not_after = params.not_before.replace_year(params.not_before.year() + 1)?;
+    params.not_after = params
+        .not_before
+        .replace_year(params.not_before.year() + 1)?;
 
     let cert = params.signed_by(&key, &ca_cert, &ca_key)?;
 

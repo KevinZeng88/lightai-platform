@@ -85,7 +85,9 @@ impl Config {
         }
         if let Some(server) = file_config.server {
             if let Some(value) = server.listen_addr {
-                eprintln!("warning: [server].listen_addr is deprecated; use [https] and [http] instead");
+                eprintln!(
+                    "warning: [server].listen_addr is deprecated; use [https] and [http] instead"
+                );
                 // Legacy: treat as HTTP if no [https] is configured.
                 if config.https.is_none() {
                     config.http.enabled = true;

@@ -19,8 +19,7 @@ pub async fn cleanup_historical_metrics(
         .execute(pool)
         .await?;
 
-    let total =
-        node_deleted.rows_affected() + gpu_deleted.rows_affected();
+    let total = node_deleted.rows_affected() + gpu_deleted.rows_affected();
 
     tracing::info!(
         retention_days,
@@ -33,11 +32,7 @@ pub async fn cleanup_historical_metrics(
     Ok(total)
 }
 
-pub fn spawn_cleanup_task(
-    pool: SqlitePool,
-    retention_days: u32,
-    interval_hours: u32,
-) {
+pub fn spawn_cleanup_task(pool: SqlitePool, retention_days: u32, interval_hours: u32) {
     tokio::spawn(async move {
         // Run first cleanup after a short delay so the server is fully up.
         tokio::time::sleep(std::time::Duration::from_secs(30)).await;
@@ -57,10 +52,7 @@ pub fn spawn_cleanup_task(
                 }
             }
 
-            tokio::time::sleep(std::time::Duration::from_secs(
-                interval_hours as u64 * 3600,
-            ))
-            .await;
+            tokio::time::sleep(std::time::Duration::from_secs(interval_hours as u64 * 3600)).await;
         }
     });
 }

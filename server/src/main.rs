@@ -98,7 +98,8 @@ CONFIGURATION:
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    rustls::crypto::ring::default_provider().install_default()
+    rustls::crypto::ring::default_provider()
+        .install_default()
         .expect("rustls ring crypto provider initialization failed");
     let args: Vec<String> = std::env::args().collect();
     let (subcommand, cli_config_path, sub_idx) = parse_cli(&args);
@@ -119,7 +120,10 @@ async fn main() -> anyhow::Result<()> {
                 config.validate_auth()?;
                 let pool = db::connect(&config.database_url).await?;
                 repository::reset_user_password(
-                    &pool, &user, &pass, config.password_policy.clone(),
+                    &pool,
+                    &user,
+                    &pass,
+                    config.password_policy.clone(),
                 )
                 .await?;
                 println!("password reset completed for user {}", user);
@@ -147,6 +151,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
+        .with_ansi(false)
         .init();
 
     let config = load_server_config(cli_config_path.as_deref())?;
@@ -208,7 +213,9 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn load_tls_config(https: &lightai_server::config::HttpsConfig) -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
+fn load_tls_config(
+    https: &lightai_server::config::HttpsConfig,
+) -> anyhow::Result<axum_server::tls_rustls::RustlsConfig> {
     use rustls_pemfile::{certs, pkcs8_private_keys};
     use std::io::BufReader;
 
@@ -217,8 +224,8 @@ fn load_tls_config(https: &lightai_server::config::HttpsConfig) -> anyhow::Resul
     let key_file = std::fs::File::open(&https.key_path)
         .map_err(|e| anyhow::anyhow!("cannot open key file '{}': {e}", https.key_path))?;
 
-    let cert_chain: Vec<rustls::pki_types::CertificateDer> = certs(&mut BufReader::new(cert_file))
-        .collect::<Result<Vec<_>, _>>()?;
+    let cert_chain: Vec<rustls::pki_types::CertificateDer> =
+        certs(&mut BufReader::new(cert_file)).collect::<Result<Vec<_>, _>>()?;
     let key = pkcs8_private_keys(&mut BufReader::new(key_file))
         .collect::<Result<Vec<_>, _>>()?
         .into_iter()
@@ -230,7 +237,9 @@ fn load_tls_config(https: &lightai_server::config::HttpsConfig) -> anyhow::Resul
         .with_single_cert(cert_chain, rustls::pki_types::PrivateKeyDer::Pkcs8(key))?;
     config.alpn_protocols = vec![b"h2".to_vec(), b"http/1.1".to_vec()];
 
-    Ok(axum_server::tls_rustls::RustlsConfig::from_config(config.into()))
+    Ok(axum_server::tls_rustls::RustlsConfig::from_config(
+        config.into(),
+    ))
 }
 
 // ── cert subcommand ──
@@ -270,7 +279,11 @@ async fn handle_cert_cmd(args: &[String], sub_idx: usize) -> anyhow::Result<()> 
             cert::write_private(&out_dir.join("server.key"), &server.key_pem)?;
             std::fs::write(out_dir.join("server.crt"), &server.cert_pem)?;
             // server.crt should include CA cert so clients only need ca.crt + server.crt
-            let chain = format!("{}\n{}", server.cert_pem.trim_end(), ca.ca_cert_pem.trim_end());
+            let chain = format!(
+                "{}\n{}",
+                server.cert_pem.trim_end(),
+                ca.ca_cert_pem.trim_end()
+            );
             std::fs::write(out_dir.join("server.crt"), &chain)?;
 
             println!("Certificates generated in {}", out_dir.display());
@@ -349,7 +362,11 @@ NOTES:
     - Does NOT require a running Server process.
 "#;
 
-async fn handle_collector_cmd(args: &[String], sub_idx: usize, cli_config_path: Option<&str>) -> anyhow::Result<()> {
+async fn handle_collector_cmd(
+    args: &[String],
+    sub_idx: usize,
+    cli_config_path: Option<&str>,
+) -> anyhow::Result<()> {
     let cmd_idx = sub_idx + 1;
     if args.len() <= cmd_idx {
         eprintln!("missing collector subcommand (inspect | sync | register)");
@@ -378,7 +395,10 @@ async fn handle_collector_cmd(args: &[String], sub_idx: usize, cli_config_path: 
                     for o in &outcomes {
                         match o {
                             lightai_server::collector_cli::RegisterOutcome::Registered {
-                                id, version, discover_sha256, metrics_sha256,
+                                id,
+                                version,
+                                discover_sha256,
+                                metrics_sha256,
                             } => {
                                 println!(
                                     "registered  {id} v{version}  discover={} metrics={}",
@@ -387,7 +407,10 @@ async fn handle_collector_cmd(args: &[String], sub_idx: usize, cli_config_path: 
                                 );
                             }
                             lightai_server::collector_cli::RegisterOutcome::Updated {
-                                id, version, discover_sha256, metrics_sha256,
+                                id,
+                                version,
+                                discover_sha256,
+                                metrics_sha256,
                             } => {
                                 println!(
                                     "updated     {id} v{version}  discover={} metrics={}",
@@ -395,7 +418,10 @@ async fn handle_collector_cmd(args: &[String], sub_idx: usize, cli_config_path: 
                                     &metrics_sha256[..metrics_sha256.len().min(12)],
                                 );
                             }
-                            lightai_server::collector_cli::RegisterOutcome::Skipped { dir, reason } => {
+                            lightai_server::collector_cli::RegisterOutcome::Skipped {
+                                dir,
+                                reason,
+                            } => {
                                 println!("skipped     {dir}  ({reason})");
                             }
                         }
@@ -412,7 +438,10 @@ async fn handle_collector_cmd(args: &[String], sub_idx: usize, cli_config_path: 
             if let Some(dir) = extract_flag_value(args, "--dir") {
                 match lightai_server::collector_cli::inspect_one(std::path::Path::new(&dir)) {
                     Ok(r) => {
-                        println!("{}", serde_json::to_string_pretty(&r).unwrap_or_else(|_| format!("{r:?}")));
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&r).unwrap_or_else(|_| format!("{r:?}"))
+                        );
                     }
                     Err(e) => {
                         eprintln!("inspect failed: {e:#}");
@@ -446,14 +475,21 @@ async fn handle_collector_cmd(args: &[String], sub_idx: usize, cli_config_path: 
             };
             let config = load_server_config(cli_config_path)?;
             let pool = db::connect(&config.database_url).await?;
-            match lightai_server::collector_cli::register_one(&pool, std::path::Path::new(&dir)).await
+            match lightai_server::collector_cli::register_one(&pool, std::path::Path::new(&dir))
+                .await
             {
                 Ok(outcome) => match outcome {
                     lightai_server::collector_cli::RegisterOutcome::Registered {
-                        id, version, discover_sha256, metrics_sha256,
+                        id,
+                        version,
+                        discover_sha256,
+                        metrics_sha256,
                     }
                     | lightai_server::collector_cli::RegisterOutcome::Updated {
-                        id, version, discover_sha256, metrics_sha256,
+                        id,
+                        version,
+                        discover_sha256,
+                        metrics_sha256,
                     } => {
                         println!(
                             "ok  {id} v{version}  discover={} metrics={}",
@@ -491,7 +527,9 @@ fn handle_config_cmd(args: &[String]) -> anyhow::Result<()> {
     }
     match args[2].as_str() {
         "init" => {
-            if args.get(3).map(String::as_str) == Some("--help") || args.get(3).map(String::as_str) == Some("-h") {
+            if args.get(3).map(String::as_str) == Some("--help")
+                || args.get(3).map(String::as_str) == Some("-h")
+            {
                 println!("{CONFIG_HELP}");
                 return Ok(());
             }
@@ -512,7 +550,10 @@ fn handle_config_cmd(args: &[String]) -> anyhow::Result<()> {
                 }
             }
             if dest.exists() && !force {
-                anyhow::bail!("'{}' already exists. Use --force to overwrite.", dest.display());
+                anyhow::bail!(
+                    "'{}' already exists. Use --force to overwrite.",
+                    dest.display()
+                );
             }
             std::fs::write(dest, SERVER_CONFIG_TEMPLATE)?;
             println!("Config template written to '{}'", dest.display());

@@ -56,7 +56,11 @@ async fn run_once(
     Option<Vec<crate::collector::registry::RegistryEntry>>,
     Option<Vec<crate::collector::registry::RegistryEntry>>,
 )> {
-    let client = ServerClient::new(config.server_url.clone(), config.ca_cert_path.as_deref(), config.insecure_skip_tls_verify)?;
+    let client = ServerClient::new(
+        config.server_url.clone(),
+        config.ca_cert_path.as_deref(),
+        config.insecure_skip_tls_verify,
+    )?;
     let mut next_config = None;
     // Recover only persisted managed process records from the managed store.
     // Do not scan externally started processes or recover non-persisted registrations.

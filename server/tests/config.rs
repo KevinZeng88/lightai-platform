@@ -89,9 +89,14 @@ async fn server_platform_log_uses_controlled_files_and_filters_sensitive_lines()
     platform_log::append(&policy, "lightai-server.log", "info", "normal log")
         .await
         .unwrap();
-    platform_log::append(&policy, "lightai-server.log", "info", "authorization: bearer token")
-        .await
-        .unwrap();
+    platform_log::append(
+        &policy,
+        "lightai-server.log",
+        "info",
+        "authorization: bearer token",
+    )
+    .await
+    .unwrap();
     let content = platform_log::read_tail(&policy, "lightai-server.log", 4096)
         .await
         .unwrap();

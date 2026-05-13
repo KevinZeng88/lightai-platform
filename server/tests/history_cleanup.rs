@@ -45,14 +45,23 @@ async fn default_7day_retention_deletes_old_samples_keeps_recent() {
         .bind(hours_ago(24))
         .execute(&pool).await.unwrap();
 
-    history_cleanup::cleanup_historical_metrics(&pool, 7).await.unwrap();
+    history_cleanup::cleanup_historical_metrics(&pool, 7)
+        .await
+        .unwrap();
 
     let node_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM node_metric_samples")
-        .fetch_one(&pool).await.unwrap();
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let gpu_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM gpu_metric_samples")
-        .fetch_one(&pool).await.unwrap();
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
-    assert_eq!(node_count, 1, "only the 1-day-old node sample should remain");
+    assert_eq!(
+        node_count, 1,
+        "only the 1-day-old node sample should remain"
+    );
     assert_eq!(gpu_count, 1, "only the 1-day-old GPU sample should remain");
 }
 
@@ -69,16 +78,27 @@ async fn custom_retention_days_respected() {
         .execute(&pool).await.unwrap();
 
     // Retention = 3 days: sample is 2 days old → should survive.
-    history_cleanup::cleanup_historical_metrics(&pool, 3).await.unwrap();
+    history_cleanup::cleanup_historical_metrics(&pool, 3)
+        .await
+        .unwrap();
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM node_metric_samples")
-        .fetch_one(&pool).await.unwrap();
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(count, 1, "2-day-old sample should survive 3-day retention");
 
     // Retention = 1 day: sample is 2 days old → should be deleted.
-    history_cleanup::cleanup_historical_metrics(&pool, 1).await.unwrap();
+    history_cleanup::cleanup_historical_metrics(&pool, 1)
+        .await
+        .unwrap();
     let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM node_metric_samples")
-        .fetch_one(&pool).await.unwrap();
-    assert_eq!(count, 0, "2-day-old sample should be deleted by 1-day retention");
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(
+        count, 0,
+        "2-day-old sample should be deleted by 1-day retention"
+    );
 }
 
 #[tokio::test]
@@ -89,8 +109,12 @@ async fn cleanup_does_not_touch_state_tables() {
         .execute(&pool).await.unwrap();
 
     // Populate state tables.
-    sqlx::query("INSERT INTO node_status (node_id, cpu_usage_percent, updated_at) VALUES ('n1', 90.0, 1)")
-        .execute(&pool).await.unwrap();
+    sqlx::query(
+        "INSERT INTO node_status (node_id, cpu_usage_percent, updated_at) VALUES ('n1', 90.0, 1)",
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
     sqlx::query("INSERT INTO gpu_status (node_id, gpu_key, vendor, name, collector, updated_at) VALUES ('n1', 'nvidia:gpu0', 'nvidia', 'A100', 'nvidia', 1)")
         .execute(&pool).await.unwrap();
 
@@ -99,12 +123,18 @@ async fn cleanup_does_not_touch_state_tables() {
         .bind(hours_ago(240))
         .execute(&pool).await.unwrap();
 
-    history_cleanup::cleanup_historical_metrics(&pool, 7).await.unwrap();
+    history_cleanup::cleanup_historical_metrics(&pool, 7)
+        .await
+        .unwrap();
 
     let status_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM node_status")
-        .fetch_one(&pool).await.unwrap();
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     let gpu_status_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM gpu_status")
-        .fetch_one(&pool).await.unwrap();
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
     assert_eq!(status_count, 1, "node_status must not be touched");
     assert_eq!(gpu_status_count, 1, "gpu_status must not be touched");

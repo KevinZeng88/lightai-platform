@@ -189,7 +189,10 @@ async fn prepare_dir(value: &str) -> anyhow::Result<PathBuf> {
 }
 
 fn safe_log_file(dir: &Path, file_name: &str) -> anyhow::Result<PathBuf> {
-    if !matches!(file_name, "lightai-server.log" | "lightai-agent.log" | "instance.log") {
+    if !matches!(
+        file_name,
+        "lightai-server.log" | "lightai-agent.log" | "instance.log"
+    ) {
         anyhow::bail!("log file is not managed by platform");
     }
     Ok(dir.join(file_name))

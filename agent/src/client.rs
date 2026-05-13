@@ -35,7 +35,11 @@ pub struct ServerClient {
 }
 
 impl ServerClient {
-    pub fn new(base_url: String, ca_cert_path: Option<&str>, insecure_skip_tls_verify: bool) -> anyhow::Result<Self> {
+    pub fn new(
+        base_url: String,
+        ca_cert_path: Option<&str>,
+        insecure_skip_tls_verify: bool,
+    ) -> anyhow::Result<Self> {
         let mut client = reqwest::Client::builder();
 
         if insecure_skip_tls_verify {

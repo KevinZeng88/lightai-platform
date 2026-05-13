@@ -123,6 +123,7 @@ async fn main() -> anyhow::Result<()> {
         .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
     tracing_subscriber::fmt()
         .with_env_filter(env_filter)
+        .with_ansi(false)
         .init();
 
     let (config, source) = Config::load_with_priority(cli_config_path.as_deref())?;
@@ -436,7 +437,10 @@ async fn handle_ca_cmd(args: &[String]) -> anyhow::Result<()> {
             let client = reqwest::Client::builder()
                 .danger_accept_invalid_certs(true)
                 .build()?;
-            let url = format!("{}/.well-known/lightai/ca.crt", server.trim_end_matches('/'));
+            let url = format!(
+                "{}/.well-known/lightai/ca.crt",
+                server.trim_end_matches('/')
+            );
             eprintln!("Downloading CA certificate from {url} ...");
             let response = client.get(&url).send().await?.error_for_status()?;
             let cert_bytes = response.bytes().await?;
@@ -449,7 +453,9 @@ async fn handle_ca_cmd(args: &[String]) -> anyhow::Result<()> {
             eprintln!("CA SHA256 fingerprint: {fp}");
 
             if !auto_yes {
-                eprintln!("Please verify this fingerprint matches the one displayed by init-server.sh.");
+                eprintln!(
+                    "Please verify this fingerprint matches the one displayed by init-server.sh."
+                );
                 eprint!("Save CA certificate to {}? [y/N] ", out_path.display());
                 let _ = std::io::stdout().flush();
                 let mut input = String::new();

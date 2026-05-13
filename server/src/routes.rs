@@ -51,26 +51,35 @@ pub fn app_with_web(
     web_dist_dir: Option<String>,
     setup_token: Option<String>,
 ) -> Router {
-    let auth_state = AuthState::new(pool.clone(), password_policy.clone(), session_policy.clone());
+    let auth_state = AuthState::new(
+        pool.clone(),
+        password_policy.clone(),
+        session_policy.clone(),
+    );
     // Read CA cert for well-known endpoint (best-effort).
     let ca_cert_path = std::path::Path::new("./certs/ca.crt");
     let ca_cert_bytes: Option<Vec<u8>> = std::fs::read(ca_cert_path).ok();
-    let ca_fingerprint: Option<String> = ca_cert_bytes
-        .as_ref()
-        .and_then(|der| {
-            let mut reader = std::io::BufReader::new(der.as_slice());
-            let mut certs = rustls_pemfile::certs(&mut reader);
-            certs.next()
-                .transpose()
-                .ok()
-                .flatten()
-                .map(|c| crate::cert::sha256_hex(c.as_ref()))
-        });
+    let ca_fingerprint: Option<String> = ca_cert_bytes.as_ref().and_then(|der| {
+        let mut reader = std::io::BufReader::new(der.as_slice());
+        let mut certs = rustls_pemfile::certs(&mut reader);
+        certs
+            .next()
+            .transpose()
+            .ok()
+            .flatten()
+            .map(|c| crate::cert::sha256_hex(c.as_ref()))
+    });
 
     let mut router = Router::new()
         .route("/health", get(health))
-        .route("/.well-known/lightai/ca.crt", get(move || serve_ca_cert(ca_cert_bytes.clone())))
-        .route("/.well-known/lightai/ca-fingerprint", get(move || serve_ca_fingerprint(ca_fingerprint.clone())))
+        .route(
+            "/.well-known/lightai/ca.crt",
+            get(move || serve_ca_cert(ca_cert_bytes.clone())),
+        )
+        .route(
+            "/.well-known/lightai/ca-fingerprint",
+            get(move || serve_ca_fingerprint(ca_fingerprint.clone())),
+        )
         .route("/api/security/status", get(security_status))
         .route("/api/setup/status", get(setup_status))
         .route("/api/setup/admin", post(setup_admin))
@@ -201,16 +210,21 @@ pub fn app_with_web(
             auth_state,
             control_plane_auth,
         ))
-        .route("/api/{*rest}", get(api_not_found).post(api_not_found).put(api_not_found).delete(api_not_found).patch(api_not_found))
+        .route(
+            "/api/{*rest}",
+            get(api_not_found)
+                .post(api_not_found)
+                .put(api_not_found)
+                .delete(api_not_found)
+                .patch(api_not_found),
+        )
         .with_state(pool);
     if let Some(dist_dir) = &web_dist_dir {
         // ServeDir handles static assets.  SPA deep routes that don't match a file
         // would return 404, so we use not_found_service to fall back to index.html.
         // Wrap with a status-correcting service that maps 404 -> 200 for SPA.
         let index_path = format!("{dist_dir}/index.html");
-        let serve_dir = ServeDir::new(dist_dir).fallback(
-            SpaFallback::new(index_path),
-        );
+        let serve_dir = ServeDir::new(dist_dir).fallback(SpaFallback::new(index_path));
         router = router.fallback_service(serve_dir);
         tracing::info!(dist_dir, "serving web static files with SPA fallback");
     }
@@ -425,7 +439,8 @@ async fn setup_admin(
         let provided = request.setup_token.as_deref().unwrap_or("");
         if provided != expected {
             return Err(ApiError::Forbidden(
-                "setup token 错误。请检查初始化口令是否正确，或联系管理员获取正确的 setup token。".to_string(),
+                "setup token 错误。请检查初始化口令是否正确，或联系管理员获取正确的 setup token。"
+                    .to_string(),
             ));
         }
     }
@@ -654,14 +669,16 @@ async fn serve_ca_cert(bytes: Option<Vec<u8>>) -> impl IntoResponse {
             StatusCode::OK,
             [(header::CONTENT_TYPE, "application/x-pem-file")],
             data,
-        ).into_response(),
+        )
+            .into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 error: "not_found",
                 message: Some("CA certificate not available".to_string()),
             }),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -674,14 +691,16 @@ async fn serve_ca_fingerprint(fingerprint: Option<String>) -> Response {
                 "format": "SHA256",
                 "purpose": "LightAI local CA"
             })),
-        ).into_response(),
+        )
+            .into_response(),
         None => (
             StatusCode::NOT_FOUND,
             Json(ErrorResponse {
                 error: "not_found",
                 message: Some("CA certificate not available".to_string()),
             }),
-        ).into_response(),
+        )
+            .into_response(),
     }
 }
 
@@ -691,17 +710,16 @@ async fn security_status(
     State(pool): State<SqlitePool>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
     let ca_cert_path = std::path::Path::new("./certs/ca.crt");
-    let fingerprint = std::fs::read(ca_cert_path)
-        .ok()
-        .and_then(|der| {
-            let mut reader = std::io::BufReader::new(der.as_slice());
-            let mut certs = rustls_pemfile::certs(&mut reader);
-            certs.next()
-                .transpose()
-                .ok()
-                .flatten()
-                .map(|c| crate::cert::sha256_hex(c.as_ref()))
-        });
+    let fingerprint = std::fs::read(ca_cert_path).ok().and_then(|der| {
+        let mut reader = std::io::BufReader::new(der.as_slice());
+        let mut certs = rustls_pemfile::certs(&mut reader);
+        certs
+            .next()
+            .transpose()
+            .ok()
+            .flatten()
+            .map(|c| crate::cert::sha256_hex(c.as_ref()))
+    });
 
     let user_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM users")
         .fetch_one(&pool)
@@ -1894,7 +1912,10 @@ impl tower::Service<axum::http::Request<Body>> for SpaFallback {
     type Error = std::convert::Infallible;
     type Future = std::future::Ready<Result<Response, Self::Error>>;
 
-    fn poll_ready(&mut self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<Result<(), Self::Error>> {
+    fn poll_ready(
+        &mut self,
+        _cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
         std::task::Poll::Ready(Ok(()))
     }
 
@@ -1902,12 +1923,10 @@ impl tower::Service<axum::http::Request<Body>> for SpaFallback {
         // Static assets that don't exist must return 404, not fallback to index.html.
         let path = req.uri().path();
         if path.starts_with("/assets/") {
-            return std::future::ready(Ok(
-                Response::builder()
-                    .status(StatusCode::NOT_FOUND)
-                    .body(Body::from("not found"))
-                    .unwrap(),
-            ));
+            return std::future::ready(Ok(Response::builder()
+                .status(StatusCode::NOT_FOUND)
+                .body(Body::from("not found"))
+                .unwrap()));
         }
         let response = Response::builder()
             .status(StatusCode::OK)
