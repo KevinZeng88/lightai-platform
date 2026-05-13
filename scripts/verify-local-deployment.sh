@@ -305,6 +305,7 @@ sync_agent_ca() {
 # ═══════════════════════════════════════════════════════════════════════
 
 preflight_tls_check() {
+    local server_ca="${SERVER_DIR}/certs/ca.crt"
     local server_cert="${SERVER_DIR}/certs/server.crt"
     local agent_ca="${AGENT_DIR}/certs/ca.crt"
 
