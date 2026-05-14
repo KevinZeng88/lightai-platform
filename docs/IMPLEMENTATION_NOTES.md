@@ -144,7 +144,7 @@ Server 判定在线使用 `ONLINE_THRESHOLD_SECS = 60`。
 
 创建 Runtime 时 Server 会先检查节点在线并创建 `check_runtime_environment` 任务：
 
-- `binary` / `script`：Agent 校验 `binary_path` 存在、不是目录、可执行，并尝试获取版本。
+- `binary`：Agent 校验 `binary_path` 存在、不是目录、可执行，并尝试获取版本。`script` 走同一后端兼容路径，但 v0.1 Web 不再展示为主推荐能力。
 - `docker`：Agent 检查 `docker_image`，通过 Docker CLI inspect/version 路径确认镜像可用性。
 - `available` 和 `version_unavailable` 都被 Server 视为可用。
 
@@ -171,13 +171,14 @@ Server 判定在线使用 `ONLINE_THRESHOLD_SECS = 60`。
 - Server 在任务执行前设置 `starting`、`stopping` 或保留 `running` 状态。
 - 任务超时后标记 task 为 `timed_out`，实例更新为 failed 或返回明确错误。
 
-## 本地程序和脚本
+## 本地程序
 
-local Runtime 的 `deploy_type` 可以是：
+local Runtime 的 v0.1 用户可见主流程是：
 
 - `binary`：按 backend 构造启动参数，启动长进程。
-- `script`：受控脚本入口，custom 脚本按 `start` / `stop` / `test` action 执行。
 - `docker`：走 Docker 后端。
+
+`script`：受控脚本入口的解析、校验和 Agent task 兼容逻辑暂时保留，用于既有数据迁移和回退；Web v0.1 不再把它作为新增推荐路径展示。
 
 本地长进程启动逻辑：
 

@@ -856,7 +856,8 @@ const localRuntimeOptions = computed(() =>
   runtimeEnvironments.value.filter(
     (env) =>
       env.node_id === form.value.node_id &&
-      ['available', 'version_unavailable'].includes(env.check_status ?? '')
+      ['available', 'version_unavailable'].includes(env.check_status ?? '') &&
+      (env.deploy_type !== 'script' || env.id === form.value.runtime_environment_id)
   )
 )
 const localFileOptions = computed(() =>

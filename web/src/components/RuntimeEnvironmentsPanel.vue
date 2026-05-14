@@ -74,12 +74,22 @@
         </el-select>
       </el-form-item>
       <el-form-item label="运行方式" required>
-        <el-select v-model="form.deploy_type">
-          <el-option label="容器 / Docker" value="docker" />
-          <el-option label="脚本 / Script" value="script" />
-          <el-option label="本地程序" value="binary" />
+        <el-select v-model="form.deploy_type" :disabled="isLegacyScriptRuntime">
+          <el-option
+            v-for="option in deployTypeOptions"
+            :key="option.value"
+            :label="option.label"
+            :value="option.value"
+          />
         </el-select>
       </el-form-item>
+      <el-alert
+        v-if="isLegacyScriptRuntime"
+        title="脚本运行方式仅为兼容保留，v0.1 不再作为新增推荐路径。如需调整部署方式，请新建 binary、docker 或 ollama Runtime。"
+        type="warning"
+        show-icon
+        class="alert"
+      />
 
       <!-- Docker fields -->
       <template v-if="form.deploy_type === 'docker'">
@@ -263,6 +273,19 @@ const rtToggles = reactive({
   showExtraBackend: false,
   showExtraDocker: false,
 })
+
+const deployTypeOptions = computed(() => {
+  const options = [
+    { label: '容器 / Docker', value: 'docker' },
+    { label: '本地程序', value: 'binary' },
+  ]
+  if (form.value.deploy_type === 'script') {
+    options.push({ label: '脚本 / Script（兼容保留）', value: 'script' })
+  }
+  return options
+})
+
+const isLegacyScriptRuntime = computed(() => Boolean(editingId.value) && form.value.deploy_type === 'script')
 
 const currentRuntimeParamsJson = computed(() => {
   if (form.value.deploy_type === 'docker') {

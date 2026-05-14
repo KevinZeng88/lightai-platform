@@ -13,7 +13,7 @@ Language convention:
 - Agent 运行在 GPU 节点，主动注册 Server，按心跳上报 CPU/内存/磁盘/GPU 指标和受管实例状态，并通过任务轮询执行受控动作。
 - Web 是 Vue 3 + Vite + Element Plus 控制台，包含节点监控、Agent 配置、运行环境、模型、实例、垃圾箱、日志审计、用户与组页面。
 - v0.1 发布为**单包**（`lightai-platform-v0.1.0-linux-x86_64-glibc2.28.tar.gz`），包含 Server + Agent + Web + 脚本 + 配置 + systemd + collector。不是 server/agent 分包。
-- Instance 顶层类型是 `external` 或 `local`；`local` 实例的启动方式来自 Runtime 的 `deploy_type`：`binary`、`script` 或 `docker`。
+- Instance 顶层类型是 `external` 或 `local`；`local` 实例的启动方式来自 Runtime 的 `deploy_type`。v0.1 用户可见主流程是 `binary`、`docker` 和 Ollama 共享 daemon；`script` 仅保留后端兼容，不作为新增推荐路径。
 - Docker 代码路径已实现，包括三层参数合并、`docker run --detach`、`docker stop`、`docker inspect`、`docker logs` 和 managed store 恢复；仍需真实 GPU 环境端到端验证。
 - 平台日志已实现脱敏、级别过滤、轮转和保留策略。
 
@@ -21,11 +21,12 @@ Language convention:
 
 v0.1 支持多种后端，生命周期语义不同，切勿混淆：
 
-### llama.cpp / vLLM（local binary/script）
+### llama.cpp / local binary
 - 每个 Instance 对应一个独立进程。
 - start → Agent 启动二进制进程；stop → kill 进程。
 - Agent 通过 managed_process 记录跟踪进程存活。
 - heartbeat reconcile：Agent 未上报 managed process status 时，Server 可能将实例标记 failed。
+- `script` 启动路径仍保留后端兼容，但 Web v0.1 不再展示为主流程。
 
 ### vLLM（Docker）
 - 每个 Instance 对应一个 Docker 容器。
