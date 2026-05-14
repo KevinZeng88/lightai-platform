@@ -180,7 +180,7 @@ Web 应显示明确的端口冲突原因；
 ### 10. 日志格式验证
 
 ```bash
-cat logs/agent.log | head -5
+cat logs/lightai-agent.log | head -5
 cat logs/server.log | head -5
 
 # 预期：
@@ -260,7 +260,7 @@ docker run --name lightai-<model> --gpus all --ipc host \
 ```
 
 注意：平台默认不加 `--rm`，使用 `--detach`。
-agent.log 中记录完整 command summary，可对比手工命令。
+lightai-agent.log 中记录完整 command summary，可对比手工命令。
 
 ### 测试步骤
 
@@ -271,7 +271,7 @@ agent.log 中记录完整 command summary，可对比手工命令。
    - 缓存：/data/vllm-cache → /root/.cache/huggingface
 2. **创建模型**：名称 qwen3-0.6b，路径 /data/models/qwen3-0.6b
 3. **创建 Docker Instance**：选择节点、runtime、模型文件，host_port=18000
-4. **启动** → `docker ps | grep lightai`，对比 agent.log 中 command summary
+4. **启动** → `docker ps | grep lightai`，对比 lightai-agent.log 中 command summary
 5. **验证** → `curl http://127.0.0.1:18000/v1/models`
 6. **检查** → Web 显示 running
 7. **日志** → Web 日志页面显示 command summary
