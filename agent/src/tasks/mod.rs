@@ -21,7 +21,7 @@ use crate::config::Config;
 use crate::heartbeat::RuntimeConfig;
 use crate::managed_process;
 use crate::models::{AgentConfig, AgentTaskPollRequest, AgentTaskResultRequest};
-use crate::platform_log::{self, LogPolicy};
+use crate::platform_log::{self, LogPolicy, AGENT_SERVICE_LOG_FILE};
 use crate::state::{self, AgentState};
 pub use cleanup::cleanup_model_file;
 use logs::{read_instance_log, ReadInstanceLogResult};
@@ -39,6 +39,35 @@ pub use result::{
 pub use runtime_check::check_runtime_environment;
 pub(crate) use runtime_check::verify_controlled_entrypoint;
 pub use verify_model::{verify_model_file, verify_model_file_with_hint};
+
+pub async fn read_agent_service_log(
+    log_policy: &LogPolicy,
+    payload: &serde_json::Value,
+) -> Result<String, String> {
+    let log_type = payload
+        .get("log_type")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if log_type != "agent_service" {
+        return Err("Agent log type is not allowed".to_string());
+    }
+    let file_name = payload
+        .get("file_name")
+        .and_then(|value| value.as_str())
+        .unwrap_or(AGENT_SERVICE_LOG_FILE);
+    if file_name != AGENT_SERVICE_LOG_FILE {
+        return Err("Agent log file is not allowed".to_string());
+    }
+    let max_bytes = payload
+        .get("max_bytes")
+        .and_then(|value| value.as_u64())
+        .unwrap_or(64 * 1024)
+        .min(512 * 1024) as usize;
+
+    platform_log::read_tail_existing(log_policy, AGENT_SERVICE_LOG_FILE, max_bytes)
+        .await
+        .map_err(|error| error.to_string())
+}
 
 pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
     let client = ServerClient::new(
@@ -119,7 +148,7 @@ pub async fn run_once(
 
     let _ = platform_log::append(
         log_policy,
-        "agent.log",
+        AGENT_SERVICE_LOG_FILE,
         "info",
         &format!("Agent starting task task_id={} kind={}", task.id, task.kind),
     )
@@ -159,13 +188,7 @@ pub async fn run_once(
             (status.to_string(), serde_json::to_value(result)?)
         }
         "read_agent_log" => {
-            let max_bytes = task
-                .payload
-                .get("max_bytes")
-                .and_then(|value| value.as_u64())
-                .unwrap_or(64 * 1024)
-                .min(512 * 1024) as usize;
-            let content = platform_log::read_tail(log_policy, "agent.log", max_bytes).await;
+            let content = read_agent_service_log(log_policy, &task.payload).await;
             match content {
                 Ok(content) => (
                     "succeeded".to_string(),

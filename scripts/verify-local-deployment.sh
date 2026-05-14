@@ -578,14 +578,13 @@ if ! $NO_RESTART; then
     echo "=== Agent verification ==="
 
     AGENT_LOG1="${AGENT_DIR}/logs/lightai-agent.log"
-    AGENT_LOG2="${AGENT_DIR}/logs/agent.log"
     AGENT_REGISTERED=false
 
     AGENT_CONNECT_EVIDENCE="Agent registered successfully\|registered successfully\|config_version=\|config updated\|GPU collector registry fetch\|GPU probe:"
 
     grep_agent_logs() {
         local pattern="$1"
-        (grep -q "$pattern" "$AGENT_LOG1" 2>/dev/null || grep -q "$pattern" "$AGENT_LOG2" 2>/dev/null)
+        grep -q "$pattern" "$AGENT_LOG1" 2>/dev/null
     }
 
     check_db_for_node() {
@@ -634,7 +633,7 @@ if ! $NO_RESTART; then
         FAIL_COUNT=$((FAIL_COUNT + 1))
     fi
 
-    if [ -f "$AGENT_LOG1" ] || [ -f "$AGENT_LOG2" ]; then
+    if [ -f "$AGENT_LOG1" ]; then
         if grep_agent_logs 'bearer [a-f0-9]\{32,\}'; then
             echo "  FAIL  Bearer token found in agent log"
             FAIL_COUNT=$((FAIL_COUNT + 1))

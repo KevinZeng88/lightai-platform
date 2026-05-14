@@ -679,3 +679,54 @@ async fn ollama_instance_log_refresh_payload_targets_daemon_log() {
         .unwrap()
         .contains("ollama daemon log tail"));
 }
+
+#[tokio::test]
+async fn agent_log_read_payload_targets_agent_service_log() {
+    let app = test_app().await;
+    let registered = register_node_json(app.clone()).await;
+    let node_id = registered["node_id"].as_str().unwrap();
+    let token = registered["agent_token"].as_str().unwrap();
+    heartbeat_node(app.clone(), node_id, token).await;
+
+    let logs_uri = format!("/api/logs?source_type=agent&node_id={node_id}&max_bytes=4096");
+    let logs_request = request(app.clone(), "GET", &logs_uri, None);
+    let agent = async {
+        let task = poll_agent_task(app.clone(), node_id, token).await;
+        assert_eq!(task["task"]["kind"], "read_agent_log");
+        assert_eq!(task["task"]["payload"]["log_type"], "agent_service");
+        assert_eq!(task["task"]["payload"]["file_name"], "lightai-agent.log");
+        assert_eq!(task["task"]["payload"]["max_bytes"], 4096);
+        let task_id = task["task"]["id"].as_str().unwrap();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/agent/tasks/{task_id}/result"))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                    .body(Body::from(
+                        json!({
+                            "node_id": node_id,
+                            "status": "succeeded",
+                            "result": {
+                                "log_status": "available",
+                                "content": "agent service log tail",
+                                "message": "Agent log read succeeded"
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+    };
+    let ((status, logs), _) = tokio::join!(logs_request, agent);
+    assert_eq!(status, StatusCode::OK);
+    assert!(logs["content"]
+        .as_str()
+        .unwrap()
+        .contains("agent service log tail"));
+}

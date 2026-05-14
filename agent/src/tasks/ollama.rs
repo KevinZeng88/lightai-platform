@@ -19,7 +19,7 @@ use tokio::time::Duration;
 
 use super::process_logs::sanitize_log;
 use super::result::{instance_failure, instance_failure_with_details, ModelInstanceTaskResult};
-use crate::platform_log::{self, LogPolicy};
+use crate::platform_log::{self, LogPolicy, AGENT_SERVICE_LOG_FILE};
 
 const OLLAMA_API_TIMEOUT_SECS: u64 = 10;
 const OLLAMA_START_TIMEOUT_SECS: u64 = 30;
@@ -250,7 +250,7 @@ async fn ensure_daemon(
 
             let _ = platform_log::append(
                 &LogPolicy::default(),
-                "agent.log",
+                AGENT_SERVICE_LOG_FILE,
                 "info",
                 &format!(
                     "ollama daemon started runtime={runtime_env_id} pid={pid} base_url={base_url}"
@@ -540,7 +540,7 @@ pub(crate) async fn stop_ollama_instance(payload: &serde_json::Value) -> ModelIn
         Ok(resp) => {
             let _ = platform_log::append(
                 &LogPolicy::default(),
-                "agent.log",
+                AGENT_SERVICE_LOG_FILE,
                 "warn",
                 &format!("ollama unload returned {} for {model_name}", resp.status()),
             )

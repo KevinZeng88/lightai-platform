@@ -6,7 +6,7 @@ use tokio::time::{timeout, Duration};
 
 use super::result::{instance_failure, instance_failure_with_details, ModelInstanceTaskResult};
 use crate::managed_process::ManagedProcessRecord;
-use crate::platform_log::{self, LogPolicy};
+use crate::platform_log::{self, LogPolicy, AGENT_SERVICE_LOG_FILE};
 
 const DOCKER_RUN_TIMEOUT_SECS: u64 = 60;
 const DOCKER_STOP_TIMEOUT_SECS: u64 = 30;
@@ -441,7 +441,7 @@ pub(crate) async fn start_docker_container(
         Err(message) => {
             let _ = platform_log::append(
                 &LogPolicy::default(),
-                "agent.log",
+                AGENT_SERVICE_LOG_FILE,
                 "error",
                 &format!("Docker start arg build failed instance_id={instance_id}: {message}"),
             )
@@ -473,7 +473,7 @@ pub(crate) async fn start_docker_container(
 
     let _ = platform_log::append(
         &LogPolicy::default(),
-        "agent.log",
+        AGENT_SERVICE_LOG_FILE,
         "info",
         &format!(
             "Docker start instance_id={instance_id} container_name={container_name} image={image} gpu={gpu} ipc={ipc} port={port_mapping} volumes=[{}] command_summary={command_summary}",
@@ -496,7 +496,7 @@ pub(crate) async fn start_docker_container(
         Ok(Err(error)) => {
             let _ = platform_log::append(
                 &LogPolicy::default(),
-                "agent.log",
+                AGENT_SERVICE_LOG_FILE,
                 "error",
                 &format!(
                     "Docker run process start failed instance_id={instance_id}: {error} command_summary={command_summary}"
@@ -512,7 +512,7 @@ pub(crate) async fn start_docker_container(
         Err(_) => {
             let _ = platform_log::append(
                 &LogPolicy::default(),
-                "agent.log",
+                AGENT_SERVICE_LOG_FILE,
                 "error",
                 &format!(
                     "Docker run timed out instance_id={instance_id} command_summary={command_summary}"
@@ -541,7 +541,7 @@ pub(crate) async fn start_docker_container(
         let stderr_summary: String = stderr_text.chars().take(4096).collect();
         let _ = platform_log::append(
             &LogPolicy::default(),
-            "agent.log",
+            AGENT_SERVICE_LOG_FILE,
             "error",
             &format!(
                 "Docker run failed instance_id={instance_id} container_name={container_name} detail={detail} command_summary={command_summary}"
@@ -559,7 +559,7 @@ pub(crate) async fn start_docker_container(
 
     let _ = platform_log::append(
         &LogPolicy::default(),
-        "agent.log",
+        AGENT_SERVICE_LOG_FILE,
         "info",
         &format!(
             "Docker container started instance_id={instance_id} container_id={container_id} container_name={container_name}"
@@ -621,7 +621,7 @@ pub(crate) async fn stop_docker_container(record: &ManagedProcessRecord) -> Resu
 
     let _ = platform_log::append(
         &LogPolicy::default(),
-        "agent.log",
+        AGENT_SERVICE_LOG_FILE,
         "info",
         &format!("Docker stop starting instance_id={instance_id} container_ref={container_ref}"),
     )
@@ -642,7 +642,7 @@ pub(crate) async fn stop_docker_container(record: &ManagedProcessRecord) -> Resu
         Ok(Err(e)) => {
             let _ = platform_log::append(
                 &LogPolicy::default(),
-                "agent.log",
+                AGENT_SERVICE_LOG_FILE,
                 "error",
                 &format!(
                     "Docker stop process failed instance_id={instance_id} container_ref={container_ref}: {e}"
@@ -654,7 +654,7 @@ pub(crate) async fn stop_docker_container(record: &ManagedProcessRecord) -> Resu
         Err(_) => {
             let _ = platform_log::append(
                 &LogPolicy::default(),
-                "agent.log",
+                AGENT_SERVICE_LOG_FILE,
                 "error",
                 &format!(
                     "Docker stop timed out instance_id={instance_id} container_ref={container_ref}"
@@ -669,7 +669,7 @@ pub(crate) async fn stop_docker_container(record: &ManagedProcessRecord) -> Resu
         let stderr = String::from_utf8_lossy(&output.stderr);
         let _ = platform_log::append(
             &LogPolicy::default(),
-            "agent.log",
+            AGENT_SERVICE_LOG_FILE,
             "error",
             &format!(
                 "Docker stop failed instance_id={instance_id} container_ref={container_ref}: {}",
@@ -682,7 +682,7 @@ pub(crate) async fn stop_docker_container(record: &ManagedProcessRecord) -> Resu
 
     let _ = platform_log::append(
         &LogPolicy::default(),
-        "agent.log",
+        AGENT_SERVICE_LOG_FILE,
         "info",
         &format!(
             "Docker container stopped instance_id={instance_id} container_ref={container_ref}"
@@ -806,7 +806,7 @@ pub(crate) async fn check_docker_record(
         Ok(status) => {
             let _ = platform_log::append(
                 &LogPolicy::default(),
-                "agent.log",
+                AGENT_SERVICE_LOG_FILE,
                 "debug",
                 &format!(
                     "Docker inspect instance_id={instance_id} container_ref={container_ref} running={} message={}",
@@ -822,7 +822,7 @@ pub(crate) async fn check_docker_record(
         Err(error) => {
             let _ = platform_log::append(
                 &LogPolicy::default(),
-                "agent.log",
+                AGENT_SERVICE_LOG_FILE,
                 "warn",
                 &format!(
                     "Docker inspect failed instance_id={instance_id} container_ref={container_ref}: {error}"

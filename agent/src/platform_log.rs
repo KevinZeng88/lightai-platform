@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+pub const AGENT_SERVICE_LOG_FILE: &str = "lightai-agent.log";
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct LogPolicy {
     #[serde(default = "default_log_dir")]
@@ -130,6 +132,25 @@ pub async fn read_tail(
     Ok(sanitize(&String::from_utf8_lossy(&bytes[start..])))
 }
 
+pub async fn read_tail_existing(
+    policy: &LogPolicy,
+    file_name: &str,
+    max_bytes: usize,
+) -> anyhow::Result<String> {
+    validate_policy(policy)?;
+    let dir = prepare_dir(&policy.log_dir).await?;
+    let file_path = safe_log_file(&dir, file_name)?;
+    let bytes = match tokio::fs::read(&file_path).await {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            anyhow::bail!("{}", missing_log_message(file_name))
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let start = bytes.len().saturating_sub(max_bytes);
+    Ok(sanitize(&String::from_utf8_lossy(&bytes[start..])))
+}
+
 pub fn sanitize(value: &str) -> String {
     value
         .lines()
@@ -173,11 +194,19 @@ async fn prepare_dir(value: &str) -> anyhow::Result<PathBuf> {
 fn safe_log_file(dir: &Path, file_name: &str) -> anyhow::Result<PathBuf> {
     if !matches!(
         file_name,
-        "server.log" | "lightai-agent.log" | "instance.log"
+        "server.log" | AGENT_SERVICE_LOG_FILE | "instance.log"
     ) {
         anyhow::bail!("log file is not managed by platform");
     }
     Ok(dir.join(file_name))
+}
+
+fn missing_log_message(file_name: &str) -> String {
+    if file_name == AGENT_SERVICE_LOG_FILE {
+        "Agent log file not found: logs/lightai-agent.log".to_string()
+    } else {
+        format!("Log file not found: logs/{file_name}")
+    }
 }
 
 async fn rotate_if_needed(

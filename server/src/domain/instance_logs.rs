@@ -20,7 +20,11 @@ pub async fn read_agent_log(
     }
     let task_id = Uuid::new_v4().to_string();
     let now = now_unix_secs();
-    let payload = serde_json::json!({ "max_bytes": max_bytes.min(512 * 1024) });
+    let payload = serde_json::json!({
+        "log_type": "agent_service",
+        "file_name": "lightai-agent.log",
+        "max_bytes": max_bytes.min(512 * 1024)
+    });
     sqlx::query(
         r#"
         INSERT INTO agent_tasks (

@@ -107,7 +107,7 @@ if [ ! -f "$CONFIG_FILE" ]; then
     exit 1
 fi
 
-nohup bin/lightai-agent --config "$CONFIG_FILE" > logs/agent-stdout.log 2> logs/agent-stderr.log &
+nohup bin/lightai-agent --config "$CONFIG_FILE" > logs/lightai-agent.log 2>&1 &
 echo $! > run/lightai-agent.pid
 echo "Agent started (pid $!)"
 SCRIPT

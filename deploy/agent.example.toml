@@ -18,7 +18,7 @@ state_path = "data/agent-state.toml"
 #
 # If [gpu_collectors] is NOT configured (root is absent), the Agent will NOT
 # execute any GPU collector scripts. The Web node page will show
-# "GPU collector not configured" and agent.log will contain a clear diagnostic.
+# "GPU collector not configured" and lightai-agent.log will contain a clear diagnostic.
 #
 # To enable GPU monitoring:
 #   1. Place collector files on the agent machine, e.g.
@@ -26,7 +26,7 @@ state_path = "data/agent-state.toml"
 #   2. Run: lightai-agent collector inspect /opt/lightai/collectors/gpu/nvidia-wsl
 #   3. Paste the JSON output into Web → collector registry
 #   4. Set root, mode, and enabled below
-#   5. Start the agent — agent.log will show "GPU collector discovered: id=nvidia ..."
+#   5. Start the agent — lightai-agent.log will show "GPU collector discovered: id=nvidia ..."
 #      and the first heartbeat will log a GPU probe summary.
 #
 # The framework is fail-closed: if the Server registry has no matching entry

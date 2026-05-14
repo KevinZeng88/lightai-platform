@@ -142,7 +142,7 @@ bash scripts/start-agent.sh
 检查 Agent 日志确认注册成功：
 
 ```bash
-tail -f logs/agent.log
+tail -f logs/lightai-agent.log
 # 预期看到：Agent registered, node_id=...
 ```
 
@@ -243,7 +243,7 @@ curl -sk https://127.0.0.1:18443/api/nonexistent-endpoint
 # 5. 初始化并启动 Agent
 bash scripts/init-agent.sh --server https://<服务器IP或域名>:18443 --name <节点名称>
 bash scripts/start-agent.sh
-# 检查日志: tail logs/agent.log
+# 检查日志: tail logs/lightai-agent.log
 
 # 6. Web 控制台
 # 浏览器打开 https://<服务器IP或域名>:18443/
@@ -307,7 +307,7 @@ Server 初始化后默认监听 HTTPS 18443。修改 `lightai-server.toml` 中 `
 ### Agent 连不上 Server
 
 检查 `lightai-agent.toml` 中 `[server].url` 和 `[server].ca_cert_path` 是否正确。
-检查 Agent 日志：`tail logs/agent.log`。
+检查 Agent 日志：`tail logs/lightai-agent.log`。
 
 ### 无 GPU 时的预期表现
 

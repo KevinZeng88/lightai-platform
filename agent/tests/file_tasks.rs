@@ -229,6 +229,94 @@ async fn platform_log_rotates_and_sanitizes_sensitive_lines() {
 }
 
 #[tokio::test]
+async fn agent_service_log_reads_lightai_agent_log() {
+    let log_dir = unique_temp_path("agent-service-log");
+    fs::create_dir_all(&log_dir).unwrap();
+    fs::write(log_dir.join("lightai-agent.log"), b"agent service line").unwrap();
+    let policy = LogPolicy {
+        log_dir: log_dir.to_string_lossy().to_string(),
+        ..LogPolicy::default()
+    };
+
+    let content = tasks::read_agent_service_log(
+        &policy,
+        &serde_json::json!({
+            "log_type": "agent_service",
+            "file_name": "lightai-agent.log",
+            "max_bytes": 4096
+        }),
+    )
+    .await
+    .unwrap();
+
+    assert!(content.contains("agent service line"));
+
+    let _ = fs::remove_file(log_dir.join("lightai-agent.log"));
+    let _ = fs::remove_dir(log_dir);
+}
+
+#[tokio::test]
+async fn agent_service_log_missing_file_reports_clear_error() {
+    let log_dir = unique_temp_path("missing-agent-service-log");
+    fs::create_dir_all(&log_dir).unwrap();
+    let policy = LogPolicy {
+        log_dir: log_dir.to_string_lossy().to_string(),
+        ..LogPolicy::default()
+    };
+
+    let error = tasks::read_agent_service_log(
+        &policy,
+        &serde_json::json!({
+            "log_type": "agent_service",
+            "file_name": "lightai-agent.log",
+            "max_bytes": 4096
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(error, "Agent log file not found: logs/lightai-agent.log");
+
+    let _ = fs::remove_dir(log_dir);
+}
+
+#[tokio::test]
+async fn agent_service_log_rejects_path_traversal_and_arbitrary_names() {
+    let log_dir = unique_temp_path("agent-service-log-rejects");
+    fs::create_dir_all(&log_dir).unwrap();
+    let policy = LogPolicy {
+        log_dir: log_dir.to_string_lossy().to_string(),
+        ..LogPolicy::default()
+    };
+
+    let traversal = tasks::read_agent_service_log(
+        &policy,
+        &serde_json::json!({
+            "log_type": "agent_service",
+            "file_name": "../config/agent.toml",
+            "max_bytes": 4096
+        }),
+    )
+    .await
+    .unwrap_err();
+    let arbitrary = tasks::read_agent_service_log(
+        &policy,
+        &serde_json::json!({
+            "log_type": "agent_service",
+            "file_name": "token.txt",
+            "max_bytes": 4096
+        }),
+    )
+    .await
+    .unwrap_err();
+
+    assert_eq!(traversal, "Agent log file is not allowed");
+    assert_eq!(arbitrary, "Agent log file is not allowed");
+
+    let _ = fs::remove_dir(log_dir);
+}
+
+#[tokio::test]
 async fn failed_instance_start_returns_stderr_and_command_summary() {
     let script = unique_temp_path("failing-llama-server");
     fs::write(

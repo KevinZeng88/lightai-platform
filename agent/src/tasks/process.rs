@@ -19,7 +19,7 @@ use super::{
     verify_model_file, ModelInstanceTaskResult,
 };
 use crate::managed_process::{self, ManagedProcessRecord};
-use crate::platform_log::{self, LogPolicy};
+use crate::platform_log::{self, LogPolicy, AGENT_SERVICE_LOG_FILE};
 use crate::tasks::docker_backend;
 use crate::tasks::probe::{
     endpoint_ready, ProbeConfig, CUSTOM_SCRIPT_STARTUP_WAIT_MS, POST_KILL_LOG_WAIT_MS,
@@ -835,7 +835,7 @@ fn spawn_process_monitor(instance_id: String, _managed_store_path: Option<PathBu
                     // Report status="failed" with specific reason; Server updates instance state accordingly.
                     let _ = platform_log::append(
                         &LogPolicy::default(),
-                        "agent.log",
+                        AGENT_SERVICE_LOG_FILE,
                         "warn",
                         &format!(
                             "managed instance process exited unexpectedly instance_id={instance_id} pid={pid} exit_status={status}; managed store retains record for next heartbeat reconcile, recent log: {}",

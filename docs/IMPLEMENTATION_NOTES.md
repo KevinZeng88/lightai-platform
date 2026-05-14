@@ -302,9 +302,9 @@ managed store 路径由 Agent state path 派生，形如 `agent-state.toml.manag
 
 Agent 只支持脚本化 GPU/加速卡 collector。未配置 `[gpu_collectors]` 时，Agent 不执行 GPU collector 脚本，也不会回退到旧的内置 `nvidia-smi` 或 custom JSON collector。
 
-Agent 启动时会输出 GPU collector 配置诊断日志（`agent.log`），明确显示配置状态、发现的 collector 目录和 hash。首次 heartbeat 周期会输出 GPU probe 日志，区分四种状态：
+Agent 启动时会输出 GPU collector 配置诊断日志（`lightai-agent.log`），明确显示配置状态、发现的 collector 目录和 hash。首次 heartbeat 周期会输出 GPU probe 日志，区分四种状态：
 
-| 状态 | 含义 | agent.log 级别 |
+| 状态 | 含义 | lightai-agent.log 级别 |
 |------|------|---------------|
 | `no_collector_configured` | 未配置 collector_root | WARN |
 | `collector_configured_but_failed` | collector 配置了但全部失败 | ERROR（含错误摘要） |

@@ -149,7 +149,7 @@ Web start/stop/test/check
 - Docker 容器由 Agent 通过 `docker run --detach` 启动，不默认加 `--rm`，保留异常退出后的 inspect/logs 诊断能力。
 - Agent 退出不停止容器；用户显式 stop 才执行 `docker stop`。
 - Docker 参数由 Model File 路径、Runtime `params_json` 和 Instance `params_json` 合并得到。
-- Docker 操作写入 agent.log 的 command summary，并进行脱敏。
+- Docker 操作写入 lightai-agent.log 的 command summary，并进行脱敏。
 
 ## 配置模型
 
