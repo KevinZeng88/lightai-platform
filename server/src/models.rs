@@ -570,6 +570,28 @@ pub struct AgentTaskResultRequest {
     pub result: serde_json::Value,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+pub struct GatewayTaskRequest {
+    pub binary_path: Option<String>,
+    pub config_path: Option<String>,
+    pub work_dir: Option<String>,
+    pub log_path: Option<String>,
+    pub state_path: Option<String>,
+    pub health_url: Option<String>,
+    pub max_bytes: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct GatewayTaskResponse {
+    pub gateway_status: String,
+    pub message: String,
+    pub process_id: Option<i64>,
+    pub process_ref: Option<String>,
+    pub health_url: Option<String>,
+    pub log_tail: Option<String>,
+    pub command: Option<String>,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ModelInstanceCreateRequest {
     pub model_id: Option<String>,

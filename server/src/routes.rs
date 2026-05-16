@@ -11,13 +11,13 @@ use tower_http::services::ServeDir;
 use crate::domain;
 use crate::models::{
     AgentConfigPolicy, AgentTaskPollRequest, AgentTaskResultRequest, AuditQuery, AuthResponse,
-    AuthUser, ChangePasswordRequest, CollectorRegistryEntry, FrontendErrorReport, GpuMetricsQuery,
-    HeartbeatRequest, HeartbeatResponse, LogQuery, LoginRequest, MetricsQuery, ModelFileRequest,
-    ModelFileTrashRequest, ModelInstanceCreateRequest, ModelInstanceUpdateRequest, ModelRequest,
-    RegisterCollectorRequest, RegisterRequest, RuntimeEnvironmentRequest, SetupAdminRequest,
-    SetupStatusResponse, UserCreateRequest, UserGroupCreateRequest, UserGroupListResponse,
-    UserGroupMembersRequest, UserGroupResponse, UserGroupUpdateRequest, UserListResponse,
-    UserUpdateRequest,
+    AuthUser, ChangePasswordRequest, CollectorRegistryEntry, FrontendErrorReport,
+    GatewayTaskRequest, GpuMetricsQuery, HeartbeatRequest, HeartbeatResponse, LogQuery,
+    LoginRequest, MetricsQuery, ModelFileRequest, ModelFileTrashRequest,
+    ModelInstanceCreateRequest, ModelInstanceUpdateRequest, ModelRequest, RegisterCollectorRequest,
+    RegisterRequest, RuntimeEnvironmentRequest, SetupAdminRequest, SetupStatusResponse,
+    UserCreateRequest, UserGroupCreateRequest, UserGroupListResponse, UserGroupMembersRequest,
+    UserGroupResponse, UserGroupUpdateRequest, UserListResponse, UserUpdateRequest,
 };
 use crate::platform_log::LogPolicy;
 use crate::repository;
@@ -183,6 +183,14 @@ pub fn app_with_web(
             "/api/model-instances/{id}/logs",
             post(refresh_instance_logs),
         )
+        .route("/api/nodes/{node_id}/gateway/start", post(start_gateway))
+        .route("/api/nodes/{node_id}/gateway/stop", post(stop_gateway))
+        .route(
+            "/api/nodes/{node_id}/gateway/restart",
+            post(restart_gateway),
+        )
+        .route("/api/nodes/{node_id}/gateway/check", post(check_gateway))
+        .route("/api/nodes/{node_id}/gateway/logs", post(read_gateway_log))
         .route("/api/model-file-trash", get(list_model_file_trash))
         .route("/api/ollama/models", get(list_ollama_models))
         .route("/api/logs", get(read_logs))
@@ -323,6 +331,9 @@ fn is_authorized_for_path(user: &AuthUser, method: &axum::http::Method, path: &s
         || path.starts_with("/api/model-file-trash")
     {
         return false;
+    }
+    if path.starts_with("/api/nodes/") && path.contains("/gateway/") {
+        return matches!(role, "admin" | "operator");
     }
     if role == "operator" {
         return true;
@@ -1494,6 +1505,83 @@ async fn refresh_instance_logs(
         content,
         message: Some("Instance log refreshed".to_string()),
     }))
+}
+
+async fn start_gateway(
+    State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
+    Path(node_id): Path<String>,
+    Json(request): Json<GatewayTaskRequest>,
+) -> Result<Json<crate::models::GatewayTaskResponse>, ApiError> {
+    let response = domain::start_gateway(&pool, &node_id, request).await?;
+    audit_gateway_action(&pool, &user, "gateway.start", &node_id, "success", None).await;
+    Ok(Json(response))
+}
+
+async fn stop_gateway(
+    State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
+    Path(node_id): Path<String>,
+    Json(request): Json<GatewayTaskRequest>,
+) -> Result<Json<crate::models::GatewayTaskResponse>, ApiError> {
+    let response = domain::stop_gateway(&pool, &node_id, request).await?;
+    audit_gateway_action(&pool, &user, "gateway.stop", &node_id, "success", None).await;
+    Ok(Json(response))
+}
+
+async fn restart_gateway(
+    State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
+    Path(node_id): Path<String>,
+    Json(request): Json<GatewayTaskRequest>,
+) -> Result<Json<crate::models::GatewayTaskResponse>, ApiError> {
+    let response = domain::restart_gateway(&pool, &node_id, request).await?;
+    audit_gateway_action(&pool, &user, "gateway.restart", &node_id, "success", None).await;
+    Ok(Json(response))
+}
+
+async fn check_gateway(
+    State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
+    Path(node_id): Path<String>,
+    Json(request): Json<GatewayTaskRequest>,
+) -> Result<Json<crate::models::GatewayTaskResponse>, ApiError> {
+    let response = domain::check_gateway(&pool, &node_id, request).await?;
+    audit_gateway_action(&pool, &user, "gateway.check", &node_id, "success", None).await;
+    Ok(Json(response))
+}
+
+async fn read_gateway_log(
+    State(pool): State<SqlitePool>,
+    Extension(user): Extension<AuthUser>,
+    Path(node_id): Path<String>,
+    Json(request): Json<GatewayTaskRequest>,
+) -> Result<Json<crate::models::GatewayTaskResponse>, ApiError> {
+    let response = domain::read_gateway_log(&pool, &node_id, request).await?;
+    audit_gateway_action(&pool, &user, "gateway.logs.read", &node_id, "success", None).await;
+    Ok(Json(response))
+}
+
+async fn audit_gateway_action(
+    pool: &SqlitePool,
+    user: &AuthUser,
+    action: &str,
+    node_id: &str,
+    status: &str,
+    error: Option<&str>,
+) {
+    audit_actor_result(
+        pool,
+        user,
+        action,
+        "gateway",
+        Some(node_id),
+        Some(node_id),
+        None,
+        status,
+        error,
+    )
+    .await;
 }
 
 async fn report_frontend_error(

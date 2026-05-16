@@ -18,6 +18,7 @@ mod verify_model;
 
 use crate::client::ServerClient;
 use crate::config::Config;
+use crate::gateway_supervisor::{self, GatewayProcessSpec};
 use crate::heartbeat::RuntimeConfig;
 use crate::managed_process;
 use crate::models::{AgentConfig, AgentTaskPollRequest, AgentTaskResultRequest};
@@ -85,6 +86,10 @@ pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
                 let log_policy = snapshot.log_policy;
                 let managed_store_path =
                     managed_process::store_path_from_state_path(&config.state_path);
+                let gateway_state_path =
+                    gateway_supervisor::gateway_state_path_from_agent_state_path(
+                        &config.state_path,
+                    );
                 match run_once(
                     &client,
                     &agent_state.agent_token,
@@ -92,6 +97,7 @@ pub async fn run(config: Config, runtime_config: Arc<RwLock<RuntimeConfig>>) {
                     &allowed_model_dirs,
                     current_config_version,
                     Some(&managed_store_path),
+                    Some(&gateway_state_path),
                     &log_policy,
                 )
                 .await
@@ -130,6 +136,7 @@ pub async fn run_once(
     allowed_model_dirs: &[String],
     current_config_version: i64,
     managed_store_path: Option<&Path>,
+    gateway_state_path: Option<&Path>,
     log_policy: &LogPolicy,
 ) -> anyhow::Result<Option<AgentConfig>> {
     let response = client
@@ -337,6 +344,83 @@ pub async fn run_once(
                 Err(e) => ("failed".to_string(), serde_json::json!({"message": e})),
             }
         }
+        "start_gateway" => {
+            let result = match gateway_spec_from_payload(&task.payload, gateway_state_path) {
+                Ok(spec) => gateway_supervisor::start_gateway(&spec).await,
+                Err(message) => gateway_failure(message),
+            };
+            let status = if result.gateway_status == "running" {
+                "succeeded"
+            } else {
+                "failed"
+            };
+            (status.to_string(), serde_json::to_value(result)?)
+        }
+        "stop_gateway" => {
+            let state_path = default_gateway_state_path(gateway_state_path);
+            let result = match state_path {
+                Ok(state_path) => gateway_supervisor::stop_gateway(&state_path).await,
+                Err(message) => gateway_failure(message),
+            };
+            let status = if result.gateway_status == "stopped" {
+                "succeeded"
+            } else {
+                "failed"
+            };
+            (status.to_string(), serde_json::to_value(result)?)
+        }
+        "restart_gateway" => {
+            let result = match gateway_spec_from_payload(&task.payload, gateway_state_path) {
+                Ok(spec) => {
+                    let stopped = gateway_supervisor::stop_gateway(&spec.state_path).await;
+                    if stopped.gateway_status == "failed" {
+                        stopped
+                    } else {
+                        gateway_supervisor::start_gateway(&spec).await
+                    }
+                }
+                Err(message) => gateway_failure(message),
+            };
+            let status = if result.gateway_status == "running" {
+                "succeeded"
+            } else {
+                "failed"
+            };
+            (status.to_string(), serde_json::to_value(result)?)
+        }
+        "check_gateway" => {
+            let state_path = default_gateway_state_path(gateway_state_path);
+            let result = match state_path {
+                Ok(state_path) => gateway_supervisor::check_gateway(&state_path).await,
+                Err(message) => gateway_failure(message),
+            };
+            let status = if result.gateway_status == "running" {
+                "succeeded"
+            } else {
+                "failed"
+            };
+            (status.to_string(), serde_json::to_value(result)?)
+        }
+        "read_gateway_log" => {
+            let state_path = default_gateway_state_path(gateway_state_path);
+            let max_bytes = task
+                .payload
+                .get("max_bytes")
+                .and_then(|value| value.as_u64())
+                .unwrap_or(64 * 1024) as usize;
+            let result = match state_path {
+                Ok(state_path) => {
+                    gateway_supervisor::read_gateway_log(&state_path, max_bytes).await
+                }
+                Err(message) => gateway_failure(message),
+            };
+            let status = if result.gateway_status == "log_available" {
+                "succeeded"
+            } else {
+                "failed"
+            };
+            (status.to_string(), serde_json::to_value(result)?)
+        }
         _ => (
             "failed".to_string(),
             serde_json::json!({
@@ -357,6 +441,52 @@ pub async fn run_once(
         )
         .await?;
     Ok(next_config)
+}
+
+fn gateway_spec_from_payload(
+    payload: &serde_json::Value,
+    default_state_path: Option<&Path>,
+) -> Result<GatewayProcessSpec, String> {
+    Ok(GatewayProcessSpec {
+        binary_path: required_path(payload, "binary_path")?,
+        config_path: required_path(payload, "config_path")?,
+        work_dir: required_path(payload, "work_dir")?,
+        log_path: required_path(payload, "log_path")?,
+        state_path: default_gateway_state_path(default_state_path)?,
+        health_url: payload
+            .get("health_url")
+            .and_then(|value| value.as_str())
+            .ok_or_else(|| "Gateway task missing health_url".to_string())?
+            .to_string(),
+    })
+}
+
+fn default_gateway_state_path(
+    default_state_path: Option<&Path>,
+) -> Result<std::path::PathBuf, String> {
+    default_state_path
+        .map(Path::to_path_buf)
+        .ok_or_else(|| "Gateway task missing state_path".to_string())
+}
+
+fn required_path(payload: &serde_json::Value, field: &str) -> Result<std::path::PathBuf, String> {
+    payload
+        .get(field)
+        .and_then(|value| value.as_str())
+        .map(Into::into)
+        .ok_or_else(|| format!("Gateway task missing {field}"))
+}
+
+fn gateway_failure(message: String) -> gateway_supervisor::GatewayTaskResult {
+    gateway_supervisor::GatewayTaskResult {
+        gateway_status: "failed".to_string(),
+        message,
+        process_id: None,
+        process_ref: None,
+        health_url: None,
+        log_tail: None,
+        command: None,
+    }
 }
 
 pub async fn test_model_instance(payload: &serde_json::Value) -> ModelInstanceTaskResult {
@@ -421,4 +551,26 @@ fn has_parent_dir(path: &str) -> bool {
     Path::new(path)
         .components()
         .any(|component| matches!(component, Component::ParentDir))
+}
+
+#[cfg(test)]
+mod gateway_task_tests {
+    use super::*;
+
+    #[test]
+    fn gateway_spec_uses_default_state_path_even_when_payload_contains_state_path() {
+        let default_state_path = Path::new("data/agent-state.toml.gateway.json");
+        let payload = serde_json::json!({
+            "binary_path": "/opt/lightai/bin/lightai-gateway",
+            "config_path": "gateway.toml",
+            "work_dir": "/opt/lightai",
+            "log_path": "logs/lightai-gateway.log",
+            "state_path": "/tmp/untrusted-gateway-state.json",
+            "health_url": "http://127.0.0.1:18082/health"
+        });
+
+        let spec = gateway_spec_from_payload(&payload, Some(default_state_path)).unwrap();
+
+        assert_eq!(spec.state_path, default_state_path);
+    }
 }

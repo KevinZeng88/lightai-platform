@@ -1,5 +1,6 @@
 pub use crate::agent_tasks::{notify_agent_tasks, poll_agent_task, record_agent_task_result};
 
+mod gateway;
 mod instance_logs;
 mod instances;
 mod model_catalog;
@@ -8,6 +9,7 @@ mod model_trash;
 mod runtimes;
 mod support;
 
+pub use gateway::{check_gateway, read_gateway_log, restart_gateway, start_gateway, stop_gateway};
 pub use instance_logs::{
     frontend_error_summary, ollama_model_list, read_agent_log, recent_error_summary,
     refresh_instance_logs,
