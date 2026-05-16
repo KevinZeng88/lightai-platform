@@ -2,6 +2,8 @@
 
 本文件是历史执行记录，用于了解已完成的结构整理。不要把其中的旧阶段约束当作当前必须遵守的开发计划；当前任务以 README、ARCHITECTURE、IMPLEMENTATION_NOTES 和用户请求为准。
 
+模型服务化、独立 Gateway 数据面、API Key、Usage、配额和成本核算属于后续规划，应在文档确认边界后分阶段开发；本文件不扩展为新的服务化方案文档。
+
 ## 已完成
 
 ### ✅ server/src/domain.rs 拆分

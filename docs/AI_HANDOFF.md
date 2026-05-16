@@ -71,6 +71,17 @@ v0.1 支持多种后端，生命周期语义不同，切勿混淆：
 8. 用户组只做成员关系和组角色继承；不要扩展成复杂 IAM。
 9. 当前角色只有 `admin`、`operator`、`viewer`；后端统一计算 `effective_role`。这是轻量内置角色，不是完整 RBAC。忘记密码通过 `lightai-server --reset-password <USERNAME> <PASSWORD>` 恢复。后端已实现最后一个 admin 保护。当前无用户删除功能。
 
+## 后续 AI/Codex 开发红线
+
+- 不要让业务应用绕过 LightAI 直接访问后端模型实例；未来业务流量路径应是“应用系统 -> Gateway -> 模型实例”。
+- 不要把“统一调用入口”理解成 Server 承载业务模型数据面；不要实现 Server 代理所有 `/v1/chat/completions` 等高并发业务模型请求，也不要因为第一阶段功能简单就把数据面临时塞进 Server。
+- 不要把 Agent 本体改造成业务 Gateway。Agent 可以托管 Gateway 进程生命周期，但不能承接 API Key 策略、计费、租户判断或业务路由决策。
+- Gateway 应作为独立数据面组件，受 Server 策略控制，并向 Server 异步上报 Usage。
+- 不要默认记录完整 prompt / response，不要同步记录每个 token 到数据库。后续 Usage 只应记录必要统计、错误摘要和审计信息。
+- 不要混淆控制面资源指标和业务调用用量。节点/GPU 指标是资源监控数据；Usage 是业务请求级调用记录。
+- 不要一次性大规模重构 `routes.rs` / `repository.rs`。服务化能力应先在文档确认边界，再分阶段、小步实现。
+- 不要新增复杂 IAM、SSO、多租户隔离、Kubernetes、高可用、复杂调度或新的外部推理平台依赖。底层运行时仍优先围绕 vLLM、llama.cpp、Ollama。
+
 ## 代码地图
 
 ```text
@@ -124,7 +135,7 @@ web/src/
 
 - Docker/vLLM 未在真实 GPU 环境完成完整验收。
 - Ollama 暂不支持自动 pull、GPU 可见性控制、多 daemon 调度。
-- 暂无 OpenAI-compatible API Gateway、API Key、额度、计量、GPU 调度。
+- 暂无独立 Gateway 数据面、OpenAI-compatible API、API Key、额度、计量、GPU 调度。
 - 手工 kill local 受管进程后，状态同步到 Web 最坏约 33 秒（Agent monitor 3s + heartbeat 15s + Web refresh 15s）。
 - 模型垃圾箱不支持批量清理、定时清理或目录递归删除。
 - 前端错误上报是 fire-and-forget，网络失败时静默丢失。
@@ -135,7 +146,7 @@ web/src/
 
 ## 后续阶段方向
 
-1. 第二阶段：OpenAI-compatible API Gateway、模型路由和调用认证。
+1. 第二阶段：独立 Gateway 数据面、OpenAI-compatible API、模型路由和调用认证。
 2. 第三阶段：API Key、部门/项目归属、额度、限流、调用统计。
 3. 第四阶段：GPU 资源调度、优先级、扩缩容和降级。
 4. 第五阶段：费用归集、SLA、审计分析、运营报表。

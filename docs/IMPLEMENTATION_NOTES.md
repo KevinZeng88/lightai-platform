@@ -2,7 +2,7 @@
 
 本文档记录较细的实现事实、数据流和注意事项。核心架构边界以 [ARCHITECTURE.md](ARCHITECTURE.md) 为准；本文随代码演进更新。
 
-当前实现属于第一阶段：GPU 服务器统一纳管、基础模型实例管理、Web 控制台、本地用户与用户组。统一模型调用 API、API Key、额度、计量、调用统计、GPU 调度优先级、扩缩容、降级和费用归集是后续阶段目标，本文件只记录当前已落地的实现事实。
+当前实现属于第一阶段：GPU 服务器统一纳管、基础模型实例管理、Web 控制台、本地用户与用户组。独立 Gateway 数据面、API Key、Usage、Quota、Cost、报表、治理、GPU 调度优先级、扩缩容和降级是后续阶段目标，本文件只记录当前已落地的实现事实。
 
 ## API 路径
 
@@ -284,6 +284,20 @@ managed store 路径由 Agent state path 派生，形如 `agent-state.toml.manag
 - **tower-http 承担的角色**：HTTP 基础设施层——静态文件服务、未来可按需启用 CORS、Trace、请求体大小限制、超时等通用 HTTP 中间件。
 - **tower-http 不承担的角色**：API Key 鉴权、租户隔离、额度控制、用量统计、计费、账单。这些是业务域概念，应设计为独立的领域模块或中间件。
 - 当前不实现计费，不新增 API Key，不新增额度控制，不新增账单表。
+
+### 后续扩展点：模型服务化与用量计量
+
+后续的 Service、API Key、Usage、Quota 和 Cost 应作为 Server 控制面业务能力分阶段实现。Gateway 是独立数据面能力，不应与 Server 控制面职责混淆。第一阶段可以只定义 Gateway 边界和托管方式，不要求立即实现完整转发、计费或路由能力。当前 `model_instances` 仍表示节点上的运行对象；未来 Service 才适合作为对外业务访问对象，并在后续阶段关联一个或多个 Instance。不要把现有 Instance 直接硬改成 Service 或多副本调度对象。
+
+Usage 与现有节点/GPU 指标不是一类数据：Usage 是业务请求级调用记录，关注 API Key、Service、模型、状态、耗时、输入/输出 token 和错误摘要等必要统计；节点/GPU 指标是资源监控数据，关注 CPU、内存、磁盘、GPU、实例状态和采样时间。两者可以在报表中关联分析，但不应混用同一语义或直接复用指标采样表。
+
+API Key 应独立于 Web session 登录。Web session 用于控制台用户访问；API Key 用于业务系统调用模型服务。后续可以结合用户组、项目、部门或业务系统做归属管理，但第一阶段不做完整商业账单、支付、套餐或复杂多租户。
+
+后续 Gateway 宜作为独立进程或独立二进制运行，可由 Agent 托管生命周期，但 Gateway 的业务策略来源仍应是 Server。API Key、Quota/Cost 策略和路由策略由 Server 管理，Gateway 执行本地校验、限流和数据面处理。Gateway 应避免每次请求强依赖 Server 同步查询，后续可通过策略缓存、配置刷新、异步 Usage 上报等方式降低控制面压力。Usage 写入不应阻塞主请求链路，后续应考虑请求结束后异步记录、批量上报或聚合；不应默认记录完整 prompt / response，不应同步记录每个 token 到数据库。
+
+不要把 `tower-http` 中间件、Server handler 或 Agent 本体描述成完整 Gateway。Server 不默认承载业务模型流量，也不作为高并发模型调用数据面；业务流量路径应是“应用系统 -> Gateway -> 模型实例”，管理路径应是“Web -> Server -> agent_tasks -> Agent -> Runtime / Instance / Gateway”。
+
+后续抽象 Runtime/Instance 时，必须保留 Ollama、Docker、本地进程三种生命周期差异。不要为了统一概念而强行把它们抽象成完全一致的实现：Ollama 是共享 daemon + 逻辑模型，Docker 是容器，本地 binary 是独立进程。
 
 ### 内置角色与权限模型
 
