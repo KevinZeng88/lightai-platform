@@ -1,6 +1,7 @@
 pub mod client;
 pub mod collector;
 pub mod config;
+pub mod gateway_supervisor;
 pub mod gpu;
 pub mod heartbeat;
 pub mod managed_process;

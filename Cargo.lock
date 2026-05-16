@@ -1008,6 +1008,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "lightai-gateway"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "serde",
+ "serde_json",
+ "tokio",
+ "toml",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "lightai-server"
 version = "0.1.0"
 dependencies = [
