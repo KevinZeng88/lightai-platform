@@ -293,9 +293,15 @@ Usage 与现有节点/GPU 指标不是一类数据：Usage 是业务请求级调
 
 API Key 应独立于 Web session 登录。Web session 用于控制台用户访问；API Key 用于业务系统调用模型服务。后续可以结合用户组、项目、部门或业务系统做归属管理，但第一阶段不做完整商业账单、支付、套餐或复杂多租户。
 
+Usage 应先于 Quota 和 Cost 落地。合理顺序是：Service 定义业务访问对象，API Key 提供调用身份，Gateway 在请求结束后采集必要 Usage 并异步上报，Server 做 Usage 汇总和审计；Quota 后续基于 Usage 聚合和 API Key / Service 归属做限制；Cost 再基于 Usage 和成本口径做归集、报表和治理。不要在 Usage 语义稳定前设计完整计费、支付、套餐、发票或复杂预算审批。
+
 后续 Gateway 宜作为独立进程或独立二进制运行，可由 Agent 托管生命周期，但 Gateway 的业务策略来源仍应是 Server。API Key、Quota/Cost 策略和路由策略由 Server 管理，Gateway 执行本地校验、限流和数据面处理。Gateway 应避免每次请求强依赖 Server 同步查询，后续可通过策略缓存、配置刷新、异步 Usage 上报等方式降低控制面压力。Usage 写入不应阻塞主请求链路，后续应考虑请求结束后异步记录、批量上报或聚合；不应默认记录完整 prompt / response，不应同步记录每个 token 到数据库。
 
 不要把 `tower-http` 中间件、Server handler 或 Agent 本体描述成完整 Gateway。Server 不默认承载业务模型流量，也不作为高并发模型调用数据面；业务流量路径应是“应用系统 -> Gateway -> 模型实例”，管理路径应是“Web -> Server -> agent_tasks -> Agent -> Runtime / Instance / Gateway”。
+
+后续代码实现建议先落在独立 Gateway 进程骨架和 Agent 侧托管边界，不要一开始就扩展数据库、Web 页面或完整控制面 API。Gateway 可作为新的 workspace package，与 `lightai-server`、`lightai-agent` 并列；第一轮只验证独立启动、本地配置、日志和健康检查等进程边界，不实现 OpenAI-compatible API、模型转发、API Key、Usage、Quota 或 Cost。
+
+Agent 侧应新增 Gateway 专属 supervisor 逻辑，复用现有 `agent_tasks` 控制面边界接收任务，但不要把 `managed_process.rs` 过早泛化成通用进程平台，也不要把 Gateway 业务策略写入 Agent。Server 侧后续可在现有 domain / repository / routes 结构中小步增加控制面能力，避免一次性大规模拆分 `routes.rs` 或 `repository.rs`。
 
 后续抽象 Runtime/Instance 时，必须保留 Ollama、Docker、本地进程三种生命周期差异。不要为了统一概念而强行把它们抽象成完全一致的实现：Ollama 是共享 daemon + 逻辑模型，Docker 是容器，本地 binary 是独立进程。
 

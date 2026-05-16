@@ -78,9 +78,19 @@ v0.1 支持多种后端，生命周期语义不同，切勿混淆：
 - 不要把 Agent 本体改造成业务 Gateway。Agent 可以托管 Gateway 进程生命周期，但不能承接 API Key 策略、计费、租户判断或业务路由决策。
 - Gateway 应作为独立数据面组件，受 Server 策略控制，并向 Server 异步上报 Usage。
 - 不要默认记录完整 prompt / response，不要同步记录每个 token 到数据库。后续 Usage 只应记录必要统计、错误摘要和审计信息。
+- 不要在 Usage 语义稳定前先做完整 Cost 或商业计费系统。Quota 和 Cost 应依赖 Service、API Key、Gateway Usage 采集与 Server 汇总逐步建设。
 - 不要混淆控制面资源指标和业务调用用量。节点/GPU 指标是资源监控数据；Usage 是业务请求级调用记录。
 - 不要一次性大规模重构 `routes.rs` / `repository.rs`。服务化能力应先在文档确认边界，再分阶段、小步实现。
 - 不要新增复杂 IAM、SSO、多租户隔离、Kubernetes、高可用、复杂调度或新的外部推理平台依赖。底层运行时仍优先围绕 vLLM、llama.cpp、Ollama。
+
+## Gateway / 服务化落地顺序
+
+1. 先新增独立 Gateway 进程骨架，保持与 Server、Agent 并列的组件边界；第一轮只验证启动、配置、日志和健康检查，不实现业务模型转发。
+2. 再让 Agent 以本地 supervisor 方式托管 Gateway 生命周期，通过 `agent_tasks` 接收 Server 控制面任务；Agent 不承接 API Key、计费、租户判断或业务路由策略。
+3. 然后由 Server 增加 Gateway 配置、策略、状态和审计等控制面管理能力；Server 不代理业务模型流量。
+4. Gateway 边界稳定后，先引入 Service、API Key 和 Usage，再基于 Usage 聚合推进 Quota、Cost 和报表治理。
+
+第一轮代码任务不要新增数据库迁移、Server API、Web 页面、具体表结构、字段名、状态枚举或外部推理平台依赖，也不要改动现有实例生命周期、Agent 心跳、日志审计、GPU collector 和 Runtime 检查主路径。
 
 ## 代码地图
 
